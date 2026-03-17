@@ -1,5 +1,6 @@
 using BitNetSharp.App;
 using BitNetSharp.Core;
+using BitNetSharp.Core.Quantization;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -7,26 +8,21 @@ var command = args.FirstOrDefault()?.ToLowerInvariant() ?? "chat";
 var prompt = args.Length > 1 ? string.Join(' ', args.Skip(1)) : "hello";
 var verbosity = ParseVerbosity(args);
 
-var (model, trainingReport) = BitNetBootstrap.CreateSeededModel(verbosity);
+var model = BitNetBootstrap.CreatePaperModel(verbosity);
 using var host = BitNetAgentHost.Build(model);
-var visualizer = new BitNetVisualizer();
 var hostSummary = host.Services.GetRequiredService<BitNetHostSummary>();
 
 switch (command)
 {
     case "train":
-        Console.WriteLine($"Samples seen: {trainingReport.SamplesSeen}");
-        Console.WriteLine($"Average loss: {trainingReport.AverageLoss:0.000}");
-        Console.WriteLine(visualizer.CreateReport(trainingReport).LossChart);
+        Console.WriteLine("Paper-aligned transformer training is not implemented yet in this branch.");
+        Console.WriteLine(FormatModelSummary(model));
         break;
 
     case "visualize":
-        var visualization = visualizer.CreateReport(trainingReport);
-        Console.WriteLine(visualization.LossChart);
+        Console.WriteLine(FormatModelSummary(model));
         Console.WriteLine();
-        Console.WriteLine(visualization.WeightHistogram);
-        Console.WriteLine();
-        Console.WriteLine(visualization.Csv.TrimEnd());
+        Console.WriteLine(FormatWeightHistogram(model.GetTernaryWeightStats()));
         break;
 
     case "host":
@@ -54,6 +50,40 @@ switch (command)
         }
 
         break;
+}
+
+static string FormatModelSummary(BitNetPaperModel model) =>
+    string.Join(
+        Environment.NewLine,
+        [
+            "Paper-aligned BitNet b1.58 transformer",
+            $"Vocabulary size: {model.Config.VocabSize}",
+            $"Layers: {model.Config.LayerCount}",
+            $"Dimension: {model.Config.Dimension}",
+            $"Hidden dimension: {model.Config.HiddenDimension}",
+            $"Heads: {model.Config.HeadCount}",
+            $"Max sequence length: {model.Config.MaxSequenceLength}"
+        ]);
+
+static string FormatWeightHistogram(TernaryWeightStats stats)
+{
+    var max = Math.Max(stats.NegativeCount, Math.Max(stats.ZeroCount, stats.PositiveCount));
+    max = Math.Max(max, 1);
+
+    return string.Join(
+        Environment.NewLine,
+        [
+            "Ternary weight distribution",
+            FormatBar("-1", stats.NegativeCount, max),
+            FormatBar(" 0", stats.ZeroCount, max),
+            FormatBar("+1", stats.PositiveCount, max)
+        ]);
+}
+
+static string FormatBar(string label, int value, int max)
+{
+    var width = Math.Max(1, (int)Math.Round(value / (double)max * 20d));
+    return $"{label}: {new string('#', width)} {value}";
 }
 
 static VerbosityLevel ParseVerbosity(string[] args)

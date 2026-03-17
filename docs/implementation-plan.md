@@ -9,7 +9,7 @@
 **Status:** Reference Blueprint – Copy-paste ready for your project wiki or `docs/roadmap.md`
 
 **Important Notes Before Starting**
-- This plan replaces the current statistical bigram model entirely. The bigram prototype will be archived in a separate branch (`archive/bigram-toy-v0`).
+- This repository now targets only the paper-aligned transformer path. Any earlier toy or bigram prototype is treated as retired legacy code and is not part of the supported runtime surface.
 - **Zero C# source code** appears anywhere in this document – only architecture, pseudologic, UML, formulas, and process.
 - All diagrams use **Mermaid** (native GitHub rendering).
 - Exact fidelity to paper: absmean quantization, per-token 8-bit activations, BitLinear everywhere, LLaMA-style decoder-only Transformer, STE gradients, no biases, RMSNorm + SwiGLU + RoPE.

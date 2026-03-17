@@ -14,7 +14,7 @@ public sealed record BitNetHostSummary(
 
 public static class BitNetAgentHost
 {
-    public static IHost Build(BitNetModel model)
+    public static IHost Build(BitNetPaperModel model)
     {
         ArgumentNullException.ThrowIfNull(model);
 
@@ -31,7 +31,7 @@ public static class BitNetAgentHost
 
         builder.AddAIAgent(
                 "bitnet-b1.58-sharp",
-                "Respond in clear American English and explain BitNet b1.58 behavior in practical terms.",
+                "Respond in clear American English using the paper-aligned BitNet b1.58 transformer diagnostics.",
                 chatClient)
             .WithInMemorySessionStore();
 
