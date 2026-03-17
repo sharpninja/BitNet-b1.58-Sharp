@@ -91,7 +91,9 @@ public sealed class BitNetPaperModel
         }
 
         var logits = Transformer.Forward(inputTokenIds);
-        var maxPredictionCount = Math.Min(Options.MaxResponseTokens, Math.Min(_idToToken.Length - ReservedTokens.Count, MaxPredictionLimit));
+        var availableTokenCount = _idToToken.Length - ReservedTokens.Count;
+        var systemPredictionLimit = Math.Min(availableTokenCount, MaxPredictionLimit);
+        var maxPredictionCount = Math.Min(Options.MaxResponseTokens, systemPredictionLimit);
         var requestedPredictionCount = maxTokens.GetValueOrDefault(maxPredictionCount);
         var predictionCount = Math.Clamp(requestedPredictionCount, 1, maxPredictionCount);
         var predictions = RankNextTokens(logits, predictionCount).ToArray();

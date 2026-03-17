@@ -83,6 +83,7 @@ static string FormatWeightHistogram(TernaryWeightStats stats)
 static string FormatBar(string label, int value, int max)
 {
     const int HistogramMaxBarWidth = 20;
+    // Twenty columns keeps the console histogram readable without wrapping typical terminals.
     var width = Math.Max(1, (int)Math.Round(value / (double)max * HistogramMaxBarWidth));
     return $"{label}: {new string('#', width)} {value}";
 }
