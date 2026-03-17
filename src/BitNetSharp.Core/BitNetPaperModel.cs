@@ -55,6 +55,7 @@ public sealed class BitNetPaperModel
             throw new ArgumentException($"The BitNetConfig vocabulary size ({Config.VocabSize}) must match the tokenizer vocabulary size ({_idToToken.Length}).", nameof(config));
         }
 
+        // Use a deterministic default so the seeded paper model stays stable in tests and CLI inspection.
         Transformer = new BitNetTransformer(Config, seed);
     }
 
@@ -98,9 +99,9 @@ public sealed class BitNetPaperModel
         var logits = Transformer.Forward(inputTokenIds);
         var availableTokenCount = _idToToken.Length - ReservedTokens.Count;
         var systemPredictionLimit = Math.Min(availableTokenCount, MaxPredictionLimit);
-        var maxPredictionCount = Math.Min(Options.MaxResponseTokens, systemPredictionLimit);
-        var requestedPredictionCount = maxTokens.GetValueOrDefault(maxPredictionCount);
-        var predictionCount = Math.Clamp(requestedPredictionCount, 1, maxPredictionCount);
+        var defaultPredictionCount = Math.Min(Options.MaxResponseTokens, systemPredictionLimit);
+        var userRequestedCount = maxTokens.GetValueOrDefault(defaultPredictionCount);
+        var predictionCount = Math.Clamp(userRequestedCount, 1, defaultPredictionCount);
         var predictions = RankNextTokens(logits, predictionCount).ToArray();
 
         if (Options.Verbosity == VerbosityLevel.Verbose)

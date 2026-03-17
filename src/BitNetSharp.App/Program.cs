@@ -72,25 +72,26 @@ static string FormatWeightHistogram(TernaryWeightStats stats)
 {
     var max = Math.Max(stats.NegativeCount, Math.Max(stats.ZeroCount, stats.PositiveCount));
     max = Math.Max(max, 1);
+    var scale = DefaultHistogramWidth / (double)max;
 
     return string.Join(
         Environment.NewLine,
         [
             "Ternary weight distribution",
-            FormatBar("-1", stats.NegativeCount, max),
-            FormatBar(" 0", stats.ZeroCount, max),
-            FormatBar("+1", stats.PositiveCount, max)
+            FormatBar("-1", stats.NegativeCount, max, scale),
+            FormatBar(" 0", stats.ZeroCount, max, scale),
+            FormatBar("+1", stats.PositiveCount, max, scale)
         ]);
 }
 
-static string FormatBar(string label, int value, int max)
+static string FormatBar(string label, int value, int max, double scale)
 {
     if (max <= 0)
     {
         return $"{label}:  {value}";
     }
 
-    var width = Math.Max(0, (int)Math.Round(value / (double)max * DefaultHistogramWidth));
+    var width = Math.Max(0, (int)Math.Round(value * scale));
     return $"{label}: {new string('#', width)} {value}";
 }
 
