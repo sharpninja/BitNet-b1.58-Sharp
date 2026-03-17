@@ -4,6 +4,8 @@ using BitNetSharp.Core.Quantization;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 
+const int MaxHistogramBarWidth = 20;
+
 var command = args.FirstOrDefault()?.ToLowerInvariant() ?? "chat";
 var prompt = args.Length > 1 ? string.Join(' ', args.Skip(1)) : "hello";
 var verbosity = ParseVerbosity(args);
@@ -82,7 +84,7 @@ static string FormatWeightHistogram(TernaryWeightStats stats)
 
 static string FormatBar(string label, int value, int max)
 {
-    var width = Math.Max(1, (int)Math.Round(value / (double)max * 20d));
+    var width = Math.Max(1, (int)Math.Round(value / (double)max * MaxHistogramBarWidth));
     return $"{label}: {new string('#', width)} {value}";
 }
 

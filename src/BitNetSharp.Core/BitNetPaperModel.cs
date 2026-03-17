@@ -5,6 +5,13 @@ namespace BitNetSharp.Core;
 
 public sealed class BitNetPaperModel
 {
+    private static readonly HashSet<string> ReservedTokens =
+    [
+        BitNetTokenizer.BeginToken,
+        BitNetTokenizer.EndToken,
+        BitNetTokenizer.UnknownToken
+    ];
+
     private readonly int _beginTokenId;
     private readonly int _endTokenId;
     private readonly Dictionary<string, int> _tokenToId;
@@ -23,7 +30,7 @@ public sealed class BitNetPaperModel
             BitNetTokenizer.UnknownToken,
             .. options.Vocabulary
                 .Select(token => token.ToLowerInvariant())
-                .Where(token => token is not BitNetTokenizer.BeginToken and not BitNetTokenizer.EndToken and not BitNetTokenizer.UnknownToken)
+                .Where(token => !ReservedTokens.Contains(token))
                 .Distinct(StringComparer.Ordinal)
         ];
 
@@ -82,7 +89,9 @@ public sealed class BitNetPaperModel
         }
 
         var logits = Transformer.Forward(inputTokenIds);
-        var predictionCount = Math.Clamp(maxTokens.GetValueOrDefault(Math.Min(Options.MaxResponseTokens, 8)), 1, Math.Min(Options.MaxResponseTokens, _idToToken.Length - 3));
+        var maxPredictionCount = Math.Min(Options.MaxResponseTokens, Math.Min(_idToToken.Length - ReservedTokens.Count, 8));
+        var requestedPredictionCount = maxTokens.GetValueOrDefault(maxPredictionCount);
+        var predictionCount = Math.Clamp(requestedPredictionCount, 1, maxPredictionCount);
         var predictions = RankNextTokens(logits, predictionCount).ToArray();
 
         if (Options.Verbosity == VerbosityLevel.Verbose)
