@@ -40,6 +40,11 @@ public sealed class BitNetPaperModel
             .Select((token, index) => new { token, index })
             .ToDictionary(item => item.token, item => item.index, StringComparer.Ordinal);
 
+        if (_idToToken.Length <= ReservedTokens.Count)
+        {
+            throw new ArgumentException("The paper model vocabulary must include at least one non-special token.", nameof(options));
+        }
+
         _beginTokenId = _tokenToId[BitNetTokenizer.BeginToken];
         _endTokenId = _tokenToId[BitNetTokenizer.EndToken];
         _tokenizer = new BitNetTokenizer(_idToToken);
