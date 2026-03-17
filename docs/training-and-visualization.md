@@ -33,86 +33,68 @@ The default implementation is intentionally small so the repository remains easy
 
 ### 1. Creating Custom Training Examples
 
-A `TrainingExample` represents a single prompt/response pair for the LLM to learn from. You can construct these inline, read them from a JSON file, or pull them from a database.
+`TrainingExample` is a positional record with two required constructor parameters: `Prompt` and `Response`. You can construct instances inline, read them from a JSON file, or pull them from a database.
 
 ```csharp
 using System.Collections.Generic;
-using BitNetSharp.Core; // Replace with actual namespaces
-using BitNetSharp.Training;
+using BitNetSharp.Core;
 
-// Define a custom dataset
+// Define a custom dataset using the positional record constructor
 var customCorpus = new List<TrainingExample>
 {
-    new TrainingExample 
-    { 
-        Prompt = "What is the capital of France?", 
-        Response = "Paris" 
-    },
-    new TrainingExample 
-    { 
-        Prompt = "Explain BitNet b1.58.", 
-        Response = "BitNet b1.58 is a 1-bit LLM architecture where weights are ternary: -1, 0, or 1." 
-    },
-    new TrainingExample 
-    { 
-        Prompt = "Write a C# console greeting.", 
-        Response = "Console.WriteLine(\"Hello, World!\");" 
-    }
+    new TrainingExample("What is the capital of France?", "Paris"),
+    new TrainingExample(
+        "Explain BitNet b1.58.",
+        "BitNet b1.58 is a 1-bit LLM architecture where weights are ternary: -1, 0, or 1."),
+    new TrainingExample(
+        "Write a C# console greeting.",
+        "Console.WriteLine(\"Hello, World!\");")
 };
 ```
 
-### 2. Configuring the Trainer
+### 2. Instantiating the Trainer
 
-Before starting the training process, instantiate the `BitNetTrainer`. Depending on the API, you may want to pass hyperparameters such as the learning rate, number of epochs, and batch size.
+`BitNetTrainer` is constructed with a `BitNetModel`. Create a model first, then pass it to the trainer.
 
 ```csharp
-// Example configuration for the trainer
-var trainerOptions = new TrainerOptions
-{
-    MaxEpochs = 100,
-    LearningRate = 1e-3f,
-    BatchSize = 8,
-    // Determines how often to report loss metrics
-    LogInterval = 10 
-};
+using BitNetSharp.Core;
 
-var trainer = new BitNetTrainer(trainerOptions);
+// Create a model with the default vocabulary
+var model = BitNetModel.CreateDefault();
+
+// Wrap it in a trainer
+var trainer = new BitNetTrainer(model);
 ```
 
 ### 3. Running the Training Loop
 
-Pass your dataset into the `Train` method. The trainer will apply the b1.58 quantization strategy during the forward/backward passes, ensuring the final weights adhere to the ternary constraints.
+Pass your dataset and the number of epochs into `Train`. It returns a `TrainingReport` that summarises loss history and the ternary weight distribution.
 
 ```csharp
 Console.WriteLine("Starting training...");
 
-// Execute training. You can optionally hook into callbacks to report progress.
-var trainedModel = trainer.Train(customCorpus, (epoch, metrics) =>
-{
-    Console.WriteLine($"[Epoch {epoch}] Loss: {metrics.AverageLoss:F4}");
-});
+// Run 10 training epochs over the custom corpus
+TrainingReport report = trainer.Train(customCorpus, epochs: 10);
 
-Console.WriteLine("Training completed successfully!");
+Console.WriteLine($"Training completed. Average loss: {report.AverageLoss:F4}");
+Console.WriteLine($"Epochs: {report.Epochs}, Samples seen: {report.SamplesSeen}");
+Console.WriteLine($"Weights — negative: {report.NegativeWeights}, " +
+                  $"zero: {report.ZeroWeights}, positive: {report.PositiveWeights}");
 ```
 
-### 4. Saving and Loading the Model
+### 4. Running Inference
 
-Once your model has learned from the custom corpus, you should save the quantized weights to disk so you can load them later for inference without retraining.
+After training, call `GenerateResponse` on the model to produce a response. The method returns a `BitNetGenerationResult` whose `ResponseText` property contains the decoded output.
 
 ```csharp
-// Save the trained ternary weights
-string modelOutputPath = "models/custom-bitnet-v1.bin";
-trainedModel.Save(modelOutputPath);
-Console.WriteLine($"Model saved to {modelOutputPath}");
-
-// Later, load the model for inference
-var loadedModel = BitNetModel.Load(modelOutputPath);
-var response = loadedModel.Generate("What is the capital of France?");
-Console.WriteLine($"Model Output: {response}");
+BitNetGenerationResult result = model.GenerateResponse("What is the capital of France?");
+Console.WriteLine($"Model output: {result.ResponseText}");
 ```
+
+> **Note:** Model persistence (save/load) is not yet implemented. To reuse a trained model across sessions, re-run training at startup or extend `BitNetModel` with your own serialization logic.
 
 ### Tips for Training
 
 * **Data Formatting:** Ensure your prompts and responses are cleaned and tokenized using the same tokenizer the model expects during inference.
-* **Epochs:** Because weights are heavily quantized, training dynamics differ from standard FP16 LLMs. You may need to experiment with the learning rate and epochs to ensure convergence without catastrophic forgetting.
+* **Epochs:** Because weights are heavily quantized, training dynamics differ from standard FP16 LLMs. You may need to experiment with the number of epochs to ensure convergence without catastrophic forgetting.
 * **Batching:** Group examples of similar token lengths together to optimize processing time if padding is required.
