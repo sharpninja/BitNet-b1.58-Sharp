@@ -17,6 +17,7 @@ public sealed record BitNetConfig
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(layerCount);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(headCount);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(maxSequenceLength);
+        ArgumentOutOfRangeException.ThrowIfNegative(rmsNormEpsilon);
 
         if (dimension % headCount != 0)
         {
