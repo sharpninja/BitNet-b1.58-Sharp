@@ -1,0 +1,10 @@
+next-version: 0.1.0
+mode: ContinuousDelivery
+tag-prefix: '[vV]?'
+branches:
+  main:
+    increment: Patch
+    label: ''
+  pull-request:
+    increment: Patch
+    label: PullRequest

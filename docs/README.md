@@ -24,5 +24,6 @@ dotnet test /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/BitNet-b1.58
 
 - [Architecture](architecture.md)
 - [Implementation plan](implementation-plan.md)
+- [Releases and packaging](releases-and-packaging.md)
 - [Usage](usage.md)
 - [Training and visualization](training-and-visualization.md)
