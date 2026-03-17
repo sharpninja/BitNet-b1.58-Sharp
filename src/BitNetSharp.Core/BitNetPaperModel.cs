@@ -5,6 +5,8 @@ namespace BitNetSharp.Core;
 
 public sealed class BitNetPaperModel
 {
+    private const int MaxPredictionLimit = 8;
+
     private static readonly HashSet<string> ReservedTokens =
     [
         BitNetTokenizer.BeginToken,
@@ -89,7 +91,7 @@ public sealed class BitNetPaperModel
         }
 
         var logits = Transformer.Forward(inputTokenIds);
-        var maxPredictionCount = Math.Min(Options.MaxResponseTokens, Math.Min(_idToToken.Length - ReservedTokens.Count, 8));
+        var maxPredictionCount = Math.Min(Options.MaxResponseTokens, Math.Min(_idToToken.Length - ReservedTokens.Count, MaxPredictionLimit));
         var requestedPredictionCount = maxTokens.GetValueOrDefault(maxPredictionCount);
         var predictionCount = Math.Clamp(requestedPredictionCount, 1, maxPredictionCount);
         var predictions = RankNextTokens(logits, predictionCount).ToArray();
