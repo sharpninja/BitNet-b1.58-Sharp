@@ -5,6 +5,7 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <PackageId>BitNetSharp.Core</PackageId>
+    <Version>1.0.0</Version>
     <Description>Paper-aligned BitNet b1.58 transformer runtime for .NET.</Description>
   </PropertyGroup>
 
