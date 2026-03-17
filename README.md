@@ -1,2 +1,6 @@
 # BitNet-b1.58-Sharp
-C# Implementation of BitNet b1.58
+
+Project documentation now lives in GitBook format under `/docs`.
+
+- Start here: [`/docs/README.md`](docs/README.md)
+- Navigation: [`/docs/SUMMARY.md`](docs/SUMMARY.md)
