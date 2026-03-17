@@ -8,11 +8,11 @@ dotnet build /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/BitNet-b1.5
 
 ## Chat
 
+The chat command inspects the paper-aligned transformer and reports its top next-token predictions for the supplied prompt.
+
 ```bash
 dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- chat "how are you hosted"
 ```
-
-The chat command now inspects the paper-aligned transformer and reports its top next-token predictions for the supplied prompt.
 
 Optional verbosity:
 

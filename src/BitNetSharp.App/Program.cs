@@ -84,6 +84,11 @@ static string FormatBar(string label, int value, int max)
 {
     const int HistogramMaxBarWidth = 20;
     // Twenty columns keeps the console histogram readable without wrapping typical terminals.
+    if (max <= 0)
+    {
+        return $"{label}:  {value}";
+    }
+
     var width = Math.Max(0, (int)Math.Round(value / (double)max * HistogramMaxBarWidth));
     return $"{label}: {new string('#', width)} {value}";
 }
