@@ -31,6 +31,18 @@ public sealed class BitNetModelTests
     }
 
     [Fact]
+    public void GeneratedResponseUsesTernaryPredictionsForUnmemorizedPrompt()
+    {
+        var model = new BitNetModel(new BitNetOptions(["alpha", "beta", "gamma"], VerbosityLevel.Quiet));
+        model.Train([new TrainingExample("alpha", "beta gamma")], epochs: 1);
+
+        var result = model.GenerateResponse("beta");
+
+        Assert.Equal("gamma", result.ResponseText);
+        Assert.Empty(result.Diagnostics);
+    }
+
+    [Fact]
     public void VisualizationIncludesChartsAndCsv()
     {
         var (_, report) = BitNetBootstrap.CreateSeededModel();
