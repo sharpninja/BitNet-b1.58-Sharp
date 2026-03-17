@@ -5,30 +5,17 @@ using System.Reflection;
 
 namespace BitNetSharp.Tests;
 
-public sealed class BitNetModelTests
+public sealed class BitNetPaperModelTests
 {
     [Fact]
-    public void TrainingProducesTernaryWeightsAndLossHistory()
+    public void GeneratedResponseUsesPaperAlignedTransformerDiagnostics()
     {
-        var model = BitNetModel.CreateDefault();
-        var report = new BitNetTrainer(model).TrainDefaults();
-
-        Assert.Equal(3, report.Epochs);
-        Assert.Equal(3, report.LossHistory.Count);
-        Assert.True(report.NegativeWeights > 0);
-        Assert.True(report.ZeroWeights > 0);
-        Assert.True(report.PositiveWeights > 0);
-    }
-
-    [Fact]
-    public void GeneratedResponseUsesAmericanEnglishSeedData()
-    {
-        var (model, _) = BitNetBootstrap.CreateSeededModel(VerbosityLevel.Normal);
+        var model = BitNetBootstrap.CreatePaperModel(VerbosityLevel.Normal);
         var result = model.GenerateResponse("how are you hosted");
 
-        Assert.Contains("microsoft", result.ResponseText, StringComparison.OrdinalIgnoreCase);
-        Assert.Contains("agent", result.ResponseText, StringComparison.OrdinalIgnoreCase);
-        Assert.NotEmpty(result.Diagnostics);
+        Assert.Contains("Top next-token predictions:", result.ResponseText, StringComparison.Ordinal);
+        Assert.NotEmpty(result.Tokens);
+        Assert.Contains("decoder-only transformer", result.Diagnostics[1], StringComparison.OrdinalIgnoreCase);
     }
 
     [Fact]
@@ -89,18 +76,18 @@ public sealed class BitNetModelTests
     [Fact]
     public void VisualizationIncludesChartsAndCsv()
     {
-        var (_, report) = BitNetBootstrap.CreateSeededModel();
-        var visualization = new BitNetVisualizer().CreateReport(report);
+        var model = BitNetBootstrap.CreatePaperModel();
+        var stats = model.GetTernaryWeightStats();
 
-        Assert.Contains("Loss by epoch", visualization.LossChart);
-        Assert.Contains("Ternary weight distribution", visualization.WeightHistogram);
-        Assert.Contains("epoch,loss", visualization.Csv);
+        Assert.True(stats.NegativeCount > 0);
+        Assert.True(stats.PositiveCount > 0);
+        Assert.Equal(stats.TotalCount, stats.NegativeCount + stats.ZeroCount + stats.PositiveCount);
     }
 
     [Fact]
     public void AgentHostBuildsWithMicrosoftAgentFrameworkRegistration()
     {
-        var (model, _) = BitNetBootstrap.CreateSeededModel();
+        var model = BitNetBootstrap.CreatePaperModel();
         using var host = BitNetAgentHost.Build(model);
         var summary = host.Services.GetRequiredService<BitNetHostSummary>();
 

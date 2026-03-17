@@ -1,100 +1,33 @@
 # Training and Visualization
 
-## Train the default corpus
+## Paper-model status
 
-To train the model using the built-in dataset, run the following command from your terminal:
+The repository runtime now only uses the paper-aligned BitNet transformer path. The earlier toy prompt/response trainer is no longer part of the documented workflow.
 
-```bash
-dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- train
-```
-*(Note: Using relative paths is recommended so the command works seamlessly across different development environments).*
-
-The trainer fits ternary transition weights (-1, 0, 1) from the built-in American English prompt/response pairs and reports the average loss by epoch.
-
-## Visualize results
-
-To generate diagnostic visualizations of the training process and the resulting weights:
+## Inspect the seeded transformer
 
 ```bash
 dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- visualize
 ```
 
-The visualization output includes:
+This command prints the current paper-model configuration and an aggregated ternary weight histogram across every `BitLinear` projection in the seeded transformer.
 
-- An ASCII loss chart tracking model convergence.
-- A ternary weight histogram showing the distribution of `-1`, `0`, and `1` weights.
-- CSV-formatted epoch data that can be exported and pasted into external tools (like Excel or Python notebooks) for further analysis.
+## Inspect next-token predictions
 
----
+To inspect the seeded transformer with a prompt:
 
-## Extending Training Data and Custom Training
-
-The default implementation is intentionally small so the repository remains easy to clone and test. If you want to fine-tune the model on a specific domain or replace the built-in corpus entirely, you can use `BitNetTrainer.Train` with your own `TrainingExample` instances.
-
-### 1. Creating Custom Training Examples
-
-`TrainingExample` is a positional record with two required constructor parameters: `Prompt` and `Response`. You can construct instances inline, read them from a JSON file, or pull them from a database.
-
-```csharp
-using System.Collections.Generic;
-using BitNetSharp.Core;
-
-// Define a custom dataset using the positional record constructor
-var customCorpus = new List<TrainingExample>
-{
-    new TrainingExample("What is the capital of France?", "Paris"),
-    new TrainingExample(
-        "Explain BitNet b1.58.",
-        "BitNet b1.58 is a 1-bit LLM architecture where weights are ternary: -1, 0, or 1."),
-    new TrainingExample(
-        "Write a C# console greeting.",
-        "Console.WriteLine(\"Hello, World!\");")
-};
+```bash
+dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- chat "how are you hosted"
 ```
 
-### 2. Instantiating the Trainer
+The chat surface reports the paper model's top next-token predictions for the supplied prompt instead of using the retired toy prompt/response path.
 
-`BitNetTrainer` is constructed with a `BitNetModel`. Create a model first, then pass it to the trainer.
+## Training roadmap
 
-```csharp
-using BitNetSharp.Core;
+The training command is intentionally explicit about the current state:
 
-// Create a model with the default vocabulary
-var model = BitNetModel.CreateDefault();
-
-// Wrap it in a trainer
-var trainer = new BitNetTrainer(model);
+```bash
+dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- train
 ```
 
-### 3. Running the Training Loop
-
-Pass your dataset and the number of epochs into `Train`. It returns a `TrainingReport` that summarises loss history and the ternary weight distribution.
-
-```csharp
-Console.WriteLine("Starting training...");
-
-// Run 10 training epochs over the custom corpus
-TrainingReport report = trainer.Train(customCorpus, epochs: 10);
-
-Console.WriteLine($"Training completed. Average loss: {report.AverageLoss:F4}");
-Console.WriteLine($"Epochs: {report.Epochs}, Samples seen: {report.SamplesSeen}");
-Console.WriteLine($"Weights — negative: {report.NegativeWeights}, " +
-                  $"zero: {report.ZeroWeights}, positive: {report.PositiveWeights}");
-```
-
-### 4. Running Inference
-
-After training, call `GenerateResponse` on the model to produce a response. The method returns a `BitNetGenerationResult` whose `ResponseText` property contains the decoded output.
-
-```csharp
-BitNetGenerationResult result = model.GenerateResponse("What is the capital of France?");
-Console.WriteLine($"Model output: {result.ResponseText}");
-```
-
-> **Note:** Model persistence (save/load) is not yet implemented. To reuse a trained model across sessions, re-run training at startup or extend `BitNetModel` with your own serialization logic.
-
-### Tips for Training
-
-* **Data Formatting:** Ensure your prompts and responses are cleaned and tokenized using the same tokenizer the model expects during inference.
-* **Epochs:** Because weights are heavily quantized, training dynamics differ from standard FP16 LLMs. You may need to experiment with the number of epochs to ensure convergence without catastrophic forgetting.
-* **Batching:** Group examples of similar token lengths together to optimize processing time if padding is required.
+At the moment it reports that the paper-aligned training loop is not yet implemented in this branch. This keeps the runtime honest: the repository only uses the full transformer path from the paper, and it does not fall back to the retired toy trainer.

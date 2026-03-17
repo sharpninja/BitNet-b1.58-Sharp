@@ -3,7 +3,7 @@ using Microsoft.Extensions.AI;
 
 namespace BitNetSharp.App;
 
-public sealed class BitNetChatClient(BitNetModel model) : IChatClient
+public sealed class BitNetChatClient(BitNetPaperModel model) : IChatClient
 {
     public Task<ChatResponse> GetResponseAsync(
         IEnumerable<ChatMessage> messages,
