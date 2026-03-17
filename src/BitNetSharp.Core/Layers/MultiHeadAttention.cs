@@ -53,19 +53,19 @@ public sealed class MultiHeadAttention : Module
 
         for (var head = 0; head < Config.HeadCount; head++)
         {
-            ApplyHead(attended, queries, keys, values, head);
+            var scores = new float[queries.GetLength(0)];
+            ApplyHead(attended, queries, keys, values, head, scores);
         }
 
         return OutputProjection.Forward(attended);
     }
 
-    private void ApplyHead(float[,] attended, float[,] queries, float[,] keys, float[,] values, int head)
+    private void ApplyHead(float[,] attended, float[,] queries, float[,] keys, float[,] values, int head, float[] scores)
     {
         var headOffset = head * Config.HeadDimension;
 
         for (var targetPosition = 0; targetPosition < queries.GetLength(0); targetPosition++)
         {
-            var scores = new float[targetPosition + 1];
             var maxScore = float.NegativeInfinity;
 
             for (var sourcePosition = 0; sourcePosition <= targetPosition; sourcePosition++)
@@ -82,7 +82,7 @@ public sealed class MultiHeadAttention : Module
             }
 
             var partition = 0f;
-            for (var sourcePosition = 0; sourcePosition < scores.Length; sourcePosition++)
+            for (var sourcePosition = 0; sourcePosition <= targetPosition; sourcePosition++)
             {
                 scores[sourcePosition] = MathF.Exp(scores[sourcePosition] - maxScore);
                 partition += scores[sourcePosition];
@@ -93,7 +93,7 @@ public sealed class MultiHeadAttention : Module
                 continue;
             }
 
-            for (var sourcePosition = 0; sourcePosition < scores.Length; sourcePosition++)
+            for (var sourcePosition = 0; sourcePosition <= targetPosition; sourcePosition++)
             {
                 var weight = scores[sourcePosition] / partition;
                 for (var dimension = 0; dimension < Config.HeadDimension; dimension++)
