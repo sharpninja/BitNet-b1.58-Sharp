@@ -65,8 +65,8 @@ public sealed class BitNetModel
         }
 
         _memorizedResponses.Clear();
-        var counts = new int[_vocabularySize, _vocabularySize];
-        var priors = new int[_vocabularySize];
+        var counts = new long[_vocabularySize, _vocabularySize];
+        var priors = new long[_vocabularySize];
         var history = new List<double>();
 
         for (var epoch = 0; epoch < epochs; epoch++)
@@ -96,9 +96,47 @@ public sealed class BitNetModel
                     observations++;
                     context = tokenId;
                 }
+            // ...
             }
 
-            Quantize(counts, priors);
+            var countsForQuantization = new int[_vocabularySize, _vocabularySize];
+            var priorsForQuantization = new int[_vocabularySize];
+
+            for (var i = 0; i < _vocabularySize; i++)
+            {
+            var priorValue = priors[i];
+            if (priorValue > int.MaxValue)
+            {
+                priorsForQuantization[i] = int.MaxValue;
+            }
+            else if (priorValue < int.MinValue)
+            {
+                priorsForQuantization[i] = int.MinValue;
+            }
+            else
+            {
+                priorsForQuantization[i] = (int)priorValue;
+            }
+
+            for (var j = 0; j < _vocabularySize; j++)
+            {
+                var countValue = counts[i, j];
+                if (countValue > int.MaxValue)
+                {
+                    countsForQuantization[i, j] = int.MaxValue;
+                }
+                else if (countValue < int.MinValue)
+                {
+                    countsForQuantization[i, j] = int.MinValue;
+                }
+                else
+                {
+                    countsForQuantization[i, j] = (int)countValue;
+                }
+            }
+            }
+
+            Quantize(countsForQuantization, priorsForQuantization);
             history.Add(observations == 0 ? 0d : (double)mistakes / observations);
         }
 
