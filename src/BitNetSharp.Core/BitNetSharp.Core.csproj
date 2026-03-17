@@ -4,6 +4,8 @@
     <TargetFramework>net10.0</TargetFramework>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
+    <PackageId>BitNetSharp.Core</PackageId>
+    <Description>Paper-aligned BitNet b1.58 transformer runtime for .NET.</Description>
   </PropertyGroup>
 
 </Project>
