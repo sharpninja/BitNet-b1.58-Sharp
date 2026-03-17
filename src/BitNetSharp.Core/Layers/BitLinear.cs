@@ -5,6 +5,7 @@ namespace BitNetSharp.Core.Layers;
 public sealed class BitLinear : Module
 {
     private const int ActivationQuantizationBound = 127;
+    private const float WeightQuantizationEpsilon = 1e-6f;
 
     private readonly float[,] _fullPrecisionWeights;
     private readonly sbyte[,] _ternaryWeights;
@@ -76,6 +77,7 @@ public sealed class BitLinear : Module
             for (var column = 0; column < Config.InputDimension; column++)
             {
                 var normalized = fullPrecisionWeights[row, column] / Gamma;
+                normalized += WeightQuantizationEpsilon;
                 var quantized = Math.Clamp((int)MathF.Round(normalized, MidpointRounding.AwayFromZero), -1, 1);
                 _ternaryWeights[row, column] = (sbyte)quantized;
             }
