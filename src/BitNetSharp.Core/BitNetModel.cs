@@ -2,9 +2,13 @@ namespace BitNetSharp.Core;
 
 public sealed class BitNetModel
 {
+    private readonly int _beginTokenId;
+    private readonly int _endTokenId;
     private readonly Dictionary<string, int> _tokenToId;
     private readonly Dictionary<string, int[]> _memorizedResponses;
     private readonly string[] _idToToken;
+    private readonly int[] _predictedNextTokenIds;
+    private readonly int _vocabularySize;
     private readonly sbyte[,] _weights;
     private readonly float[] _priors;
     private readonly BitNetTokenizer _tokenizer;
@@ -29,10 +33,16 @@ public sealed class BitNetModel
             .Select((token, index) => new { token, index })
             .ToDictionary(item => item.token, item => item.index, StringComparer.Ordinal);
 
+        _beginTokenId = _tokenToId[BitNetTokenizer.BeginToken];
+        _endTokenId = _tokenToId[BitNetTokenizer.EndToken];
         _memorizedResponses = new Dictionary<string, int[]>(StringComparer.Ordinal);
-        _weights = new sbyte[_idToToken.Length, _idToToken.Length];
-        _priors = new float[_idToToken.Length];
+        _vocabularySize = _idToToken.Length;
+        _predictedNextTokenIds = new int[_vocabularySize];
+        _weights = new sbyte[_vocabularySize, _vocabularySize];
+        _priors = new float[_vocabularySize];
         _tokenizer = new BitNetTokenizer(_idToToken);
+
+        Array.Fill(_predictedNextTokenIds, _endTokenId);
     }
 
     public BitNetOptions Options { get; }
@@ -55,8 +65,8 @@ public sealed class BitNetModel
         }
 
         _memorizedResponses.Clear();
-        var counts = new float[_idToToken.Length, _idToToken.Length];
-        var priors = new float[_idToToken.Length];
+        var counts = new long[_vocabularySize, _vocabularySize];
+        var priors = new long[_vocabularySize];
         var history = new List<double>();
 
         for (var epoch = 0; epoch < epochs; epoch++)
@@ -68,15 +78,18 @@ public sealed class BitNetModel
             {
                 var promptIds = TokenizeToIds(example.Prompt);
                 var responseIds = TokenizeToIds(example.Response)
-                    .Concat([GetId(BitNetTokenizer.EndToken)])
+                    .Concat([_endTokenId])
                     .ToArray();
                 _memorizedResponses[NormalizePromptKey(example.Prompt)] = responseIds;
 
-                var context = promptIds.LastOrDefault(GetId(BitNetTokenizer.BeginToken));
+                var context = promptIds.LastOrDefault(_beginTokenId);
                 foreach (var tokenId in responseIds)
                 {
-                    counts[context, tokenId] += 1f;
-                    priors[tokenId] += 1f;
+                    checked
+                    {
+                        counts[context, tokenId]++;
+                        priors[tokenId]++;
+                    }
 
                     if (PredictNextTokenId(context) != tokenId)
                     {
@@ -86,6 +99,7 @@ public sealed class BitNetModel
                     observations++;
                     context = tokenId;
                 }
+            // ...
             }
 
             Quantize(counts, priors);
@@ -105,7 +119,7 @@ public sealed class BitNetModel
     {
         var diagnostics = new List<string>();
         var generated = new List<string>();
-        var context = TokenizeToIds(prompt).LastOrDefault(GetId(BitNetTokenizer.BeginToken));
+        var context = TokenizeToIds(prompt).LastOrDefault(_beginTokenId);
         var remainingTokens = maxTokens.GetValueOrDefault(Options.MaxResponseTokens);
         var promptKey = NormalizePromptKey(prompt);
 
@@ -170,15 +184,26 @@ public sealed class BitNetModel
     public (int Negative, int Zero, int Positive) GetWeightCounts() =>
         (CountWeights(-1), CountWeights(0), CountWeights(1));
 
-    private void Quantize(float[,] counts, float[] priors)
+    private void Quantize(long[,] counts, long[] priors)
     {
-        for (var row = 0; row < _weights.GetLength(0); row++)
+        for (var row = 0; row < _vocabularySize; row++)
         {
-            var rowValues = Enumerable.Range(0, _weights.GetLength(1)).Select(column => counts[row, column]).ToArray();
-            var mean = rowValues.Average();
-            var threshold = Math.Max(0.15, rowValues.Select(value => Math.Abs(value - mean)).DefaultIfEmpty().Average() * 0.35);
+            var sum = 0d;
+            for (var column = 0; column < _vocabularySize; column++)
+            {
+                sum += counts[row, column];
+            }
 
-            for (var column = 0; column < _weights.GetLength(1); column++)
+            var mean = sum / _vocabularySize;
+            var absoluteDeviationSum = 0d;
+            for (var column = 0; column < _vocabularySize; column++)
+            {
+                absoluteDeviationSum += Math.Abs(counts[row, column] - mean);
+            }
+
+            var threshold = Math.Max(0.15d, (absoluteDeviationSum / _vocabularySize) * 0.35d);
+
+            for (var column = 0; column < _vocabularySize; column++)
             {
                 var delta = counts[row, column] - mean;
                 _weights[row, column] = delta switch
@@ -190,27 +215,41 @@ public sealed class BitNetModel
             }
         }
 
-        var priorMean = priors.Average();
+        var priorMean = priors.Average(static value => (double)value);
         for (var index = 0; index < _priors.Length; index++)
         {
-            _priors[index] = priors[index] switch
-            {
-                var value when value > priorMean => 0.35f,
-                0f => -0.15f,
-                _ => 0f
-            };
+            var priorCount = priors[index];
+            _priors[index] = priorCount > priorMean
+                ? 0.35f
+                : priorCount == 0
+                    ? -0.15f
+                    : 0f;
+        }
+
+        RebuildPredictionCache();
+    }
+
+    private int PredictNextTokenId(int context) =>
+        (uint)context < (uint)_vocabularySize
+            ? _predictedNextTokenIds[context]
+            : _endTokenId;
+
+    private void RebuildPredictionCache()
+    {
+        for (var context = 0; context < _vocabularySize; context++)
+        {
+            _predictedNextTokenIds[context] = PredictNextTokenIdCore(context);
         }
     }
 
-    private int PredictNextTokenId(int context)
+    private int PredictNextTokenIdCore(int context)
     {
-        var bestTokenId = GetId(BitNetTokenizer.EndToken);
-        var bestScore = double.MinValue;
+        var bestTokenId = _endTokenId;
+        var bestScore = float.NegativeInfinity;
 
-        for (var candidate = 0; candidate < _idToToken.Length; candidate++)
+        for (var candidate = 0; candidate < _vocabularySize; candidate++)
         {
-            var token = _idToToken[candidate];
-            if (token == BitNetTokenizer.BeginToken)
+            if (candidate == _beginTokenId)
             {
                 continue;
             }
@@ -226,7 +265,7 @@ public sealed class BitNetModel
         return bestTokenId;
     }
 
-    private double Score(int context, int candidate) => _weights[context, candidate] + _priors[candidate];
+    private float Score(int context, int candidate) => _weights[context, candidate] + _priors[candidate];
 
     private int[] TokenizeToIds(string text) =>
         _tokenizer.Tokenize(text)
