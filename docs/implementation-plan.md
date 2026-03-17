@@ -37,7 +37,7 @@
 ## 1. Executive Summary & Success Criteria
 Goal: Transform the current bigram toy into the **canonical .NET reference implementation** of the exact BitNet b1.58 architecture described in the paper.
 
-**Paper-Exact Requirements (must be met 100 %)**
+**Paper-Exact Requirements (must be met 100%)**
 - Every linear projection → BitLinear with ternary weights `{-1, 0, +1}`.
 - Quantization formula:
   \[
@@ -46,18 +46,18 @@ Goal: Transform the current bigram toy into the **canonical .NET reference imple
   \[
   W_q = \text{RoundClip}\left(W \cdot \gamma + \epsilon, -1, 1\right)
   \]
-  where \(\epsilon = 10^{-6}\), RoundClip rounds to nearest integer then clamps.
+  where epsilon = 1e-6, RoundClip rounds to nearest integer then clamps.
 - Training: straight-through estimator (STE) – forward uses quantized, backward passes full-precision gradient.
 - Activations: signed 8-bit per-token scaling (no zero-point).
 - Architecture: LLaMA-identical components (RMSNorm, SwiGLU FFN, RoPE, no biases, decoder-only).
 - No external Python dependencies after Phase 3 (TorchSharp allowed only as optional bridge).
 
 **Success Criteria (measurable)**
-- Perplexity on RedPajama subset within 5 % of paper-reported 700 M model baseline.
+- Perplexity on RedPajama subset within 5% of paper-reported 700 M model baseline.
 - Memory footprint ≤ 1.58 bits/parameter (verified by weight histogram).
 - Inference latency on CPU < 2× fp16 LLaMA equivalent (nano model).
 - Model file loads in llama.cpp BitNet fork without modification.
-- 100 % test coverage on quantization, STE, and forward pass.
+- 100% test coverage on quantization, STE, and forward pass.
 
 ---
 
@@ -157,11 +157,11 @@ Implement the single most important primitive exactly as Section 2 of the paper.
 **Detailed Steps**
 1. Create abstract base `Module` (tensor-in/tensor-out contract).
 2. Implement `BitLinear` class with attributes: Gamma (absmean scale), TernaryWeights (sbyte 2D), optional ScaleCache.
-3. Implement `QuantizeFromFullPrecision` using exact absmean + RoundClip formula (include \(\epsilon = 10^{-6}\)).
-4. Forward pass: ternary matrix multiplication + per-token activation scaling to signed 8-bit range \([-Q_b, Q_b]\) where \(Q_b = 127\).
+3. Implement `QuantizeFromFullPrecision` using exact absmean + RoundClip formula (include epsilon = 1e-6).
+4. Forward pass: ternary matrix multiplication + per-token activation scaling to signed 8-bit range [-Q_b, Q_b] where Q_b = 127.
 5. Backward pass: STE – copy full-precision gradient, ignore quantization.
 6. Add `ToFullPrecision()` helper for debugging.
-7. Unit-test matrix: 10 random FP32 matrices → verify ternary histogram exactly matches paper (exactly 1/3 each of -1/0/+1 on average).
+7. Unit-test matrix: 10 random FP32 matrices → verify ternary histogram exactly matches paper (approximately 1/3 each of -1/0/+1 on average).
 8. Add weight-distribution histogram logger (reuse your existing visualizer).
 9. Create `BitLinearConfig` record (dimIn, dimOut, bias=false).
 10. Integration test: replace a single dense matrix multiply with BitLinear and verify numerical equivalence within 1e-4 before/after quantize.
@@ -205,7 +205,7 @@ sequenceDiagram
 Assemble LLaMA-identical decoder block using BitLinear everywhere.
 
 **Detailed Steps**
-1. Implement `RMSNorm` (paper exact: \(\epsilon = 1e-5\)).
+1. Implement `RMSNorm` (paper exact: epsilon = 1e-5).
 2. Implement `RoPE` rotator (apply to Q/K only – 50-line math, no code here).
 3. Implement `SwiGLUFeedForward` with three BitLinear projections.
 4. Implement `MultiHeadAttention` with four BitLinear (Q,K,V,O) + RoPE + scaled-dot-product.
@@ -299,9 +299,9 @@ Production-ready inference + llama.cpp compatibility.
 - [ ] No bias parameters anywhere.
 - [ ] RMSNorm + SwiGLU + RoPE exact.
 - [ ] STE gradient flow tested numerically.
-- [ ] Perplexity within 5 % of paper baseline on same data.
+- [ ] Perplexity within 5% of paper baseline on same data.
 - [ ] Model loads in official bitnet.cpp fork.
-- [ ] 95 %+ unit test coverage.
+- [ ] 95%+ unit test coverage.
 
 **Testing Strategy**
 - Unit: BitLinear, RMSNorm, RoPE.
@@ -315,16 +315,11 @@ Production-ready inference + llama.cpp compatibility.
 **Component Diagram (High-Level System)**
 
 ```mermaid
-componentDiagram
-    component Core as "BitNetSharp.Core"
-    component Layers as "Layers"
-    component Training as "Training"
-    component Inference as "Inference"
-    component Utils as "Utils (RoPE, RMSNorm)"
-    Core --> Layers
-    Layers --> Training
-    Layers --> Inference
-    Training --> Utils
+flowchart LR
+    Core[BitNetSharp.Core] --> Layers[Layers]
+    Layers --> Training[Training]
+    Layers --> Inference[Inference]
+    Training --> Utils[Utils (RoPE, RMSNorm)]
 ```
 
 **Additional Sequence: Inference with KV-Cache**
@@ -359,7 +354,7 @@ sequenceDiagram
 - Week 5: Phase 3 complete → “Training Works” milestone
 - Week 6: Phase 4 + 5 complete → “Paper-Aligned v1.0” release
 
-**Total estimated effort:** 35–45 days (part-time possible).
+**Total estimated effort:** 35–45 working days (part-time possible at roughly 10–20 hours per week).
 
 ---
 
