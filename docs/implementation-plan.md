@@ -40,12 +40,12 @@ Goal: Transform the current bigram toy into the **canonical .NET reference imple
 **Paper-Exact Requirements (must be met 100%)**
 - Every linear projection → BitLinear with ternary weights `{-1, 0, +1}`.
 - Quantization formula:
-  \[
-  \gamma = \frac{1}{n \times m} \sum_{i,j} |W_{ij}| \quad \text{(absmean)}
-  \]
-  \[
-  W_q = \text{RoundClip}\left(W \cdot \gamma + \epsilon, -1, 1\right)
-  \]
+  ```math
+  \gamma = \frac{1}{nm} \sum_{i,j} |W_{ij}| \quad \text{(absmean across all }nm\text{ weights)}
+  ```
+  ```math
+  W_q = \text{RoundClip}\left(\frac{W}{\gamma} + \epsilon, -1, 1\right)
+  ```
   where epsilon = 1e-6, RoundClip rounds to nearest integer then clamps.
 - Training: straight-through estimator (STE) – forward uses quantized, backward passes full-precision gradient.
 - Activations: signed 8-bit per-token scaling (no zero-point).
@@ -192,7 +192,7 @@ sequenceDiagram
     Trainer->>BitLinear: QuantizeFromFullPrecision(fullW)
     BitLinear->>AbsMeanCalculator: Compute γ = mean(|W|)
     AbsMeanCalculator-->>BitLinear: γ
-    BitLinear->>RoundClip: W * γ + ε
+    BitLinear->>RoundClip: W / γ + ε
     RoundClip-->>BitLinear: clipped ternary
     BitLinear->>BitLinear: Store TernaryWeights & Gamma
 ```

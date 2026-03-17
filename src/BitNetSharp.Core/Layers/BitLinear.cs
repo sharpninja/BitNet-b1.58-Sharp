@@ -62,7 +62,7 @@ public sealed class BitLinear : Module
                 nameof(fullPrecisionWeights));
         }
 
-        Copy(fullPrecisionWeights, _fullPrecisionWeights);
+        Buffer.BlockCopy(fullPrecisionWeights, 0, _fullPrecisionWeights, 0, sizeof(float) * fullPrecisionWeights.Length);
         Gamma = ComputeAbsMean(fullPrecisionWeights);
 
         if (Gamma <= 0f)
@@ -164,16 +164,5 @@ public sealed class BitLinear : Module
         }
 
         return result;
-    }
-
-    private static void Copy(float[,] source, float[,] destination)
-    {
-        for (var row = 0; row < source.GetLength(0); row++)
-        {
-            for (var column = 0; column < source.GetLength(1); column++)
-            {
-                destination[row, column] = source[row, column];
-            }
-        }
     }
 }

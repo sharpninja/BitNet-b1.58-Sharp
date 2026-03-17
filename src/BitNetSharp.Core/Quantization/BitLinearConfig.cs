@@ -1,8 +1,11 @@
 namespace BitNetSharp.Core.Quantization;
 
+/// <summary>
+/// Configuration for a BitLinear layer using bias-free projections.
+/// </summary>
 public sealed record BitLinearConfig
 {
-    public BitLinearConfig(int inputDimension, int outputDimension, bool bias = false)
+    public BitLinearConfig(int inputDimension, int outputDimension)
     {
         if (inputDimension <= 0)
         {
@@ -14,19 +17,13 @@ public sealed record BitLinearConfig
             throw new ArgumentOutOfRangeException(nameof(outputDimension), "Output dimension must be positive.");
         }
 
-        if (bias)
-        {
-            throw new ArgumentException("BitLinear does not support bias parameters.", nameof(bias));
-        }
-
         InputDimension = inputDimension;
         OutputDimension = outputDimension;
-        Bias = bias;
     }
 
     public int InputDimension { get; }
 
     public int OutputDimension { get; }
 
-    public bool Bias { get; }
+    public bool Bias => false;
 }

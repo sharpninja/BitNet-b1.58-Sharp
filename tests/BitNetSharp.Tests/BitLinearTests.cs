@@ -51,15 +51,26 @@ public sealed class BitLinearTests
         var layer = new BitLinear(new BitLinearConfig(inputDimension: 2, outputDimension: 1));
         layer.QuantizeFromFullPrecision(new float[,]
         {
-            { 0.5f, -0.5f }
+            { 2.0f, -2.0f }
         });
+
+        var input = new float[,]
+        {
+            { 0.5f, -0.25f }
+        };
 
         var output = layer.Forward(new float[,]
         {
-            { 0.5f, -0.25f }
+            { input[0, 0], input[0, 1] }
         });
 
-        Assert.Equal(0.37598425f, output[0, 0], 5);
+        var maxAbs = MathF.Max(MathF.Abs(input[0, 0]), MathF.Abs(input[0, 1]));
+        var scale = maxAbs / 127f;
+        var quantizedFirst = Math.Clamp((int)MathF.Round(input[0, 0] / scale, MidpointRounding.AwayFromZero), -127, 127) * scale;
+        var quantizedSecond = Math.Clamp((int)MathF.Round(input[0, 1] / scale, MidpointRounding.AwayFromZero), -127, 127) * scale;
+        var expected = (quantizedFirst - quantizedSecond) * layer.Gamma;
+
+        Assert.Equal(expected, output[0, 0], 5);
     }
 
     [Fact]
