@@ -7,6 +7,7 @@ public sealed class RmsNorm : Module
     public RmsNorm(int dimension, float epsilon = 1e-5f)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(dimension);
+        ArgumentOutOfRangeException.ThrowIfNegative(epsilon);
 
         Dimension = dimension;
         Epsilon = epsilon;
