@@ -21,6 +21,6 @@ When you push a tag that matches `v*`, the same workflow also:
 
 - Packs both NuGet artifacts with the GitVersion-generated semantic version
 - Uploads the generated `.nupkg` files into the matching GitHub release
-- Pushes the packages to the repository GitHub Packages feed at `https://nuget.pkg.github.com/sharpninja/index.json`
+- Pushes the packages to the repository GitHub Packages feed at `https://nuget.pkg.github.com/<owner>/index.json`, where `<owner>` is the GitHub repository owner (user or organization)
 
 This keeps prerelease CI artifacts available for inspection while reserving release publication for explicit version tags.
