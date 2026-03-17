@@ -68,7 +68,7 @@ public sealed class BitLinear : Module
 
         if (Gamma <= 0f)
         {
-            Array.Clear(_ternaryWeights);
+            Array.Clear(_ternaryWeights, 0, _ternaryWeights.Length);
             return;
         }
 
