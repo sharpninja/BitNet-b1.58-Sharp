@@ -4,6 +4,9 @@ using BitNetSharp.Core.Quantization;
 using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 
+// Twenty columns keeps the console histogram readable without wrapping typical terminals.
+const int DefaultHistogramWidth = 20;
+
 var command = args.FirstOrDefault()?.ToLowerInvariant() ?? "chat";
 var prompt = args.Length > 1 ? string.Join(' ', args.Skip(1)) : "hello";
 var verbosity = ParseVerbosity(args);
@@ -82,14 +85,12 @@ static string FormatWeightHistogram(TernaryWeightStats stats)
 
 static string FormatBar(string label, int value, int max)
 {
-    // Twenty columns keeps the console histogram readable without wrapping typical terminals.
-    const int HistogramMaxBarWidth = 20;
     if (max <= 0)
     {
         return $"{label}:  {value}";
     }
 
-    var width = Math.Max(0, (int)Math.Round(value / (double)max * HistogramMaxBarWidth));
+    var width = Math.Max(0, (int)Math.Round(value / (double)max * DefaultHistogramWidth));
     return $"{label}: {new string('#', width)} {value}";
 }
 
