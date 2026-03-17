@@ -85,8 +85,11 @@ public sealed class BitNetModel
                 var context = promptIds.LastOrDefault(_beginTokenId);
                 foreach (var tokenId in responseIds)
                 {
-                    counts[context, tokenId]++;
-                    priors[tokenId]++;
+                    checked
+                    {
+                        counts[context, tokenId]++;
+                        priors[tokenId]++;
+                    }
 
                     if (PredictNextTokenId(context) != tokenId)
                     {
@@ -99,44 +102,7 @@ public sealed class BitNetModel
             // ...
             }
 
-            var countsForQuantization = new int[_vocabularySize, _vocabularySize];
-            var priorsForQuantization = new int[_vocabularySize];
-
-            for (var i = 0; i < _vocabularySize; i++)
-            {
-            var priorValue = priors[i];
-            if (priorValue > int.MaxValue)
-            {
-                priorsForQuantization[i] = int.MaxValue;
-            }
-            else if (priorValue < int.MinValue)
-            {
-                priorsForQuantization[i] = int.MinValue;
-            }
-            else
-            {
-                priorsForQuantization[i] = (int)priorValue;
-            }
-
-            for (var j = 0; j < _vocabularySize; j++)
-            {
-                var countValue = counts[i, j];
-                if (countValue > int.MaxValue)
-                {
-                    countsForQuantization[i, j] = int.MaxValue;
-                }
-                else if (countValue < int.MinValue)
-                {
-                    countsForQuantization[i, j] = int.MinValue;
-                }
-                else
-                {
-                    countsForQuantization[i, j] = (int)countValue;
-                }
-            }
-            }
-
-            Quantize(countsForQuantization, priorsForQuantization);
+            Quantize(counts, priors);
             history.Add(observations == 0 ? 0d : (double)mistakes / observations);
         }
 
@@ -218,24 +184,24 @@ public sealed class BitNetModel
     public (int Negative, int Zero, int Positive) GetWeightCounts() =>
         (CountWeights(-1), CountWeights(0), CountWeights(1));
 
-    private void Quantize(int[,] counts, int[] priors)
+    private void Quantize(long[,] counts, long[] priors)
     {
         for (var row = 0; row < _vocabularySize; row++)
         {
-            var sum = 0f;
+            var sum = 0d;
             for (var column = 0; column < _vocabularySize; column++)
             {
                 sum += counts[row, column];
             }
 
             var mean = sum / _vocabularySize;
-            var absoluteDeviationSum = 0f;
+            var absoluteDeviationSum = 0d;
             for (var column = 0; column < _vocabularySize; column++)
             {
-                absoluteDeviationSum += MathF.Abs(counts[row, column] - mean);
+                absoluteDeviationSum += Math.Abs(counts[row, column] - mean);
             }
 
-            var threshold = MathF.Max(0.15f, (absoluteDeviationSum / _vocabularySize) * 0.35f);
+            var threshold = Math.Max(0.15d, (absoluteDeviationSum / _vocabularySize) * 0.35d);
 
             for (var column = 0; column < _vocabularySize; column++)
             {
@@ -253,7 +219,7 @@ public sealed class BitNetModel
         for (var index = 0; index < _priors.Length; index++)
         {
             var priorCount = priors[index];
-            _priors[index] = (double)priorCount > priorMean
+            _priors[index] = priorCount > priorMean
                 ? 0.35f
                 : priorCount == 0
                     ? -0.15f
