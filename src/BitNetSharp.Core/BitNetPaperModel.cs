@@ -42,7 +42,7 @@ public sealed class BitNetPaperModel
 
         if (_idToToken.Length <= ReservedTokens.Count)
         {
-            throw new ArgumentException("The paper model vocabulary must include at least one non-special token.", nameof(options));
+            throw new ArgumentException("Options.Vocabulary must include at least one non-special token for the paper model.", nameof(options));
         }
 
         _beginTokenId = _tokenToId[BitNetTokenizer.BeginToken];

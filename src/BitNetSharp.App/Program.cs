@@ -82,8 +82,8 @@ static string FormatWeightHistogram(TernaryWeightStats stats)
 
 static string FormatBar(string label, int value, int max)
 {
-    const int HistogramMaxBarWidth = 20;
     // Twenty columns keeps the console histogram readable without wrapping typical terminals.
+    const int HistogramMaxBarWidth = 20;
     if (max <= 0)
     {
         return $"{label}:  {value}";
