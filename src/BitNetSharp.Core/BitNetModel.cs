@@ -211,21 +211,24 @@ public sealed class BitNetModel
             }
         }
 
-        var priorMean = priors.Average();
+        var priorMean = priors.Average(static value => (double)value);
         for (var index = 0; index < _priors.Length; index++)
         {
-            _priors[index] = priors[index] switch
-            {
-                var value when value > priorMean => 0.35f,
-                0 => -0.15f,
-                _ => 0f
-            };
+            var priorCount = priors[index];
+            _priors[index] = (double)priorCount > priorMean
+                ? 0.35f
+                : priorCount == 0
+                    ? -0.15f
+                    : 0f;
         }
 
         RebuildPredictionCache();
     }
 
-    private int PredictNextTokenId(int context) => _predictedNextTokenIds[context];
+    private int PredictNextTokenId(int context) =>
+        (uint)context < (uint)_vocabularySize
+            ? _predictedNextTokenIds[context]
+            : _endTokenId;
 
     private void RebuildPredictionCache()
     {
@@ -238,7 +241,7 @@ public sealed class BitNetModel
     private int PredictNextTokenIdCore(int context)
     {
         var bestTokenId = _endTokenId;
-        var bestScore = float.MinValue;
+        var bestScore = float.NegativeInfinity;
 
         for (var candidate = 0; candidate < _vocabularySize; candidate++)
         {
