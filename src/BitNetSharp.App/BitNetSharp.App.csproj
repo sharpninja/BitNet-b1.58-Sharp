@@ -16,7 +16,6 @@
     <Nullable>enable</Nullable>
     <PackAsTool>true</PackAsTool>
     <ToolCommandName>bitnetsharp</ToolCommandName>
-    <Version>0.1.0</Version>
   </PropertyGroup>
 
 </Project>
