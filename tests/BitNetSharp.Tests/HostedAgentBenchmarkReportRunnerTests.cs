@@ -64,15 +64,15 @@ public sealed class HostedAgentBenchmarkReportRunnerTests
                     new HostedAgentBenchmarkModelReport(
                         HostedAgentModelFactory.DefaultModelId,
                         "Paper-aligned BitNet b1.58 transformer",
-                        trainingSupported: false,
-                        trainingCompleted: false,
-                        trainingExamples: 0,
-                        trainingEpochs: 0,
-                        successfulQueries: 2,
-                        totalQueries: 2,
-                        exactMatches: 0,
-                        averageExpectedTokenRecall: 0.5d,
-                        queryResults:
+                        TrainingSupported: false,
+                        TrainingCompleted: false,
+                        TrainingExamples: 0,
+                        TrainingEpochs: 0,
+                        SuccessfulQueries: 2,
+                        TotalQueries: 2,
+                        ExactMatches: 0,
+                        AverageExpectedTokenRecall: 0.5d,
+                        QueryResults:
                         [
                             new HostedAgentBenchmarkQueryResult("hello", "Hello!", "<response>", true, false, 0.5d),
                             new HostedAgentBenchmarkQueryResult("how are you hosted", "Hosted", "Hosted <details>", true, false, 0.5d)
@@ -98,7 +98,7 @@ public sealed class HostedAgentBenchmarkReportRunnerTests
 
             Assert.Contains("BitNet benchmark comparison report", markdown, StringComparison.Ordinal);
             Assert.Contains("Expected-token recall", markdown, StringComparison.Ordinal);
-            Assert.Contains("\\<response>", markdown, StringComparison.Ordinal);
+            Assert.Contains("<response>", markdown, StringComparison.Ordinal);
             Assert.Contains("&lt;response&gt;", html, StringComparison.Ordinal);
             Assert.Contains("comparison-report.md", html, StringComparison.Ordinal);
             Assert.Contains("\"ModelSpecifier\": \"bitnet-b1.58-sharp\"", json, StringComparison.Ordinal);
