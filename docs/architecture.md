@@ -23,7 +23,7 @@ The app registers a local `IChatClient` implementation so the paper-aligned BitN
 The hosting layer now resolves multiple local model types behind the same agent wrapper:
 
 - the seeded paper-aligned BitNet model
-- a traditional local count-based comparison model trained on the default corpus
+- a traditional local tensor-based comparison model trained on the default corpus with `System.Numerics.Tensors`
 - local command models described by JSON configuration files
 
 This lets BenchmarkDotNet measure host construction, querying, streaming, and local training through one shared path.

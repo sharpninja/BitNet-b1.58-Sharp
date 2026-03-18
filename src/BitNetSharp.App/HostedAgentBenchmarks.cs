@@ -94,7 +94,10 @@ public class HostedAgentTrainingBenchmarks : TrainableHostedAgentBenchmarkBase
         }
 
         var examples = BitNetTrainingCorpus.CreateDefaultExamples();
-        trainableModel.Train(examples, epochs: 3);
+        var epochs = string.Equals(ModelSpecifier, HostedAgentModelFactory.TraditionalLocalModelId, StringComparison.Ordinal)
+            ? TraditionalLocalModel.DefaultTrainingEpochs
+            : 3;
+        trainableModel.Train(examples, epochs);
         return examples.Count;
     }
 }

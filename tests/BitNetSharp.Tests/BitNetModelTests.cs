@@ -105,7 +105,30 @@ public sealed class BitNetPaperModelTests
 
         Assert.Equal(HostedAgentModelFactory.TraditionalLocalModelId, model.ModelId);
         Assert.False(string.IsNullOrWhiteSpace(response.Text));
-        Assert.Contains(response.Diagnostics, diagnostic => diagnostic.Contains("traditional count-based", StringComparison.OrdinalIgnoreCase));
+        Assert.Contains("microsoft agent framework", response.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(response.Diagnostics, diagnostic => diagnostic.Contains("tensor-based ordered-context", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void TraditionalLocalModelLearnsSimplePromptResponse()
+    {
+        var model = new TraditionalLocalModel(
+            new BitNetOptions(["alpha", "beta", "gamma", "delta"], VerbosityLevel.Normal, MaxResponseTokens: 4),
+            embeddingDimension: 16,
+            contextWindow: 4,
+            seed: 11);
+
+        model.Train(
+            [
+                new TrainingExample("alpha beta", "gamma delta")
+            ],
+            epochs: 80,
+            learningRate: 0.55f);
+
+        var result = model.GenerateResponse("alpha beta", maxTokens: 2);
+
+        Assert.Equal(["gamma", "delta"], result.Tokens);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("tensor-based ordered-context", StringComparison.OrdinalIgnoreCase));
     }
 
     [Fact]

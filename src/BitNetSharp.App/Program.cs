@@ -26,8 +26,9 @@ switch (command)
         if (model is ITrainableHostedAgentModel trainableModel)
         {
             var examples = BitNetTrainingCorpus.CreateDefaultExamples();
-            trainableModel.Train(examples, epochs: 3);
-            Console.WriteLine($"Trained '{model.ModelId}' on {examples.Count} default examples for 3 epochs.");
+            var trainingEpochs = GetTrainingEpochs(model);
+            trainableModel.Train(examples, trainingEpochs);
+            Console.WriteLine($"Trained '{model.ModelId}' on {examples.Count} default examples for {trainingEpochs} epochs.");
         }
         else
         {
@@ -130,6 +131,11 @@ static int? ParseMaxTokens(string[] args)
     var value = ParseOption(args, "--max-tokens=");
     return int.TryParse(value, out var parsed) ? parsed : null;
 }
+
+static int GetTrainingEpochs(IHostedAgentModel model) =>
+    string.Equals(model.ModelId, HostedAgentModelFactory.TraditionalLocalModelId, StringComparison.Ordinal)
+        ? TraditionalLocalModel.DefaultTrainingEpochs
+        : 3;
 
 static string? ParseOption(IEnumerable<string> args, string prefix) =>
     args.FirstOrDefault(argument => argument.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))

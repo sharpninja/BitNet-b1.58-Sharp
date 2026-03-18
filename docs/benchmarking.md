@@ -5,7 +5,7 @@
 `BitNetSharp.App` can now host more than one local model shape through the same Microsoft Agent Framework wrapper:
 
 - `bitnet-b1.58-sharp` for the paper-aligned seeded transformer
-- `traditional-local` for a local count-based comparison model trained on the default training corpus
+- `traditional-local` for a local tensor-based comparison model trained on the default training corpus
 - an absolute path to a local command model JSON file for other locally available models
 
 The benchmark command uses BenchmarkDotNet to measure the same hosted-model operations that the SpecFlow scenarios exercise:
@@ -29,7 +29,7 @@ This runs the BenchmarkDotNet suite over both local models so their hosted respo
 dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- train --model=traditional-local
 ```
 
-The traditional local model trains over `BitNetTrainingCorpus.CreateDefaultExamples()` for three epochs so it can be benchmarked and queried against the same dataset every time.
+The traditional local model trains over `BitNetTrainingCorpus.CreateDefaultExamples()` for 24 epochs using `System.Numerics.Tensors` softmax and dot-product primitives so it can be benchmarked and queried against the same dataset every time.
 
 ## Compare another local model
 

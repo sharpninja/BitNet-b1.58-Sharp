@@ -53,4 +53,4 @@ This command runs BenchmarkDotNet over the same hosted-model operations covered 
 dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- train --model=traditional-local
 ```
 
-The paper-aligned transformer still reports that training is not implemented in this branch. The `traditional-local` model trains on the default corpus so its training and query performance can be benchmarked on the same dataset.
+The paper-aligned transformer still reports that training is not implemented in this branch. The `traditional-local` model trains a small tensor-based local language model on the default corpus for 24 epochs so its training and query performance can be benchmarked on the same dataset.
