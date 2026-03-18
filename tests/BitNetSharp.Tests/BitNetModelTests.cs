@@ -92,7 +92,32 @@ public sealed class BitNetPaperModelTests
         var summary = host.Services.GetRequiredService<BitNetHostSummary>();
 
         Assert.Equal("bitnet-b1.58-sharp", summary.AgentName);
+        Assert.Equal("bitnet-b1.58-sharp", summary.ModelId);
         Assert.Equal("Microsoft Agent Framework", summary.HostingFramework);
         Assert.Equal("en-US", summary.PrimaryLanguage);
+    }
+
+    [Fact]
+    public async Task HostedAgentFactorySupportsTraditionalComparisonModel()
+    {
+        using var model = HostedAgentModelFactory.Create(HostedAgentModelFactory.TraditionalLocalModelId, VerbosityLevel.Normal);
+        var response = await model.GetResponseAsync("how are you hosted");
+
+        Assert.Equal(HostedAgentModelFactory.TraditionalLocalModelId, model.ModelId);
+        Assert.False(string.IsNullOrWhiteSpace(response.Text));
+        Assert.Contains(response.Diagnostics, diagnostic => diagnostic.Contains("traditional count-based", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void BenchmarkOptionsIncludePrimaryAndComparisonModels()
+    {
+        var options = HostedAgentBenchmarkOptions.Parse(
+            ["benchmark", "--model=bitnet-b1.58-sharp", "--compare-model=traditional-local", "--prompt=how are you hosted", "--max-tokens=3"],
+            VerbosityLevel.Verbose);
+
+        Assert.Equal(["bitnet-b1.58-sharp", "traditional-local"], options.ModelSpecifiers);
+        Assert.Equal("how are you hosted", options.Prompt);
+        Assert.Equal(3, options.MaxOutputTokens);
+        Assert.Equal(VerbosityLevel.Verbose, options.Verbosity);
     }
 }

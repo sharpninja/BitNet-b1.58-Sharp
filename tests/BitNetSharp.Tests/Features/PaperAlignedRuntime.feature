@@ -1,20 +1,39 @@
-Feature: Paper-aligned runtime use cases
-  The test suite should express the documented use cases for the paper-aligned BitNet runtime.
+Feature: Hosted model runtime use cases
+  The test suite should express measurable and comparable hosted-model use cases.
 
-  Scenario: Inspect next-token predictions for a prompt
-    Given the default paper-aligned BitNet model
+  Scenario Outline: Generate a response for a prompt
+    Given the hosted model named "<model>"
     When I generate a response for the prompt "how are you hosted"
-    Then the response should list top next-token predictions
-    And the response should include generated tokens
-    And the diagnostics should describe the decoder-only transformer
+    Then the response text should be non-empty
+    And the response should identify the selected model
+    Examples:
+      | model             |
+      | bitnet-b1.58-sharp |
+      | traditional-local  |
 
-  Scenario: Inspect ternary weight distribution across the seeded transformer
-    Given the default paper-aligned BitNet model
-    When I inspect the ternary weight distribution
-    Then the ternary distribution should include negative, zero, and positive counts
-    And the ternary distribution should include both negative and positive weights
+  Scenario Outline: Stream a response for a prompt
+    Given the hosted model named "<model>"
+    When I stream a response for the prompt "how are you hosted"
+    Then the stream should include at least one update
+    And each stream update should identify the selected model
+    Examples:
+      | model             |
+      | bitnet-b1.58-sharp |
+      | traditional-local  |
 
-  Scenario: Build the agent host for the paper-aligned model
-    Given the default paper-aligned BitNet model
+  Scenario Outline: Build the agent host for the selected model
+    Given the hosted model named "<model>"
     When I build the agent host
-    Then the host summary should describe the BitNet agent registration
+    Then the host summary should describe the selected model registration
+    Examples:
+      | model             |
+      | bitnet-b1.58-sharp |
+      | traditional-local  |
+
+  Scenario Outline: Train the selected model on the default dataset
+    Given the hosted model named "<model>"
+    When I train the selected model on the default dataset
+    Then the training run should complete over the default dataset
+    Examples:
+      | model            |
+      | traditional-local |

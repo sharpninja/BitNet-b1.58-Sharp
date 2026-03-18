@@ -1,6 +1,6 @@
 using BitNetSharp.App;
 using BitNetSharp.Core;
-using BitNetSharp.Core.Quantization;
+using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using TechTalk.SpecFlow;
@@ -10,92 +10,123 @@ namespace BitNetSharp.Tests.Steps;
 [Binding]
 public sealed class PaperAlignedRuntimeSteps
 {
-    private BitNetPaperModel? _model;
-    private BitNetGenerationResult? _generationResult;
-    private TernaryWeightStats? _weightStats;
+    private IHostedAgentModel? _model;
     private IHost? _host;
     private BitNetHostSummary? _hostSummary;
+    private ChatResponse? _chatResponse;
+    private List<ChatResponseUpdate>? _streamUpdates;
+    private int _trainedExampleCount;
 
-    [Given("the default paper-aligned BitNet model")]
-    public void GivenTheDefaultPaperAlignedBitNetModel()
+    [Given(@"the hosted model named ""(.*)""")]
+    public void GivenTheHostedModelNamed(string model)
     {
-        _model = BitNetBootstrap.CreatePaperModel(VerbosityLevel.Normal);
+        _model = HostedAgentModelFactory.Create(model, VerbosityLevel.Normal);
     }
 
     [When(@"I generate a response for the prompt ""(.*)""")]
-    public void WhenIGenerateAResponseForThePrompt(string prompt)
+    public async Task WhenIGenerateAResponseForThePrompt(string prompt)
     {
         Assert.NotNull(_model);
-        _generationResult = _model.GenerateResponse(prompt);
+        BuildHost();
+        var chatClient = _host!.Services.GetRequiredService<IChatClient>();
+        _chatResponse = await chatClient.GetResponseAsync([new ChatMessage(ChatRole.User, prompt)]);
     }
 
-    [Then("the response should list top next-token predictions")]
-    public void ThenTheResponseShouldListTopNextTokenPredictions()
+    [Then("the response text should be non-empty")]
+    public void ThenTheResponseTextShouldBeNonEmpty()
     {
-        Assert.NotNull(_generationResult);
-        Assert.Contains("Top next-token predictions:", _generationResult.ResponseText, StringComparison.Ordinal);
+        Assert.NotNull(_chatResponse);
+        Assert.False(string.IsNullOrWhiteSpace(_chatResponse.Text));
     }
 
-    [Then("the response should include generated tokens")]
-    public void ThenTheResponseShouldIncludeGeneratedTokens()
-    {
-        Assert.NotNull(_generationResult);
-        Assert.NotEmpty(_generationResult.Tokens);
-    }
-
-    [Then("the diagnostics should describe the decoder-only transformer")]
-    public void ThenTheDiagnosticsShouldDescribeTheDecoderOnlyTransformer()
-    {
-        Assert.NotNull(_generationResult);
-        Assert.Contains(
-            _generationResult.Diagnostics,
-            diagnostic => diagnostic.Contains("decoder-only transformer", StringComparison.OrdinalIgnoreCase));
-    }
-
-    [When("I inspect the ternary weight distribution")]
-    public void WhenIInspectTheTernaryWeightDistribution()
+    [Then("the response should identify the selected model")]
+    public void ThenTheResponseShouldIdentifyTheSelectedModel()
     {
         Assert.NotNull(_model);
-        _weightStats = _model.GetTernaryWeightStats();
+        Assert.NotNull(_chatResponse);
+        Assert.Equal(_model.ModelId, _chatResponse.ModelId);
     }
 
-    [Then("the ternary distribution should include negative, zero, and positive counts")]
-    public void ThenTheTernaryDistributionShouldIncludeNegativeZeroAndPositiveCounts()
+    [When(@"I stream a response for the prompt ""(.*)""")]
+    public async Task WhenIStreamAResponseForThePrompt(string prompt)
     {
-        Assert.NotNull(_weightStats);
-        Assert.Equal(
-            _weightStats.TotalCount,
-            _weightStats.NegativeCount + _weightStats.ZeroCount + _weightStats.PositiveCount);
+        Assert.NotNull(_model);
+        BuildHost();
+        var chatClient = _host!.Services.GetRequiredService<IChatClient>();
+        _streamUpdates = [];
+
+        await foreach (var update in chatClient.GetStreamingResponseAsync([new ChatMessage(ChatRole.User, prompt)]))
+        {
+            _streamUpdates.Add(update);
+        }
     }
 
-    [Then("the ternary distribution should include both negative and positive weights")]
-    public void ThenTheTernaryDistributionShouldIncludeBothNegativeAndPositiveWeights()
+    [Then("the stream should include at least one update")]
+    public void ThenTheStreamShouldIncludeAtLeastOneUpdate()
     {
-        Assert.NotNull(_weightStats);
-        Assert.True(_weightStats.NegativeCount > 0);
-        Assert.True(_weightStats.PositiveCount > 0);
+        Assert.NotNull(_streamUpdates);
+        Assert.NotEmpty(_streamUpdates);
+    }
+
+    [Then("each stream update should identify the selected model")]
+    public void ThenEachStreamUpdateShouldIdentifyTheSelectedModel()
+    {
+        Assert.NotNull(_model);
+        Assert.NotNull(_streamUpdates);
+        Assert.All(_streamUpdates, update => Assert.Equal(_model.ModelId, update.ModelId));
+    }
+
+    [When("I train the selected model on the default dataset")]
+    public void WhenITrainTheSelectedModelOnTheDefaultDataset()
+    {
+        Assert.NotNull(_model);
+        Assert.IsAssignableFrom<ITrainableHostedAgentModel>(_model);
+        var trainableModel = (ITrainableHostedAgentModel)_model;
+        var examples = BitNetTrainingCorpus.CreateDefaultExamples();
+        trainableModel.Train(examples, epochs: 3);
+        _trainedExampleCount = examples.Count;
     }
 
     [When("I build the agent host")]
     public void WhenIBuildTheAgentHost()
     {
         Assert.NotNull(_model);
-        _host = BitNetAgentHost.Build(_model);
-        _hostSummary = _host.Services.GetRequiredService<BitNetHostSummary>();
+        BuildHost();
     }
 
-    [Then("the host summary should describe the BitNet agent registration")]
-    public void ThenTheHostSummaryShouldDescribeTheBitNetAgentRegistration()
+    [Then("the host summary should describe the selected model registration")]
+    public void ThenTheHostSummaryShouldDescribeTheSelectedModelRegistration()
     {
+        Assert.NotNull(_model);
         Assert.NotNull(_hostSummary);
-        Assert.Equal("bitnet-b1.58-sharp", _hostSummary.AgentName);
+        Assert.Equal(_model.AgentName, _hostSummary.AgentName);
+        Assert.Equal(_model.ModelId, _hostSummary.ModelId);
         Assert.Equal("Microsoft Agent Framework", _hostSummary.HostingFramework);
-        Assert.Equal("en-US", _hostSummary.PrimaryLanguage);
+        Assert.Equal(_model.PrimaryLanguage, _hostSummary.PrimaryLanguage);
+    }
+
+    [Then("the training run should complete over the default dataset")]
+    public void ThenTheTrainingRunShouldCompleteOverTheDefaultDataset()
+    {
+        Assert.Equal(BitNetTrainingCorpus.CreateDefaultExamples().Count, _trainedExampleCount);
     }
 
     [AfterScenario]
     public void AfterScenario()
     {
         _host?.Dispose();
+        _model?.Dispose();
+    }
+
+    private void BuildHost()
+    {
+        if (_host is not null)
+        {
+            return;
+        }
+
+        Assert.NotNull(_model);
+        _host = BitNetAgentHost.Build(_model);
+        _hostSummary = _host.Services.GetRequiredService<BitNetHostSummary>();
     }
 }

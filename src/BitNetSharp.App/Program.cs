@@ -1,35 +1,59 @@
 using BitNetSharp.App;
 using BitNetSharp.Core;
 using BitNetSharp.Core.Quantization;
-using Microsoft.Extensions.AI;
 using Microsoft.Extensions.DependencyInjection;
 
 // Twenty columns keeps the console histogram readable without wrapping typical terminals.
 const int DefaultHistogramWidth = 20;
 
 var command = args.FirstOrDefault()?.ToLowerInvariant() ?? "chat";
-var prompt = args.Length > 1 ? string.Join(' ', args.Skip(1)) : "hello";
 var verbosity = ParseVerbosity(args);
+var modelSpecifier = ParseOption(args, "--model=") ?? HostedAgentModelFactory.DefaultModelId;
 
-var model = BitNetBootstrap.CreatePaperModel(verbosity);
+if (command == "benchmark")
+{
+    HostedAgentBenchmarkRunner.Run(HostedAgentBenchmarkOptions.Parse(args, verbosity));
+    return;
+}
+
+using var model = HostedAgentModelFactory.Create(modelSpecifier, verbosity);
 using var host = BitNetAgentHost.Build(model);
 var hostSummary = host.Services.GetRequiredService<BitNetHostSummary>();
 
 switch (command)
 {
     case "train":
-        Console.WriteLine("Paper-aligned transformer training is not implemented yet in this branch.");
+        if (model is ITrainableHostedAgentModel trainableModel)
+        {
+            var examples = BitNetTrainingCorpus.CreateDefaultExamples();
+            trainableModel.Train(examples, epochs: 3);
+            Console.WriteLine($"Trained '{model.ModelId}' on {examples.Count} default examples for 3 epochs.");
+        }
+        else
+        {
+            Console.WriteLine("Paper-aligned transformer training is not implemented yet in this branch.");
+        }
+
         Console.WriteLine(FormatModelSummary(model));
         break;
 
     case "visualize":
         Console.WriteLine(FormatModelSummary(model));
         Console.WriteLine();
-        Console.WriteLine(FormatWeightHistogram(model.GetTernaryWeightStats()));
+        if (model is IInspectableHostedAgentModel inspectableModel)
+        {
+            Console.WriteLine(FormatWeightHistogram(inspectableModel.GetTernaryWeightStats()));
+        }
+        else
+        {
+            Console.WriteLine($"Model '{model.ModelId}' does not expose BitNet ternary weight inspection.");
+        }
         break;
 
     case "host":
         Console.WriteLine($"Agent: {hostSummary.AgentName}");
+        Console.WriteLine($"Model: {hostSummary.ModelId}");
+        Console.WriteLine($"Display: {hostSummary.DisplayName}");
         Console.WriteLine($"Hosting: {hostSummary.HostingFramework}");
         Console.WriteLine($"Language: {hostSummary.PrimaryLanguage}");
         Console.WriteLine($"Verbosity: {hostSummary.Verbosity}");
@@ -37,16 +61,13 @@ switch (command)
 
     case "chat":
     default:
-        var chatClient = host.Services.GetRequiredService<IChatClient>();
-        var response = await chatClient.GetResponseAsync(
-            [new ChatMessage(ChatRole.User, prompt)],
-            new ChatOptions { MaxOutputTokens = model.Options.MaxResponseTokens });
-
-        Console.WriteLine(response.Text);
+        var prompt = ParsePrompt(args);
+        var result = await model.GetResponseAsync(prompt, ParseMaxTokens(args));
+        Console.WriteLine(result.Text);
 
         if (verbosity != VerbosityLevel.Quiet)
         {
-            foreach (var line in model.GenerateResponse(prompt).Diagnostics)
+            foreach (var line in result.Diagnostics)
             {
                 Console.WriteLine(line);
             }
@@ -55,18 +76,7 @@ switch (command)
         break;
 }
 
-static string FormatModelSummary(BitNetPaperModel model) =>
-    string.Join(
-        Environment.NewLine,
-        [
-            "Paper-aligned BitNet b1.58 transformer",
-            $"Vocabulary size: {model.Config.VocabSize}",
-            $"Layers: {model.Config.LayerCount}",
-            $"Dimension: {model.Config.Dimension}",
-            $"Hidden dimension: {model.Config.HiddenDimension}",
-            $"Heads: {model.Config.HeadCount}",
-            $"Max sequence length: {model.Config.MaxSequenceLength}"
-        ]);
+static string FormatModelSummary(IHostedAgentModel model) => string.Join(Environment.NewLine, model.DescribeModel());
 
 static string FormatWeightHistogram(TernaryWeightStats stats)
 {
@@ -97,14 +107,31 @@ static string FormatBar(string label, int value, int max, double scale)
 
 static VerbosityLevel ParseVerbosity(string[] args)
 {
-    var value = args
-        .Select(argument => argument.ToLowerInvariant())
-        .FirstOrDefault(argument => argument.StartsWith("--verbosity="));
-
-    return value?.Split('=', 2).LastOrDefault() switch
+    return ParseOption(args, "--verbosity=")?.ToLowerInvariant() switch
     {
         "quiet" => VerbosityLevel.Quiet,
         "verbose" => VerbosityLevel.Verbose,
         _ => VerbosityLevel.Normal
     };
 }
+
+static string ParsePrompt(string[] args)
+{
+    var positional = args
+        .Skip(1)
+        .Where(argument => !argument.StartsWith("--", StringComparison.Ordinal))
+        .ToArray();
+
+    return positional.Length == 0 ? "hello" : string.Join(' ', positional);
+}
+
+static int? ParseMaxTokens(string[] args)
+{
+    var value = ParseOption(args, "--max-tokens=");
+    return int.TryParse(value, out var parsed) ? parsed : null;
+}
+
+static string? ParseOption(IEnumerable<string> args, string prefix) =>
+    args.FirstOrDefault(argument => argument.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        ?.Split('=', 2)
+        .LastOrDefault();

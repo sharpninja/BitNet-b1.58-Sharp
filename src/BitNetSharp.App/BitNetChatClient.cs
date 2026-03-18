@@ -1,25 +1,24 @@
-using BitNetSharp.Core;
 using Microsoft.Extensions.AI;
 
 namespace BitNetSharp.App;
 
-public sealed class BitNetChatClient(BitNetPaperModel model) : IChatClient
+public sealed class HostedModelChatClient(IHostedAgentModel model) : IChatClient
 {
-    public Task<ChatResponse> GetResponseAsync(
+    public async Task<ChatResponse> GetResponseAsync(
         IEnumerable<ChatMessage> messages,
         ChatOptions? options = null,
         CancellationToken cancellationToken = default)
     {
         var prompt = messages.LastOrDefault(message => message.Role == ChatRole.User)?.Text ?? string.Empty;
-        var result = model.GenerateResponse(prompt, options?.MaxOutputTokens);
-        var response = new ChatResponse(new ChatMessage(ChatRole.Assistant, result.ResponseText))
+        var result = await model.GetResponseAsync(prompt, options?.MaxOutputTokens, cancellationToken);
+        var response = new ChatResponse(new ChatMessage(ChatRole.Assistant, result.Text))
         {
             ModelId = model.ModelId,
             FinishReason = ChatFinishReason.Stop,
             CreatedAt = DateTimeOffset.UtcNow
         };
 
-        return Task.FromResult(response);
+        return response;
     }
 
     public async IAsyncEnumerable<ChatResponseUpdate> GetStreamingResponseAsync(
