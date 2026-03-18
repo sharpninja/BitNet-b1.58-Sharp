@@ -42,7 +42,7 @@ This command prints the current model summary. When the selected model is the pa
 ## Benchmark
 
 ```bash
-dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- benchmark --model=bitnet-b1.58-sharp --compare-model=traditional-local --prompt="how are you hosted"
+dotnet run --configuration Release --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- benchmark --model=bitnet-b1.58-sharp --compare-model=traditional-local --prompt="how are you hosted"
 ```
 
 This command runs BenchmarkDotNet over the same hosted-model operations covered by the SpecFlow scenarios so you can compare local models under one agent wrapper.

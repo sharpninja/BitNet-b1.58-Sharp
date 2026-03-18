@@ -12,7 +12,10 @@ public static class HostedAgentBenchmarkRunner
     {
         ArgumentNullException.ThrowIfNull(options);
         options.StoreInEnvironment();
-        BenchmarkSwitcher.FromAssembly(typeof(HostedAgentBenchmarkRunner).Assembly).Run([]);
+        BenchmarkRunner.Run<HostedAgentHostBenchmarks>();
+        BenchmarkRunner.Run<HostedAgentResponseBenchmarks>();
+        BenchmarkRunner.Run<HostedAgentStreamingBenchmarks>();
+        BenchmarkRunner.Run<HostedAgentTrainingBenchmarks>();
     }
 }
 
@@ -28,7 +31,10 @@ public abstract class HostedAgentBenchmarkBase
 
 public abstract class TrainableHostedAgentBenchmarkBase : HostedAgentBenchmarkBase
 {
-    public new IEnumerable<string> ModelSpecifiers => Options.ModelSpecifiers
+    [ParamsSource(nameof(TrainableModelSpecifiers))]
+    public new string ModelSpecifier { get; set; } = HostedAgentModelFactory.TraditionalLocalModelId;
+
+    public IEnumerable<string> TrainableModelSpecifiers => Options.ModelSpecifiers
         .Where(static specifier =>
             string.Equals(specifier, HostedAgentModelFactory.TraditionalLocalModelId, StringComparison.OrdinalIgnoreCase)
             || File.Exists(specifier))
@@ -36,7 +42,7 @@ public abstract class TrainableHostedAgentBenchmarkBase : HostedAgentBenchmarkBa
 }
 
 [MemoryDiagnoser, ShortRunJob]
-public sealed class HostedAgentResponseBenchmarks : HostedAgentBenchmarkBase
+public class HostedAgentResponseBenchmarks : HostedAgentBenchmarkBase
 {
     [Benchmark(Description = "SpecFlow: Generate a response for a prompt")]
     public async Task<string> GenerateResponseForPrompt()
@@ -53,7 +59,7 @@ public sealed class HostedAgentResponseBenchmarks : HostedAgentBenchmarkBase
 }
 
 [MemoryDiagnoser, ShortRunJob]
-public sealed class HostedAgentStreamingBenchmarks : HostedAgentBenchmarkBase
+public class HostedAgentStreamingBenchmarks : HostedAgentBenchmarkBase
 {
     [Benchmark(Description = "SpecFlow: Stream a response for a prompt")]
     public async Task<int> StreamResponseForPrompt()
@@ -67,6 +73,7 @@ public sealed class HostedAgentStreamingBenchmarks : HostedAgentBenchmarkBase
                            [new ChatMessage(ChatRole.User, Options.Prompt)],
                            new ChatOptions { MaxOutputTokens = Options.MaxOutputTokens }))
         {
+            // Count each streamed update so the benchmark measures the end-to-end streaming path.
             count++;
         }
 
@@ -75,7 +82,7 @@ public sealed class HostedAgentStreamingBenchmarks : HostedAgentBenchmarkBase
 }
 
 [MemoryDiagnoser, ShortRunJob]
-public sealed class HostedAgentTrainingBenchmarks : TrainableHostedAgentBenchmarkBase
+public class HostedAgentTrainingBenchmarks : TrainableHostedAgentBenchmarkBase
 {
     [Benchmark(Description = "SpecFlow: Train the selected model on the default dataset")]
     public int TrainSelectedModel()
@@ -93,7 +100,7 @@ public sealed class HostedAgentTrainingBenchmarks : TrainableHostedAgentBenchmar
 }
 
 [MemoryDiagnoser, ShortRunJob]
-public sealed class HostedAgentHostBenchmarks : HostedAgentBenchmarkBase
+public class HostedAgentHostBenchmarks : HostedAgentBenchmarkBase
 {
     [Benchmark(Description = "SpecFlow: Build the agent host for the selected model")]
     public string BuildAgentHost()

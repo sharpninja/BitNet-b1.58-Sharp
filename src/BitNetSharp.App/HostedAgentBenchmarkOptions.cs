@@ -28,7 +28,7 @@ public sealed record HostedAgentBenchmarkOptions(
         }
 
         return new HostedAgentBenchmarkOptions(
-            models.Distinct(StringComparer.OrdinalIgnoreCase).ToArray(),
+            models.Distinct(StringComparer.Ordinal).ToArray(),
             GetOption(args, "--prompt=") ?? "how are you hosted",
             ParseNullableInt(GetOption(args, "--max-tokens=")),
             verbosity);

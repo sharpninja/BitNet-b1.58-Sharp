@@ -4,12 +4,15 @@ namespace BitNetSharp.App;
 
 public sealed class TraditionalLocalHostedAgentModel : IHostedAgentModel, ITrainableHostedAgentModel
 {
+    private const string DefaultFallbackResponse = "local model ready";
+
     private readonly BitNetTokenizer _tokenizer;
-    private readonly Dictionary<string, string[]> _memorizedResponses = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, string> _memorizedResponses = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Dictionary<string, int>> _transitions = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _priors = new(StringComparer.Ordinal);
     private readonly object _gate = new();
     private bool _isTrained;
+    private string _mostFrequentPriorToken = string.Empty;
 
     public TraditionalLocalHostedAgentModel(VerbosityLevel verbosity)
     {
@@ -48,7 +51,7 @@ public sealed class TraditionalLocalHostedAgentModel : IHostedAgentModel, ITrain
         var normalizedPrompt = NormalizePromptKey(prompt);
         if (_memorizedResponses.TryGetValue(normalizedPrompt, out var memorizedResponse))
         {
-            return Task.FromResult(CreateResponse(string.Join(' ', memorizedResponse)));
+            return Task.FromResult(CreateResponse(memorizedResponse));
         }
 
         var generated = new List<string>();
@@ -69,7 +72,7 @@ public sealed class TraditionalLocalHostedAgentModel : IHostedAgentModel, ITrain
 
         if (generated.Count == 0)
         {
-            generated.AddRange(["local", "model", "ready"]);
+            generated.AddRange(DefaultFallbackResponse.Split(' ', StringSplitOptions.RemoveEmptyEntries));
         }
 
         return Task.FromResult(CreateResponse(_tokenizer.Detokenize(generated)));
@@ -97,7 +100,7 @@ public sealed class TraditionalLocalHostedAgentModel : IHostedAgentModel, ITrain
                 {
                     var promptTokens = _tokenizer.Tokenize(example.Prompt).ToArray();
                     var responseTokens = _tokenizer.Tokenize(example.Response).ToArray();
-                    _memorizedResponses[NormalizePromptKey(example.Prompt)] = responseTokens;
+                    _memorizedResponses[NormalizePromptKey(example.Prompt)] = _tokenizer.Detokenize(responseTokens);
 
                     var context = promptTokens.LastOrDefault() ?? BitNetTokenizer.BeginToken;
                     foreach (var token in responseTokens)
@@ -108,6 +111,9 @@ public sealed class TraditionalLocalHostedAgentModel : IHostedAgentModel, ITrain
                 }
             }
 
+            _mostFrequentPriorToken = _priors.Count == 0
+                ? string.Empty
+                : _priors.MaxBy(static pair => pair.Value).Key;
             _isTrained = true;
         }
     }
@@ -156,14 +162,23 @@ public sealed class TraditionalLocalHostedAgentModel : IHostedAgentModel, ITrain
     {
         if (!_transitions.TryGetValue(context, out var counts) || counts.Count == 0)
         {
-            return _priors.OrderByDescending(static pair => pair.Value).Select(static pair => pair.Key).FirstOrDefault() ?? string.Empty;
+            return _mostFrequentPriorToken;
         }
 
-        return counts
-            .OrderByDescending(static pair => pair.Value)
-            .ThenBy(static pair => pair.Key, StringComparer.Ordinal)
-            .Select(static pair => pair.Key)
-            .FirstOrDefault() ?? string.Empty;
+        var bestToken = string.Empty;
+        var bestCount = -1;
+
+        foreach (var pair in counts)
+        {
+            if (pair.Value > bestCount
+                || (pair.Value == bestCount && string.CompareOrdinal(pair.Key, bestToken) < 0))
+            {
+                bestToken = pair.Key;
+                bestCount = pair.Value;
+            }
+        }
+
+        return bestToken;
     }
 
     private string NormalizePromptKey(string prompt) => string.Join(' ', _tokenizer.Tokenize(prompt));
