@@ -56,13 +56,13 @@ public static class HostedAgentBenchmarkReportRunner
     {
         ArgumentNullException.ThrowIfNull(options);
 
+        var originalWorkingDirectory = Directory.GetCurrentDirectory();
         var reportDirectory = Path.GetFullPath(
             string.IsNullOrWhiteSpace(outputDirectory)
-                ? Path.Combine(Directory.GetCurrentDirectory(), "artifacts", "benchmark-report")
+                ? Path.Combine(originalWorkingDirectory, "artifacts", "benchmark-report")
                 : outputDirectory);
         Directory.CreateDirectory(reportDirectory);
 
-        var originalWorkingDirectory = Directory.GetCurrentDirectory();
         try
         {
             Directory.SetCurrentDirectory(reportDirectory);

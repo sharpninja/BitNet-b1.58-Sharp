@@ -50,7 +50,7 @@ This command runs BenchmarkDotNet over the same hosted-model operations covered 
 ## Benchmark report
 
 ```bash
-dotnet run --configuration Release --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- benchmark-report --model=bitnet-b1.58-sharp --compare-model=traditional-local --output=/home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/artifacts/benchmark-report
+dotnet run --configuration Release --project src/BitNetSharp.App/BitNetSharp.App.csproj -- benchmark-report --model=bitnet-b1.58-sharp --compare-model=traditional-local --output=/absolute/path/to/benchmark-report
 ```
 
 This command runs the BenchmarkDotNet suite, evaluates both built-in models against the shared default training corpus/query script, and writes HTML, Markdown, and JSON comparison reports to the selected output directory.

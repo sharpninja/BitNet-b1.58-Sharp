@@ -32,7 +32,7 @@ This runs the BenchmarkDotNet suite over both local models so their hosted respo
 ## Generate the comparison report site
 
 ```bash
-dotnet run --configuration Release --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- benchmark-report --model=bitnet-b1.58-sharp --compare-model=traditional-local --output=/home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/artifacts/benchmark-report
+dotnet run --configuration Release --project src/BitNetSharp.App/BitNetSharp.App.csproj -- benchmark-report --model=bitnet-b1.58-sharp --compare-model=traditional-local --output=/absolute/path/to/benchmark-report
 ```
 
 This command writes a static report site with:
