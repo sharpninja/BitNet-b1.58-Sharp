@@ -1,6 +1,6 @@
 # Releases and packaging
 
-NuGet package versioning is generated with [GitVersion](https://gitversion.net/) through the repository-local `dotnet-tools.json` manifest.
+NuGet package versioning is generated with [GitVersion](https://gitversion.net/) through the standard repository-local tool manifest at `.config/dotnet-tools.json`.
 
 ## Local version calculation
 
