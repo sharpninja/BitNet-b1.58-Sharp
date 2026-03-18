@@ -4,23 +4,37 @@ on:
   push:
     branches:
       - main
+    tags:
+      - 'v*'
+      - 'V*'
   pull_request:
-
-permissions:
-  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    outputs:
+      semVer: ${{ steps.gitversion.outputs.semVer }}
 
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup .NET SDK
         uses: actions/setup-dotnet@v4
         with:
           global-json-file: global.json
+
+      - name: Restore local tools
+        run: dotnet tool restore
+
+      - name: Calculate semantic version
+        id: gitversion
+        run: |
+          echo "semVer=$(dotnet tool run dotnet-gitversion /output json /showvariable SemVer /nonormalize)" >> "$GITHUB_OUTPUT"
 
       - name: Restore
         run: dotnet restore BitNet-b1.58-Sharp.slnx
@@ -32,10 +46,10 @@ jobs:
         run: dotnet test BitNet-b1.58-Sharp.slnx --configuration Release --no-build --no-restore
 
       - name: Pack BitNetSharp.Core
-        run: dotnet pack "${{ github.workspace }}/src/BitNetSharp.Core/BitNetSharp.Core.csproj" --configuration Release --no-build --no-restore -p:VersionSuffix=ci.${{ github.run_number }} --output "${{ github.workspace }}/artifacts/packages/core"
+        run: dotnet pack "${{ github.workspace }}/src/BitNetSharp.Core/BitNetSharp.Core.csproj" --configuration Release --no-build --no-restore -p:PackageVersion=${{ steps.gitversion.outputs.semVer }} --output "${{ github.workspace }}/artifacts/packages/core"
 
       - name: Pack BitNetSharp.App dotnet tool
-        run: dotnet pack "${{ github.workspace }}/src/BitNetSharp.App/BitNetSharp.App.csproj" --configuration Release --no-build --no-restore -p:VersionSuffix=ci.${{ github.run_number }} --output "${{ github.workspace }}/artifacts/packages/tool"
+        run: dotnet pack "${{ github.workspace }}/src/BitNetSharp.App/BitNetSharp.App.csproj" --configuration Release --no-build --no-restore -p:PackageVersion=${{ steps.gitversion.outputs.semVer }} --output "${{ github.workspace }}/artifacts/packages/tool"
 
       - name: Upload BitNetSharp.Core package
         uses: actions/upload-artifact@v4
@@ -50,3 +64,53 @@ jobs:
           name: BitNetSharp.App-dotnet-tool
           path: ${{ github.workspace }}/artifacts/packages/tool/*.nupkg
           if-no-files-found: error
+
+  publish:
+    if: startsWith(github.ref, 'refs/tags/v') || startsWith(github.ref, 'refs/tags/V')
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download BitNetSharp.Core package
+        uses: actions/download-artifact@v4
+        with:
+          name: BitNetSharp.Core-nuget
+          path: ${{ github.workspace }}/artifacts/packages/core
+
+      - name: Download BitNetSharp.App tool package
+        uses: actions/download-artifact@v4
+        with:
+          name: BitNetSharp.App-dotnet-tool
+          path: ${{ github.workspace }}/artifacts/packages/tool
+
+      - name: Setup .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          global-json-file: global.json
+
+      - name: Publish packages to GitHub Packages
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NUGET_SOURCE: https://nuget.pkg.github.com/${{ github.repository_owner }}/index.json
+        run: |
+          for package in "${{ github.workspace }}/artifacts/packages/core/"*.nupkg "${{ github.workspace }}/artifacts/packages/tool/"*.nupkg; do
+            dotnet nuget push "$package" --source "$NUGET_SOURCE" --api-key "$GITHUB_TOKEN" --skip-duplicate
+          done
+
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG_NAME: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ needs.build.outputs.semVer }}
+        run: |
+          if gh release view "$TAG_NAME" >/dev/null 2>&1; then
+            gh release upload "$TAG_NAME" "${{ github.workspace }}/artifacts/packages/core/"*.nupkg "${{ github.workspace }}/artifacts/packages/tool/"*.nupkg --clobber
+          else
+            gh release create "$TAG_NAME" "${{ github.workspace }}/artifacts/packages/core/"*.nupkg "${{ github.workspace }}/artifacts/packages/tool/"*.nupkg --title "BitNet-b1.58-Sharp $RELEASE_VERSION" --notes "NuGet packages for BitNet-b1.58-Sharp $RELEASE_VERSION."
+          fi
