@@ -11,7 +11,7 @@ Feature: Paper-aligned runtime use cases
   Scenario: Inspect ternary weight distribution across the seeded transformer
     Given the default paper-aligned BitNet model
     When I inspect the ternary weight distribution
-    Then the ternary distribution should include negative zero and positive counts
+    Then the ternary distribution should include negative, zero, and positive counts
     And the ternary distribution should include both negative and positive weights
 
   Scenario: Build the agent host for the paper-aligned model

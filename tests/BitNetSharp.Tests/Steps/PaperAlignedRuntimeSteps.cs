@@ -59,7 +59,7 @@ public sealed class PaperAlignedRuntimeSteps
         _weightStats = _model.GetTernaryWeightStats();
     }
 
-    [Then("the ternary distribution should include negative zero and positive counts")]
+    [Then("the ternary distribution should include negative, zero, and positive counts")]
     public void ThenTheTernaryDistributionShouldIncludeNegativeZeroAndPositiveCounts()
     {
         Assert.NotNull(_weightStats);
