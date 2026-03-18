@@ -16,6 +16,16 @@ if (command == "benchmark")
     return;
 }
 
+if (command == "benchmark-report")
+{
+    var reportDirectory = ParseOption(args, "--output=");
+    var outputPath = await HostedAgentBenchmarkReportRunner.RunAsync(
+        HostedAgentBenchmarkOptions.Parse(args, verbosity),
+        reportDirectory);
+    Console.WriteLine($"Saved benchmark comparison report to {outputPath}");
+    return;
+}
+
 using var model = HostedAgentModelFactory.Create(modelSpecifier, verbosity);
 using var host = BitNetAgentHost.Build(model);
 var hostSummary = host.Services.GetRequiredService<BitNetHostSummary>();

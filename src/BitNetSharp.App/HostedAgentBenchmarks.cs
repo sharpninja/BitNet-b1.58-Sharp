@@ -29,18 +29,6 @@ public abstract class HostedAgentBenchmarkBase
     public IEnumerable<string> ModelSpecifiers => Options.ModelSpecifiers;
 }
 
-public abstract class TrainableHostedAgentBenchmarkBase : HostedAgentBenchmarkBase
-{
-    [ParamsSource(nameof(TrainableModelSpecifiers))]
-    public new string ModelSpecifier { get; set; } = HostedAgentModelFactory.TraditionalLocalModelId;
-
-    public IEnumerable<string> TrainableModelSpecifiers => Options.ModelSpecifiers
-        .Where(static specifier =>
-            string.Equals(specifier, HostedAgentModelFactory.TraditionalLocalModelId, StringComparison.OrdinalIgnoreCase)
-            || File.Exists(specifier))
-        .DefaultIfEmpty(HostedAgentModelFactory.TraditionalLocalModelId);
-}
-
 [MemoryDiagnoser, ShortRunJob]
 public class HostedAgentResponseBenchmarks : HostedAgentBenchmarkBase
 {
@@ -82,7 +70,7 @@ public class HostedAgentStreamingBenchmarks : HostedAgentBenchmarkBase
 }
 
 [MemoryDiagnoser, ShortRunJob]
-public class HostedAgentTrainingBenchmarks : TrainableHostedAgentBenchmarkBase
+public class HostedAgentTrainingBenchmarks : HostedAgentBenchmarkBase
 {
     [Benchmark(Description = "SpecFlow: Train the selected model on the default dataset")]
     public int TrainSelectedModel()

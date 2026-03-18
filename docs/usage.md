@@ -47,6 +47,14 @@ dotnet run --configuration Release --project /home/runner/work/BitNet-b1.58-Shar
 
 This command runs BenchmarkDotNet over the same hosted-model operations covered by the SpecFlow scenarios so you can compare local models under one agent wrapper.
 
+## Benchmark report
+
+```bash
+dotnet run --configuration Release --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- benchmark-report --model=bitnet-b1.58-sharp --compare-model=traditional-local --output=/home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/artifacts/benchmark-report
+```
+
+This command runs the BenchmarkDotNet suite, evaluates both built-in models against the shared default training corpus/query script, and writes HTML, Markdown, and JSON comparison reports to the selected output directory.
+
 ## Train the traditional comparison model
 
 ```bash
