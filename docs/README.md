@@ -7,6 +7,7 @@ BitNet b1.58 Sharp is a .NET 10 C# reference implementation of the paper-aligned
 - A paper-aligned BitNet core model in `/src/BitNetSharp.Core`
 - A decoder-only transformer implementation with `BitLinear`, `RmsNorm`, RoPE, causal attention, SwiGLU, and `BitNetTransformer`
 - Microsoft Agent Framework-oriented hosting in `/src/BitNetSharp.App`
+- BenchmarkDotNet-based local model comparison in `/src/BitNetSharp.App`
 - Default American English interaction behavior
 - Seeded transformer inspection and ternary weight summaries
 - GitBook-formatted project documentation in `/docs`
@@ -23,6 +24,7 @@ dotnet test /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/BitNet-b1.58
 ## Documentation map
 
 - [Architecture](architecture.md)
+- [Benchmarking and model comparison](benchmarking.md)
 - [Implementation plan](implementation-plan.md)
 - [Releases and packaging](releases-and-packaging.md)
 - [Usage](usage.md)

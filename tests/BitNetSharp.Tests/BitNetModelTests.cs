@@ -92,7 +92,55 @@ public sealed class BitNetPaperModelTests
         var summary = host.Services.GetRequiredService<BitNetHostSummary>();
 
         Assert.Equal("bitnet-b1.58-sharp", summary.AgentName);
+        Assert.Equal("bitnet-b1.58-sharp", summary.ModelId);
         Assert.Equal("Microsoft Agent Framework", summary.HostingFramework);
         Assert.Equal("en-US", summary.PrimaryLanguage);
+    }
+
+    [Fact]
+    public async Task HostedAgentFactorySupportsTraditionalComparisonModel()
+    {
+        using var model = HostedAgentModelFactory.Create(HostedAgentModelFactory.TraditionalLocalModelId, VerbosityLevel.Normal);
+        var response = await model.GetResponseAsync("how are you hosted");
+
+        Assert.Equal(HostedAgentModelFactory.TraditionalLocalModelId, model.ModelId);
+        Assert.False(string.IsNullOrWhiteSpace(response.Text));
+        Assert.Contains("microsoft agent framework", response.Text, StringComparison.OrdinalIgnoreCase);
+        Assert.Contains(response.Diagnostics, diagnostic => diagnostic.Contains("tensor-based ordered-context", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void TraditionalLocalModelLearnsSimplePromptResponse()
+    {
+        var model = new TraditionalLocalModel(
+            new BitNetOptions(["alpha", "beta", "gamma", "delta"], VerbosityLevel.Normal, MaxResponseTokens: 4),
+            embeddingDimension: 16,
+            contextWindow: 4,
+            seed: 11);
+
+        model.Train(
+            [
+                new TrainingExample("alpha beta", "gamma delta")
+            ],
+            epochs: 80,
+            learningRate: 0.55f);
+
+        var result = model.GenerateResponse("alpha beta", maxTokens: 2);
+
+        Assert.Equal(["gamma", "delta"], result.Tokens);
+        Assert.Contains(result.Diagnostics, diagnostic => diagnostic.Contains("tensor-based ordered-context", StringComparison.OrdinalIgnoreCase));
+    }
+
+    [Fact]
+    public void BenchmarkOptionsIncludePrimaryAndComparisonModels()
+    {
+        var options = HostedAgentBenchmarkOptions.Parse(
+            ["benchmark", "--model=bitnet-b1.58-sharp", "--compare-model=traditional-local", "--prompt=how are you hosted", "--max-tokens=3"],
+            VerbosityLevel.Verbose);
+
+        Assert.Equal(["bitnet-b1.58-sharp", "traditional-local"], options.ModelSpecifiers);
+        Assert.Equal("how are you hosted", options.Prompt);
+        Assert.Equal(3, options.MaxOutputTokens);
+        Assert.Equal(VerbosityLevel.Verbose, options.Verbosity);
     }
 }

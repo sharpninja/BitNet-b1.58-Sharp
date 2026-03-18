@@ -8,10 +8,11 @@ dotnet build /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/BitNet-b1.5
 
 ## Chat
 
-The chat command inspects the paper-aligned transformer and reports its top next-token predictions for the supplied prompt.
+The chat command can host the seeded paper-aligned transformer or another local comparison model and report that model's response for the supplied prompt.
 
 ```bash
 dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- chat "how are you hosted"
+dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- chat "how are you hosted" --model=traditional-local
 ```
 
 Optional verbosity:
@@ -25,9 +26,10 @@ dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src
 
 ```bash
 dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- host
+dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- host --model=traditional-local
 ```
 
-This command confirms that the application is wired for Microsoft Agent Framework hosting and reports the current language and verbosity configuration.
+This command confirms that the application is wired for Microsoft Agent Framework hosting and reports the selected model, language, and verbosity configuration.
 
 ## Transformer inspection
 
@@ -35,4 +37,20 @@ This command confirms that the application is wired for Microsoft Agent Framewor
 dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- visualize
 ```
 
-This command prints the current paper-model configuration and an aggregated ternary weight histogram across the transformer's `BitLinear` projections.
+This command prints the current model summary. When the selected model is the paper-aligned BitNet transformer, it also prints the ternary weight histogram across the transformer's `BitLinear` projections.
+
+## Benchmark
+
+```bash
+dotnet run --configuration Release --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- benchmark --model=bitnet-b1.58-sharp --compare-model=traditional-local --prompt="how are you hosted"
+```
+
+This command runs BenchmarkDotNet over the same hosted-model operations covered by the SpecFlow scenarios so you can compare local models under one agent wrapper.
+
+## Train the traditional comparison model
+
+```bash
+dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- train --model=traditional-local
+```
+
+The paper-aligned transformer still reports that training is not implemented in this branch. The `traditional-local` model trains a small tensor-based local language model on the default corpus for 24 epochs so its training and query performance can be benchmarked on the same dataset.
