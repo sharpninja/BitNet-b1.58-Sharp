@@ -47,6 +47,7 @@ bld/
 
 # Visual Studio 2017 auto generated files
 Generated\ Files/
+*.feature.cs
 
 # MSTest test Results
 [Tt]est[Rr]esult*/
