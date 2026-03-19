@@ -180,22 +180,38 @@ Implement "one byte = chain of likely tokens" using 256 pre-mined buckets. This 
 
 1. Define `ChainEntry` record: `byte Id`, `int[] Tokens`, `float Confidence`.
 2. Implement `ChainBucketTable`: load 256 entries from `chain-buckets.bin`; expose `Lookup(ReadOnlySpan<int> context)`.
-3. Add serialization/deserialization for `chain-buckets.bin` (binary format: header + 256 length-prefixed token arrays).
+3. Add serialization/deserialization for `chain-buckets.bin` with a fully specified binary format for cross-implementation stability:
+   - **Endianness:** All multi-byte values are little-endian.
+   - **Header (fixed 12 bytes):**
+     - `char[4] Magic` = ASCII `"CHNB"` (0x43, 0x48, 0x4E, 0x42).
+     - `uint16 Version` = `0x0001` (allows future format evolution).
+     - `uint16 EntryCount` = `256` (must be 256 for v1).
+     - `uint16 MaxChainLength` = `8` (implementers MUST NOT write longer chains).
+     - `uint16 Reserved` = `0` (writer MUST set to 0; readers MUST ignore).
+   - **Entries (repeated `EntryCount` times, in ascending `ChainID` order 0–255):**
+     - `uint8 ChainID` (0–255).
+     - `uint8 Reserved` = `0` (align to 2 bytes; written as 0, ignored on read).
+     - `uint16 TokenCount` (0–`MaxChainLength`; readers MUST reject `TokenCount > MaxChainLength` as a format error).
+     - `int32[TokenCount] Tokens` — token IDs in the main model tokenizer's ID space.
+     - `float32 Confidence` — IEEE 754 single-precision, little-endian.
+   - **Footer (4 bytes):**
+     - `uint32 Crc32` — CRC32 of all preceding bytes (header + all entries), using polynomial 0xEDB88320. Readers MUST verify and reject mismatches.
+   - This layout MUST be mirrored exactly in both the .NET implementation and any C/C++ (`llama.cpp`) consumer.
 4. Implement `ChainMiner` using the existing `BitNetDataLoader` shard streams.
 5. Add sliding-window n-gram extraction (n = 2–8) to `ChainMiner`.
 6. Add frequency counter and conditional probability scorer inside `ChainMiner`.
 7. Implement greedy prefix-tree packing to compress top candidates into exactly 256 buckets.
 8. Wire `ChainBucketTable` into `InferenceEngine`: after each generated token, attempt bucket lookup against the last 1–3 context tokens.
-9. On a hit, emit the single-byte `ChainID` and expand to the full candidate chain.
+9. On a hit, use the single-byte `ChainID` to look up and expand the corresponding candidate token chain (no `ChainID` is emitted as part of the model output).
 10. Run one BitNet forward pass across the full candidate chain for parallel verification.
-11. Accept tokens sequentially from the chain until the first logit mismatch.
+11. Accept tokens sequentially from the chain while `p_model(token_k) ≥ AcceptanceThreshold`; stop at the first token whose probability falls below the threshold.
 12. On mismatch or no-hit, fall back to single-token greedy/top-p decoding.
 13. Update the KV-cache by appending the entire accepted chain in one operation.
 14. Add `ChainBucketOptions` configuration: `Enabled`, `MaxChainLength` (default 8), `AcceptanceThreshold` (default 0.85).
 15. Add `--enable-chains` CLI flag wired to `ChainBucketOptions`.
 16. Log per-step metrics: acceptance rate, average accepted tokens per step, effective speedup multiplier.
 17. Export `chain-buckets.bin` alongside the model checkpoint for llama.cpp compatibility.
-18. Validate: Tier 1 acceptance rate ≥ 65%; tokens/sec ≥ 2× baseline.
+18. Validate: Tier 2 (SlimPajama / FineWeb-Edu) acceptance rate ≥ 65%; tokens/sec ≥ 2× baseline.
 
 ### Chain-Bucket Inference Flow
 
@@ -206,7 +222,7 @@ flowchart TD
     C -->|Yes| D[Expand Candidate Chain<br/>up to 8 tokens]
     C -->|No| G[Single-Token Greedy / Top-p]
     D --> E[Parallel BitNet Forward Pass<br/>+ Verification]
-    E --> F{Accept Until Mismatch?}
+    E --> F{p_model(token_k) ≥ AcceptanceThreshold?}
     F -->|Yes| H[Append Entire Chain to KV-Cache<br/>1 Update]
     F -->|No| G
     H --> I[Continue Generation]
