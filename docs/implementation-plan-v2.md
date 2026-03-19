@@ -6,9 +6,9 @@
 **Date:** March 19, 2026
 **Status:** Ready-to-execute blueprint
 
-> **Note:** This supersedes [Implementation Plan v1](implementation-plan-v1.md). The v1 plan is retained for historical reference.
+> **Note:** This plan has been superseded by [Implementation Plan v3](implementation-plan-v3.md). It is retained here for historical reference.
 >
-> **Key additions in v2:** Dedicated training datasets strategy (Section 3), tiered development approach, download/prep pseudocode, and expanded UML catalog.
+> **Key additions in v2 over v1:** Dedicated training datasets strategy (Section 3), tiered development approach, download/prep pseudocode, and expanded UML catalog.
 
 ---
 
