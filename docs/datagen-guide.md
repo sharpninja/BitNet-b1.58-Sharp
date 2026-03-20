@@ -31,7 +31,6 @@ dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen \
 - `--candidate-count=...` number of self-consistency passes per example, default `3`
 - `--min-quality=...` acceptance threshold between `0.0` and `1.0`, default `0.45`
 - `--max-tokens=...` optional model output limit
-- `--model=...` optional hosted model selector, default `bitnet-b1.58-sharp`
 
 ## Seed format
 

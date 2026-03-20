@@ -191,6 +191,8 @@ public sealed record DataGenCommandOptions(
 
 public static class DataGenCommand
 {
+    private static readonly char[] TokenDelimiters = [' ', '\r', '\n', '\t', ',', '.', ':', ';', '!', '?', '(', ')', '[', ']', '{', '}', '"', '\''];
+
     private static readonly JsonSerializerOptions OutputJsonOptions = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -215,11 +217,22 @@ public static class DataGenCommand
         await using var writer = new StreamWriter(stream);
 
         var acceptedEntries = new List<DataGenDatasetEntry>();
-        foreach (var example in generator.Generate(options.Domain, options.Count, seeds, options.LoraPath))
+        var candidateTarget = Math.Max(options.Count * 5, options.Count);
+        foreach (var example in generator.Generate(options.Domain, candidateTarget, seeds, options.LoraPath))
         {
             cancellationToken.ThrowIfCancellationRequested();
+            if (acceptedEntries.Count >= options.Count)
+            {
+                break;
+            }
+
             var prompt = template.RenderPrompt(options, example, acceptedEntries.Count + 1, seeds);
             var qualityScore = ComputeQualityScore(model, prompt, example.Response, acceptedEntries, options);
+            if (qualityScore < options.MinimumQualityScore)
+            {
+                continue;
+            }
+
             var entry = new DataGenDatasetEntry(
                 example.Instruction,
                 example.Response,
@@ -239,6 +252,12 @@ public static class DataGenCommand
             acceptedEntries.Add(entry);
             var line = JsonSerializer.Serialize(entry, OutputJsonOptions);
             await writer.WriteLineAsync(line.AsMemory(), cancellationToken);
+        }
+
+        if (acceptedEntries.Count < options.Count)
+        {
+            throw new InvalidOperationException(
+                $"DataGen could only accept {acceptedEntries.Count} examples after evaluating {candidateTarget} candidates. Lower --min-quality or add seeds/constraints.");
         }
 
         return options.OutputPath;
@@ -267,7 +286,7 @@ public static class DataGenCommand
         DataGenCommandOptions options)
     {
         var candidates = Enumerable.Range(0, options.CandidateCount)
-            .Select(_ => model.GenerateResponse(prompt, options.MaxOutputTokens ?? 8).ResponseText)
+            .Select(_ => model.GenerateResponse(prompt, options.MaxOutputTokens ?? 16).ResponseText)
             .ToArray();
 
         var majorityCount = candidates
@@ -279,8 +298,7 @@ public static class DataGenCommand
         var consistencyScore = candidates.Length == 0 ? 0d : majorityCount / (double)candidates.Length;
         var schemaScore = !string.IsNullOrWhiteSpace(prompt) && !string.IsNullOrWhiteSpace(response) ? 1d : 0d;
         var diversityScore = ComputeDiversityScore(response, acceptedEntries);
-        var qualityScore = Math.Round((schemaScore * 0.4d) + (consistencyScore * 0.35d) + (diversityScore * 0.25d), 4);
-        return Math.Max(options.MinimumQualityScore, qualityScore);
+        return Math.Round((schemaScore * 0.4d) + (consistencyScore * 0.35d) + (diversityScore * 0.25d), 4);
     }
 
     private static double ComputeDiversityScore(string candidate, IReadOnlyList<DataGenDatasetEntry> acceptedEntries)
@@ -312,7 +330,7 @@ public static class DataGenCommand
     }
 
     private static HashSet<string> Tokenize(string value) =>
-        value.Split([' ', '\r', '\n', '\t', ',', '.', ':', ';', '!', '?', '(', ')', '[', ']', '{', '}', '"', '\''],
+        value.Split(TokenDelimiters,
                 StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
             .Select(term => term.ToLowerInvariant())
             .ToHashSet(StringComparer.Ordinal);

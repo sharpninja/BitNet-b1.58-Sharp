@@ -98,13 +98,15 @@ public sealed class DataGenTests
             Assert.NotEmpty(first.Prompt);
             Assert.Contains("Variation pattern-", first.Prompt, StringComparison.Ordinal);
             Assert.Contains("Review", first.Prompt, StringComparison.Ordinal);
-            Assert.NotEmpty(first.GroundingContext);
+            Assert.Contains("Review null handling", first.GroundingContext);
+            Assert.Contains("Review tests", first.GroundingContext);
             Assert.Equal("/tmp/code-review-lora.bin", first.LoraPath);
             Assert.False(string.IsNullOrWhiteSpace(first.SeedInstruction));
             Assert.False(string.IsNullOrWhiteSpace(first.SeedResponse));
             Assert.False(string.IsNullOrWhiteSpace(first.Variation));
             Assert.Equal("bitnet-b1.58-sharp", first.GeneratorModel);
             Assert.Contains("synthetic", first.Tags);
+            Assert.Contains("Prefer focused regression coverage.", first.Prompt, StringComparison.Ordinal);
         }
         finally
         {
