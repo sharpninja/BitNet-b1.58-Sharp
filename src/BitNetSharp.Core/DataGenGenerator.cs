@@ -178,8 +178,8 @@ public sealed class DataGenGenerator(BitNetPaperModel model)
     {
         public DataGenSeedExample ToSeedExample()
         {
-            var instruction = FirstNonEmpty(Instruction, Prompt, Input);
-            var response = FirstNonEmpty(Response, Output, Answer);
+            var instruction = FirstNonBlank(Instruction, Prompt, Input);
+            var response = FirstNonBlank(Response, Output, Answer);
 
             if (instruction is null || response is null)
             {
@@ -189,7 +189,7 @@ public sealed class DataGenGenerator(BitNetPaperModel model)
             return new DataGenSeedExample(instruction, response);
         }
 
-        private static string? FirstNonEmpty(params string?[] values) =>
+        private static string? FirstNonBlank(params string?[] values) =>
             values.FirstOrDefault(value => !string.IsNullOrWhiteSpace(value))?.Trim();
     }
 }

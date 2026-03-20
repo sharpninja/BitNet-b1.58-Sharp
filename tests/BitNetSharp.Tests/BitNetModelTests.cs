@@ -244,15 +244,27 @@ public sealed class BitNetPaperModelTests
     public async Task DataGenCommandWritesJsonlDataset()
     {
         var outputPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-synthetic.jsonl");
+        var seedPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-seeds.json");
 
         try
         {
+            await File.WriteAllTextAsync(
+                seedPath,
+                """
+                [
+                  {
+                    "prompt": "draft a support troubleshooting request",
+                    "response": "summarize the issue and confirm the first diagnostic step"
+                  }
+                ]
+                """);
+
             var writtenPath = await DataGenCommand.RunAsync(
                 [
                     "datagen",
                     "--domain", "customer-support",
                     "--count", "2",
-                    "--seeds", "/home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/examples/seed-examples.json",
+                    "--seeds", seedPath,
                     "--output", outputPath
                 ],
                 VerbosityLevel.Quiet);
@@ -271,6 +283,7 @@ public sealed class BitNetPaperModelTests
         finally
         {
             File.Delete(outputPath);
+            File.Delete(seedPath);
         }
     }
 }

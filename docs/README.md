@@ -16,11 +16,11 @@ BitNet b1.58 Sharp is a .NET 10 C# reference implementation of the paper-aligned
 ## Quick start
 
 ```bash
-dotnet build /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp.slnx
-dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- chat "hello"
-dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen --domain "customer-support" --count 10 --seeds /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/examples/seed-examples.json --output /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/data/customer-support.jsonl
-dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- visualize
-dotnet test /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp.slnx
+dotnet build BitNet-b1.58-Sharp.slnx
+dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- chat "hello"
+dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen --domain "customer-support" --count 10 --seeds examples/seed-examples.json --output data/customer-support.jsonl
+dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- visualize
+dotnet test BitNet-b1.58-Sharp.slnx
 ```
 
 ## Documentation map

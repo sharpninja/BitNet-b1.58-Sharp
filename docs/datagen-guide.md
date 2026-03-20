@@ -5,11 +5,11 @@ DataGen is the repository's offline synthetic dataset bootstrapper for the paper
 ## Generate a dataset
 
 ```bash
-dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen \
+dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen \
   --domain "medical-diagnosis" \
   --count 50000 \
-  --seeds /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/examples/seed-examples.json \
-  --output /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/data/synthetic-medical.jsonl \
+  --seeds examples/seed-examples.json \
+  --output data/synthetic-medical.jsonl \
   --lora medical-lora.bin
 ```
 
