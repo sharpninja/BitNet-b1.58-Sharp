@@ -27,6 +27,7 @@ public sealed record DataGenCommandOptions(
         ArgumentNullException.ThrowIfNull(args);
 
         var domain = ReadRequiredOption(args, "--domain");
+        var seedsPath = ReadRequiredOption(args, "--seeds");
         var outputPath = ReadRequiredOption(args, "--output");
         var countValue = ReadRequiredOption(args, "--count");
 

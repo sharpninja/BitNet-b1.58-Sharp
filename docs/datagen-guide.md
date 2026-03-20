@@ -39,6 +39,8 @@ Seed files are standard JSON arrays. Each object must include one instruction-li
 - instruction: `instruction`, `prompt`, or `input`
 - response: `response`, `output`, or `answer`
 
+Example:
+
 ```json
 [
   {
