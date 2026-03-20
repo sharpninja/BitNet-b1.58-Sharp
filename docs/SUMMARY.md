@@ -2,6 +2,7 @@
 
 - [BitNet b1.58 Sharp](README.md)
   - [Architecture](architecture.md)
+  - [DataGen guide](datagen-guide.md)
   - [Implementation plan v3 (active)](implementation-plan-v3.md)
   - [Implementation plan v2 (archived)](implementation-plan-v2.md)
   - [Implementation plan v1 (archived)](implementation-plan-v1.md)

@@ -55,6 +55,15 @@ dotnet run --configuration Release --project src/BitNetSharp.App/BitNetSharp.App
 
 This command runs the BenchmarkDotNet suite, evaluates both built-in models against the shared default training corpus/query script, and writes HTML, Markdown, and JSON comparison reports to the selected output directory.
 
+## DataGen
+
+```bash
+dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen --domain "medical-diagnosis" --count 25 --seeds /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/examples/seed-examples.json --output /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/data/synthetic-medical.jsonl
+dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen --domain "medical-diagnosis" --count 25 --seeds /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/examples/seed-examples.json --output /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/data/synthetic-medical.jsonl --lora medical-lora.bin
+```
+
+This command reads a JSON array of seed examples, expands them into synthetic instruction-response pairs, and writes JSONL output for downstream local fine-tuning or evaluation. See the [DataGen guide](datagen-guide.md) for accepted seed aliases and the output schema.
+
 ## Train the traditional comparison model
 
 ```bash
