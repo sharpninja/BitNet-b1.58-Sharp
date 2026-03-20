@@ -20,6 +20,7 @@ The manual GitHub Actions benchmark report workflow runs the same benchmark suit
 - efficacy, measured as non-empty responses across the shared default query script
 - accuracy, measured as exact-match and expected-token recall against the default corpus responses
 - performance, measured from the exported BenchmarkDotNet results
+- a paper-alignment audit for the canonical BitNet model so the report shows both implemented architecture guarantees and still-pending paper reproduction work
 
 ## Run the built-in comparison benchmark
 
@@ -40,6 +41,7 @@ This command writes a static report site with:
 - `index.html` for GitHub Pages publishing
 - `comparison-report.md` and `comparison-report.json` summaries
 - raw BenchmarkDotNet HTML, CSV, and GitHub-flavored Markdown exports under `BenchmarkDotNet.Artifacts/results/`
+- a paper-alignment audit section for `bitnet-b1.58-sharp`
 
 The repository also includes a manual trigger workflow at `.github/workflows/benchmark-report.yml` that builds, tests, generates the same report, uploads it as an artifact, and deploys it with GitHub Pages.
 

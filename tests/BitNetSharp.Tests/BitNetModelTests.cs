@@ -237,7 +237,7 @@ public sealed class BitNetPaperModelTests
         Assert.Equal(12, options.Count);
         Assert.EndsWith(Path.Combine("examples", "seed-examples.json"), options.SeedsPath, StringComparison.Ordinal);
         Assert.EndsWith(Path.Combine("data", "synthetic-medical.jsonl"), options.OutputPath, StringComparison.Ordinal);
-        Assert.Equal("medical-lora.bin", options.LoraPath);
+        Assert.EndsWith("medical-lora.bin", options.LoraPath, StringComparison.Ordinal);
     }
 
     [Fact]

@@ -30,6 +30,17 @@ Feature: Hosted model runtime use cases
       | bitnet-b1.58-sharp |
       | traditional-local  |
 
+  Scenario: Inspect the paper-aligned transformer description
+    Given the hosted model named "bitnet-b1.58-sharp"
+    When I inspect the selected model description
+    Then the model description should enumerate the paper-aligned transformer topology
+
+  Scenario: Run the paper-alignment audit for the canonical BitNet model
+    Given the hosted model named "bitnet-b1.58-sharp"
+    When I run the paper-alignment audit
+    Then the paper-alignment architecture checks should all pass
+    And the paper-alignment audit should identify pending canonical workflow items
+
   Scenario Outline: Train the selected model on the default dataset
     Given the hosted model named "<model>"
     When I train the selected model on the default dataset

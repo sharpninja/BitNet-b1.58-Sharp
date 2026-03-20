@@ -18,6 +18,10 @@ public sealed class RmsNorm : Module
 
     public float Epsilon { get; }
 
+    public bool HasBias => false;
+
+    public bool HasLearnableScale => true;
+
     public override float[,] Forward(float[,] input)
     {
         ArgumentNullException.ThrowIfNull(input);

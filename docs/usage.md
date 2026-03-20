@@ -35,9 +35,12 @@ This command confirms that the application is wired for Microsoft Agent Framewor
 
 ```bash
 dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- visualize
+dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- paper-audit
 ```
 
-This command prints the current model summary. When the selected model is the paper-aligned BitNet transformer, it also prints the ternary weight histogram across the transformer's `BitLinear` projections.
+The `visualize` command prints the current model summary. When the selected model is the paper-aligned BitNet transformer, it also prints the ternary weight histogram across the transformer's `BitLinear` projections.
+
+The `paper-audit` command turns the paper checklist into an executable report. It confirms the implemented architecture requirements that the repository currently satisfies and explicitly lists the remaining paper-reproduction work that is still pending, such as end-to-end training, perplexity measurement, zero-shot task evaluation, and external checkpoint interoperability.
 
 ## Benchmark
 
@@ -54,15 +57,16 @@ dotnet run --configuration Release --project src/BitNetSharp.App/BitNetSharp.App
 ```
 
 This command runs the BenchmarkDotNet suite, evaluates both built-in models against the shared default training corpus/query script, and writes HTML, Markdown, and JSON comparison reports to the selected output directory.
+For the paper-aligned BitNet model, the generated report also includes a paper-alignment audit section with architecture checks and pending canonical workflow items.
 
 ## DataGen
 
 ```bash
-dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen --domain "medical-diagnosis" --count 25 --seeds examples/seed-examples.json --output data/synthetic-medical.jsonl
-dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen --domain "medical-diagnosis" --count 25 --seeds examples/seed-examples.json --output data/synthetic-medical.jsonl --lora medical-lora.bin
+dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen --domain "medical-diagnosis" --count 25 --output data/synthetic-medical.jsonl
+dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen --domain "medical-diagnosis" --count 25 --seeds examples/seed-examples.json --output data/synthetic-medical.jsonl --constraint "Use American English" --lora medical-lora.bin
 ```
 
-This command reads a JSON array of seed examples, expands them into synthetic instruction-response pairs, and writes JSONL output for downstream local fine-tuning or evaluation. See the [DataGen guide](datagen-guide.md) for accepted seed aliases and the output schema.
+This command reads optional seed examples, merges the built-in pattern prompts with the repository template, and writes JSONL output for downstream local fine-tuning or evaluation. Optional flags include `--task-type`, `--constraint`, `--constraints`, `--output-schema`, `--template`, `--candidate-count`, `--min-quality`, `--max-tokens`, and `--lora`. The emitted JSONL includes both the core generator fields (`seedInstruction`, `variation`, `generatorModel`, `tags`) and the merged prompt metadata (`prompt`, `taskType`, `qualityScore`, `generationTimestamp`, `groundingContext`). See the [DataGen guide](datagen-guide.md) for accepted seed aliases and the merged output schema.
 
 ## Train the traditional comparison model
 

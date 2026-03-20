@@ -76,7 +76,14 @@ public sealed class HostedAgentBenchmarkReportRunnerTests
                         [
                             new HostedAgentBenchmarkQueryResult("hello", "Hello!", "<response>", true, false, 0.5d),
                             new HostedAgentBenchmarkQueryResult("how are you hosted", "Hosted", "Hosted <details>", true, false, 0.5d)
-                        ])
+                        ],
+                        PaperAlignmentAudit: new BitNetPaperAuditReport(
+                            HostedAgentModelFactory.DefaultModelId,
+                            "Paper audit",
+                            [
+                                new BitNetPaperAuditCheck("Architecture", "Decoder-only transformer topology matches the paper-aligned BitNet surface.", BitNetPaperAuditStatus.Passed, "Verified."),
+                                new BitNetPaperAuditCheck("Roadmap", "Perplexity parity against the paper datasets is measured in-repository.", BitNetPaperAuditStatus.Pending, "Not yet implemented.")
+                            ]))
                 ],
                 [
                     new HostedAgentBenchmarkPerformanceRow(
@@ -98,8 +105,11 @@ public sealed class HostedAgentBenchmarkReportRunnerTests
 
             Assert.Contains("BitNet benchmark comparison report", markdown, StringComparison.Ordinal);
             Assert.Contains("Expected-token recall", markdown, StringComparison.Ordinal);
+            Assert.Contains("Paper-alignment audit", markdown, StringComparison.Ordinal);
+            Assert.Contains("Perplexity parity against the paper datasets is measured in-repository.", markdown, StringComparison.Ordinal);
             Assert.Contains("<response>", markdown, StringComparison.Ordinal);
             Assert.Contains("&lt;response&gt;", html, StringComparison.Ordinal);
+            Assert.Contains("Paper-alignment audit", html, StringComparison.Ordinal);
             Assert.Contains("comparison-report.md", html, StringComparison.Ordinal);
             Assert.Contains("\"ModelSpecifier\": \"bitnet-b1.58-sharp\"", json, StringComparison.Ordinal);
         }

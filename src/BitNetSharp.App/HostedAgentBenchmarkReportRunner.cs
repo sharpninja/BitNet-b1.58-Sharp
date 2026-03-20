@@ -24,7 +24,8 @@ public sealed record HostedAgentBenchmarkModelReport(
     int TotalQueries,
     int ExactMatches,
     double AverageExpectedTokenRecall,
-    IReadOnlyList<HostedAgentBenchmarkQueryResult> QueryResults)
+    IReadOnlyList<HostedAgentBenchmarkQueryResult> QueryResults,
+    BitNetPaperAuditReport? PaperAlignmentAudit = null)
 {
     public double EfficacyRate => TotalQueries == 0 ? 0d : SuccessfulQueries / (double)TotalQueries;
 
@@ -64,16 +65,10 @@ public static class HostedAgentBenchmarkReportRunner
                 ? Path.Combine(originalWorkingDirectory, "artifacts", "benchmark-report")
                 : outputDirectory);
         Directory.CreateDirectory(reportDirectory);
-
-        try
-        {
-            Directory.SetCurrentDirectory(reportDirectory);
-            HostedAgentBenchmarkRunner.Run(options);
-        }
-        finally
-        {
-            Directory.SetCurrentDirectory(originalWorkingDirectory);
-        }
+        HostedAgentBenchmarkRunner.Run(options);
+        CopyArtifactsDirectory(
+            Path.Combine(originalWorkingDirectory, "BenchmarkDotNet.Artifacts"),
+            Path.Combine(reportDirectory, "BenchmarkDotNet.Artifacts"));
 
         var trainingExamples = BitNetTrainingCorpus.CreateDefaultExamples();
         var modelReports = await CreateModelReportsAsync(options, trainingExamples, cancellationToken);
@@ -222,7 +217,8 @@ public static class HostedAgentBenchmarkReportRunner
                 queryResults.Count,
                 queryResults.Count(static result => result.ExactMatch),
                 queryResults.Count == 0 ? 0d : queryResults.Average(static result => result.ExpectedTokenRecall),
-                queryResults));
+                queryResults,
+                model is BitNetHostedAgentModel bitNetModel ? BitNetPaperAuditor.CreateReport(bitNetModel.Model) : null));
         }
 
         return reports;
@@ -269,6 +265,8 @@ public static class HostedAgentBenchmarkReportRunner
             }
         }
 
+        builder.AppendLine();
+        AppendPaperAuditMarkdown(builder, report);
         builder.AppendLine();
         builder.AppendLine("## BenchmarkDotNet performance summary");
         builder.AppendLine();
@@ -346,6 +344,7 @@ public static class HostedAgentBenchmarkReportRunner
 
         builder.AppendLine("    </tbody>");
         builder.AppendLine("  </table>");
+        AppendPaperAuditHtml(builder, report);
 
         builder.AppendLine("  <h2>BenchmarkDotNet performance summary</h2>");
         builder.AppendLine("  <table>");
@@ -408,10 +407,102 @@ public static class HostedAgentBenchmarkReportRunner
     private static string ToRelativeUnixPath(string rootDirectory, string path) =>
         Path.GetRelativePath(rootDirectory, path).Replace(Path.DirectorySeparatorChar, '/');
 
+    private static void CopyArtifactsDirectory(string sourceDirectory, string destinationDirectory)
+    {
+        if (!Directory.Exists(sourceDirectory))
+        {
+            return;
+        }
+
+        if (Directory.Exists(destinationDirectory))
+        {
+            Directory.Delete(destinationDirectory, recursive: true);
+        }
+
+        Directory.CreateDirectory(destinationDirectory);
+        foreach (var directory in Directory.GetDirectories(sourceDirectory, "*", SearchOption.AllDirectories))
+        {
+            Directory.CreateDirectory(directory.Replace(sourceDirectory, destinationDirectory, StringComparison.Ordinal));
+        }
+
+        foreach (var file in Directory.GetFiles(sourceDirectory, "*", SearchOption.AllDirectories))
+        {
+            var destinationFile = file.Replace(sourceDirectory, destinationDirectory, StringComparison.Ordinal);
+            Directory.CreateDirectory(Path.GetDirectoryName(destinationFile)!);
+            File.Copy(file, destinationFile, overwrite: true);
+        }
+    }
+
     private static string FormatTrainingStatus(HostedAgentBenchmarkModelReport model) =>
         model.TrainingSupported && model.TrainingCompleted
             ? $"Completed ({model.TrainingExamples} examples, {model.TrainingEpochs} epochs)"
             : "Not supported";
+
+    private static void AppendPaperAuditMarkdown(StringBuilder builder, HostedAgentBenchmarkComparisonReport report)
+    {
+        var auditedModels = report.Models.Where(static model => model.PaperAlignmentAudit is not null).ToArray();
+        if (auditedModels.Length == 0)
+        {
+            return;
+        }
+
+        builder.AppendLine("## Paper-alignment audit");
+        builder.AppendLine();
+        builder.AppendLine("| Model | Passed | Pending | Failed |");
+        builder.AppendLine("| --- | ---: | ---: | ---: |");
+        foreach (var model in auditedModels)
+        {
+            var audit = model.PaperAlignmentAudit!;
+            builder.AppendLine($"| {model.ModelSpecifier} | {audit.PassedCount} | {audit.PendingCount} | {audit.FailedCount} |");
+        }
+
+        builder.AppendLine();
+        builder.AppendLine("| Model | Area | Status | Requirement | Details |");
+        builder.AppendLine("| --- | --- | --- | --- | --- |");
+        foreach (var model in auditedModels)
+        {
+            foreach (var check in model.PaperAlignmentAudit!.Checks)
+            {
+                builder.AppendLine(
+                    $"| {model.ModelSpecifier} | {check.Area} | {check.Status} | {EscapeMarkdownInline(check.Requirement)} | {EscapeMarkdownInline(check.Details)} |");
+            }
+        }
+    }
+
+    private static void AppendPaperAuditHtml(StringBuilder builder, HostedAgentBenchmarkComparisonReport report)
+    {
+        var auditedModels = report.Models.Where(static model => model.PaperAlignmentAudit is not null).ToArray();
+        if (auditedModels.Length == 0)
+        {
+            return;
+        }
+
+        builder.AppendLine("  <h2>Paper-alignment audit</h2>");
+        builder.AppendLine("  <table>");
+        builder.AppendLine("    <thead><tr><th>Model</th><th>Passed</th><th>Pending</th><th>Failed</th></tr></thead>");
+        builder.AppendLine("    <tbody>");
+        foreach (var model in auditedModels)
+        {
+            var audit = model.PaperAlignmentAudit!;
+            builder.AppendLine($"      <tr><td>{Encode(model.ModelSpecifier)}</td><td>{audit.PassedCount}</td><td>{audit.PendingCount}</td><td>{audit.FailedCount}</td></tr>");
+        }
+
+        builder.AppendLine("    </tbody>");
+        builder.AppendLine("  </table>");
+        builder.AppendLine("  <table>");
+        builder.AppendLine("    <thead><tr><th>Model</th><th>Area</th><th>Status</th><th>Requirement</th><th>Details</th></tr></thead>");
+        builder.AppendLine("    <tbody>");
+        foreach (var model in auditedModels)
+        {
+            foreach (var check in model.PaperAlignmentAudit!.Checks)
+            {
+                builder.AppendLine($"      <tr><td>{Encode(model.ModelSpecifier)}</td><td>{Encode(check.Area)}</td><td>{Encode(check.Status.ToString())}</td><td>{Encode(check.Requirement)}</td><td>{Encode(check.Details)}</td></tr>");
+            }
+        }
+
+        builder.AppendLine("    </tbody>");
+        builder.AppendLine("  </table>");
+    }
 
     private static string EscapeMarkdownInline(string value) =>
         value.Replace("|", "\\|", StringComparison.Ordinal).Replace(Environment.NewLine, "<br />", StringComparison.Ordinal);
