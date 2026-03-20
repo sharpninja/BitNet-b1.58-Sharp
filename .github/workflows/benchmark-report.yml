@@ -41,6 +41,7 @@ jobs:
           benchmark-report
           --model=bitnet-b1.58-sharp
           --compare-model=traditional-local
+          --commit=${{ github.sha }}
           --output="${{ github.workspace }}/artifacts/benchmark-report"
 
       - name: Upload benchmark report artifact

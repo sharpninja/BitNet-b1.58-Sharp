@@ -55,13 +55,14 @@ dotnet run --configuration Release --project src/BitNetSharp.App/BitNetSharp.App
 
 This command runs the BenchmarkDotNet suite, evaluates both built-in models against the shared default training corpus/query script, and writes HTML, Markdown, and JSON comparison reports to the selected output directory.
 
-## DataGen synthetic dataset generation
+## DataGen
 
 ```bash
-dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen --domain=code-review --count=2 --output=/absolute/path/to/data/code-review.jsonl --constraint="Use American English"
+dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen --domain "medical-diagnosis" --count 25 --output data/synthetic-medical.jsonl
+dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen --domain "medical-diagnosis" --count 25 --seeds examples/seed-examples.json --output data/synthetic-medical.jsonl --constraint "Use American English" --lora medical-lora.bin
 ```
 
-The `datagen` command generates domain-agnostic synthetic instruction-response pairs and writes them as JSONL records that include `instruction`, `response`, `prompt`, `domain`, `task_type`, `quality_score`, and `generation_timestamp`. You can optionally add `--seeds=/absolute/path/to/seeds.json`, `--task-type=...`, `--output-schema=...`, `--template=/absolute/path/to/template.json`, `--lora=/absolute/path/to/domain-lora.bin`, `--candidate-count=N`, and `--min-quality=0.55`.
+This command reads optional seed examples, merges the built-in pattern prompts with the repository template, and writes JSONL output for downstream local fine-tuning or evaluation. Optional flags include `--task-type`, `--constraint`, `--constraints`, `--output-schema`, `--template`, `--candidate-count`, `--min-quality`, `--max-tokens`, and `--lora`. The emitted JSONL includes both the core generator fields (`seedInstruction`, `variation`, `generatorModel`, `tags`) and the merged prompt metadata (`prompt`, `taskType`, `qualityScore`, `generationTimestamp`, `groundingContext`). See the [DataGen guide](datagen-guide.md) for accepted seed aliases and the merged output schema.
 
 ## Train the traditional comparison model
 

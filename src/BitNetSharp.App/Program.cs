@@ -19,23 +19,19 @@ if (command == "benchmark")
 if (command == "benchmark-report")
 {
     var reportDirectory = ParseOption(args, "--output=");
+    var commitHash = ParseOption(args, "--commit=");
     var outputPath = await HostedAgentBenchmarkReportRunner.RunAsync(
         HostedAgentBenchmarkOptions.Parse(args, verbosity),
-        reportDirectory);
+        reportDirectory,
+        commitHash);
     Console.WriteLine($"Saved benchmark comparison report to {outputPath}");
     return;
 }
 
 if (command == "datagen")
 {
-    var options = DataGenOptions.Parse(args, modelSpecifier, verbosity);
-    var template = DataGenPromptTemplate.Load(options.TemplatePath);
-    using var datagenModel = HostedAgentModelFactory.Create(modelSpecifier, verbosity);
-    var generator = new DataGenGenerator(datagenModel, template);
-    var dataset = await generator.GenerateAsync(options);
-    DataGenGenerator.WriteJsonl(options.OutputPath, dataset);
-    Console.WriteLine($"Saved {dataset.Count} DataGen examples to {options.OutputPath}");
-    Console.WriteLine(options.BuildSummary());
+    var outputPath = await DataGenCommand.RunAsync(args, verbosity);
+    Console.WriteLine($"Saved synthetic dataset to {outputPath}");
     return;
 }
 

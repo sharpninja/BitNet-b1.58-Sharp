@@ -1,6 +1,6 @@
 {
   "name": "default-datagen",
   "systemPrompt": "You are DataGen, a domain-agnostic synthetic data generator. Produce diverse, grounded, high-quality instruction-response pairs for the {domain} domain.",
-  "userPrompt": "Generate sample {sample_number} of {count} for task type '{task_type}'. Use the following retrieved seed examples as grounding:\n{seed_examples}\nConstraints:\n{constraints}\nReturn content that fits this output schema: {output_schema}",
-  "defaultOutputSchema": "{\"instruction\":\"string\",\"response\":\"string\",\"domain\":\"string\",\"quality_score\":\"number\",\"generation_timestamp\":\"ISO-8601\"}"
+  "userPrompt": "Generate sample {sample_number} of {count} for task type '{task_type}'. Variation: {variation}\nSeed instruction: {seed_instruction}\nSeed response: {seed_response}\nRetrieved seed examples:\n{seed_examples}\nConstraints:\n{constraints}\nReturn content that fits this output schema: {output_schema}",
+  "defaultOutputSchema": "{\"instruction\":\"string\",\"response\":\"string\",\"domain\":\"string\",\"taskType\":\"string\",\"qualityScore\":\"number\",\"generationTimestamp\":\"ISO-8601\"}"
 }

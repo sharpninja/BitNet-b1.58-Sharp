@@ -1,0 +1,14 @@
+[
+  {
+    "prompt": "Summarize the patient's symptoms and identify the most urgent risk to rule out first.",
+    "response": "Restate the symptoms, note the highest-priority red flag, and recommend the next safe diagnostic step."
+  },
+  {
+    "instruction": "Explain how to gather missing context before recommending a treatment plan.",
+    "answer": "Review history, medications, allergies, exam findings, and contraindications before proposing options."
+  },
+  {
+    "input": "Create a concise follow-up instruction for documenting how the case should be monitored.",
+    "output": "Specify what should be monitored, how often it should be reviewed, and which changes require escalation."
+  }
+]

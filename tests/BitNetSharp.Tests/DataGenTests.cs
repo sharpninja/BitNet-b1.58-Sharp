@@ -7,9 +7,9 @@ namespace BitNetSharp.Tests;
 public sealed class DataGenTests
 {
     [Fact]
-    public void ParseDataGenOptionsSupportsDomainSeedsConstraintsAndLora()
+    public void ParseDataGenCommandOptionsSupportsExtendedPromptOptions()
     {
-        var options = DataGenOptions.Parse(
+        var options = DataGenCommandOptions.Parse(
             [
                 "datagen",
                 "--domain=code-review",
@@ -20,21 +20,21 @@ public sealed class DataGenTests
                 "--constraints=Grounded,Diverse",
                 "--seeds=/tmp/seeds.json",
                 "--output-schema={\"instruction\":\"string\",\"response\":\"string\"}",
+                "--template=/tmp/template.json",
                 "--lora=/tmp/domain-lora.bin",
                 "--candidate-count=5",
                 "--min-quality=0.7",
                 "--max-tokens=64"
-            ],
-            HostedAgentModelFactory.DefaultModelId,
-            VerbosityLevel.Verbose);
+            ]);
 
         Assert.Equal("code-review", options.Domain);
         Assert.Equal(2, options.Count);
         Assert.EndsWith(Path.Combine("data", "code-review.jsonl"), options.OutputPath, StringComparison.Ordinal);
         Assert.Equal("qa", options.TaskType);
         Assert.Equal(["Use American English", "Grounded", "Diverse"], options.Constraints);
-        Assert.Equal("/tmp/seeds.json", options.SeedPath);
+        Assert.Equal("/tmp/seeds.json", options.SeedsPath);
         Assert.Contains("\"instruction\"", options.OutputSchema, StringComparison.Ordinal);
+        Assert.Equal("/tmp/template.json", options.TemplatePath);
         Assert.Equal("/tmp/domain-lora.bin", options.LoraPath);
         Assert.Equal(5, options.CandidateCount);
         Assert.Equal(0.7d, options.MinimumQualityScore);
@@ -42,84 +42,50 @@ public sealed class DataGenTests
     }
 
     [Fact]
-    public void LoadSeedsAcceptsInstructionAndPromptAliases()
-    {
-        var seedPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.json");
-        File.WriteAllText(
-            seedPath,
-            """
-            [
-              { "instruction": "Explain a bug", "response": "Summarize the failing path." },
-              { "prompt": "Review a patch", "response": "Focus on correctness and tests." }
-            ]
-            """);
-
-        try
-        {
-            var seeds = DataGenSeedExample.LoadMany(seedPath);
-
-            Assert.Collection(
-                seeds,
-                seed => Assert.Equal("Explain a bug", seed.Instruction),
-                seed => Assert.Equal("Review a patch", seed.Instruction));
-        }
-        finally
-        {
-            File.Delete(seedPath);
-        }
-    }
-
-    [Fact]
-    public async Task GeneratorProducesTrainingReadyJsonlDataset()
+    public async Task DataGenCommandWritesMergedPromptAndMetadata()
     {
         var seedPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-seeds.json");
+        var templatePath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-template.json");
         var outputPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.jsonl");
+
         File.WriteAllText(
             seedPath,
             """
             [
               { "instruction": "Review null handling", "response": "Check nullable flow and guard clauses." },
-              { "instruction": "Review tests", "response": "Prefer focused regression coverage." }
+              { "prompt": "Review tests", "answer": "Prefer focused regression coverage." }
             ]
+            """);
+
+        File.WriteAllText(
+            templatePath,
+            """
+            {
+              "name": "test-template",
+              "systemPrompt": "You are DataGen for {domain}.",
+              "userPrompt": "Variation {variation}. Seed: {seed_instruction}. Baseline: {seed_response}. Constraints: {constraints}. Seeds: {seed_examples}. Schema: {output_schema}",
+              "defaultOutputSchema": "{\"instruction\":\"string\",\"response\":\"string\"}"
+            }
             """);
 
         try
         {
-            var template = new DataGenPromptTemplate(
-                "test-template",
-                "You are DataGen for {domain}.",
-                "Create sample {sample_number} of {count} using {seed_examples} and {constraints}. Schema: {output_schema}",
-                DataGenOptions.DefaultOutputSchema);
-
-            using var model = new StubHostedAgentModel(
+            var savedPath = await DataGenCommand.RunAsync(
                 [
-                    "Candidate alpha",
-                    "Candidate alpha",
-                    "Candidate beta",
-                    "Candidate gamma",
-                    "Candidate gamma",
-                    "Candidate delta"
-                ]);
+                    "datagen",
+                    "--domain=code-review",
+                    "--count=2",
+                    $"--output={outputPath}",
+                    $"--seeds={seedPath}",
+                    $"--template={templatePath}",
+                    "--constraint=Use American English",
+                    "--candidate-count=2",
+                    "--min-quality=0.5",
+                    "--lora=/tmp/code-review-lora.bin"
+                ],
+                VerbosityLevel.Quiet);
 
-            var generator = new DataGenGenerator(model, template);
-            var options = new DataGenOptions(
-                "code-review",
-                2,
-                outputPath,
-                "instruction-response",
-                ["Use American English"],
-                seedPath,
-                DataGenOptions.DefaultOutputSchema,
-                null,
-                "/tmp/code-review-lora.bin",
-                HostedAgentModelFactory.DefaultModelId,
-                VerbosityLevel.Normal,
-                CandidateCount: 3,
-                MinimumQualityScore: 0.45d,
-                MaxOutputTokens: 32);
-
-            var dataset = await generator.GenerateAsync(options);
-            DataGenGenerator.WriteJsonl(outputPath, dataset);
+            Assert.Equal(outputPath, savedPath);
 
             var lines = File.ReadAllLines(outputPath);
             Assert.Equal(2, lines.Length);
@@ -128,15 +94,22 @@ public sealed class DataGenTests
             Assert.NotNull(first);
             Assert.Equal("code-review", first.Domain);
             Assert.Equal("instruction-response", first.TaskType);
-            Assert.True(first.QualityScore >= 0.45d);
-            Assert.Contains("code-review", first.Response, StringComparison.OrdinalIgnoreCase);
-            Assert.Contains("instruction-response", first.Response, StringComparison.OrdinalIgnoreCase);
+            Assert.True(first.QualityScore >= 0.5d);
+            Assert.NotEmpty(first.Prompt);
+            Assert.Contains("Variation pattern-", first.Prompt, StringComparison.Ordinal);
+            Assert.Contains("Review", first.Prompt, StringComparison.Ordinal);
             Assert.NotEmpty(first.GroundingContext);
             Assert.Equal("/tmp/code-review-lora.bin", first.LoraPath);
+            Assert.False(string.IsNullOrWhiteSpace(first.SeedInstruction));
+            Assert.False(string.IsNullOrWhiteSpace(first.SeedResponse));
+            Assert.False(string.IsNullOrWhiteSpace(first.Variation));
+            Assert.Equal("bitnet-b1.58-sharp", first.GeneratorModel);
+            Assert.Contains("synthetic", first.Tags);
         }
         finally
         {
             File.Delete(seedPath);
+            File.Delete(templatePath);
             if (File.Exists(outputPath))
             {
                 File.Delete(outputPath);
@@ -144,36 +117,39 @@ public sealed class DataGenTests
         }
     }
 
-    private sealed class StubHostedAgentModel(IReadOnlyList<string> responses) : IHostedAgentModel
+    [Fact]
+    public async Task DataGenCommandCanGenerateWithoutExplicitSeeds()
     {
-        private int _responseIndex;
+        var outputPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}.jsonl");
 
-        public string AgentName => "stub-datagen";
-
-        public string ModelId => "stub-datagen";
-
-        public string DisplayName => "Stub DataGen";
-
-        public string PrimaryLanguage => "en-US";
-
-        public VerbosityLevel Verbosity => VerbosityLevel.Normal;
-
-        public string SystemPrompt => "Stub system prompt";
-
-        public IReadOnlyList<string> DescribeModel() => ["Stub DataGen"];
-
-        public void Dispose()
+        try
         {
+            await DataGenCommand.RunAsync(
+                [
+                    "datagen",
+                    "--domain=education",
+                    "--count=1",
+                    $"--output={outputPath}",
+                    "--task-type=classification",
+                    "--constraint=Use American English"
+                ],
+                VerbosityLevel.Quiet);
+
+            var line = File.ReadAllText(outputPath);
+            var entry = JsonSerializer.Deserialize<DataGenDatasetEntry>(line);
+
+            Assert.NotNull(entry);
+            Assert.Equal("education", entry.Domain);
+            Assert.Equal("classification", entry.TaskType);
+            Assert.Single(entry.GroundingContext);
+            Assert.Contains("education", entry.SeedInstruction, StringComparison.OrdinalIgnoreCase);
         }
-
-        public Task<HostedAgentModelResponse> GetResponseAsync(
-            string prompt,
-            int? maxOutputTokens = null,
-            CancellationToken cancellationToken = default)
+        finally
         {
-            var response = responses[_responseIndex % responses.Count];
-            _responseIndex++;
-            return Task.FromResult(new HostedAgentModelResponse(response, [$"Prompt length: {prompt.Length}"]));
+            if (File.Exists(outputPath))
+            {
+                File.Delete(outputPath);
+            }
         }
     }
 }

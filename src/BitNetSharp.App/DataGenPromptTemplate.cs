@@ -1,3 +1,4 @@
+using BitNetSharp.Core;
 using System.Text.Json;
 
 namespace BitNetSharp.App;
@@ -36,7 +37,8 @@ public sealed record DataGenPromptTemplate(
     }
 
     public string RenderPrompt(
-        DataGenOptions options,
+        DataGenCommandOptions options,
+        SyntheticDataExample example,
         int sampleNumber,
         IReadOnlyList<DataGenSeedExample> retrievedSeeds)
     {
@@ -48,7 +50,10 @@ public sealed record DataGenPromptTemplate(
             ["seed_examples"] = FormatSeeds(retrievedSeeds),
             ["constraints"] = FormatConstraints(options.Constraints),
             ["output_schema"] = string.IsNullOrWhiteSpace(options.OutputSchema) ? DefaultOutputSchema : options.OutputSchema,
-            ["sample_number"] = sampleNumber.ToString()
+            ["sample_number"] = sampleNumber.ToString(),
+            ["variation"] = example.Variation,
+            ["seed_instruction"] = example.SeedInstruction,
+            ["seed_response"] = example.SeedResponse
         };
 
         var systemPrompt = Expand(SystemPrompt, values);
