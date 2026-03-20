@@ -6,6 +6,7 @@
   - [Implementation plan v2 (archived)](implementation-plan-v2.md)
   - [Implementation plan v1 (archived)](implementation-plan-v1.md)
   - [Benchmarking and model comparison](benchmarking.md)
+  - [DataGen guide](datagen-guide.md)
   - [Releases and packaging](releases-and-packaging.md)
   - [Usage](usage.md)
   - [Training and visualization](training-and-visualization.md)

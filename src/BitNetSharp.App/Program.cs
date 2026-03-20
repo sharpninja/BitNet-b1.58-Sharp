@@ -26,6 +26,19 @@ if (command == "benchmark-report")
     return;
 }
 
+if (command == "datagen")
+{
+    var options = DataGenOptions.Parse(args, modelSpecifier, verbosity);
+    var template = DataGenPromptTemplate.Load(options.TemplatePath);
+    using var datagenModel = HostedAgentModelFactory.Create(modelSpecifier, verbosity);
+    var generator = new DataGenGenerator(datagenModel, template);
+    var dataset = await generator.GenerateAsync(options);
+    DataGenGenerator.WriteJsonl(options.OutputPath, dataset);
+    Console.WriteLine($"Saved {dataset.Count} DataGen examples to {options.OutputPath}");
+    Console.WriteLine(options.BuildSummary());
+    return;
+}
+
 using var model = HostedAgentModelFactory.Create(modelSpecifier, verbosity);
 using var host = BitNetAgentHost.Build(model);
 var hostSummary = host.Services.GetRequiredService<BitNetHostSummary>();

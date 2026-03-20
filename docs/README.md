@@ -25,6 +25,7 @@ dotnet test /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/BitNet-b1.58
 
 - [Architecture](architecture.md)
 - [Benchmarking and model comparison](benchmarking.md)
+- [DataGen guide](datagen-guide.md)
 - [Implementation plan](implementation-plan.md)
 - [Releases and packaging](releases-and-packaging.md)
 - [Usage](usage.md)
