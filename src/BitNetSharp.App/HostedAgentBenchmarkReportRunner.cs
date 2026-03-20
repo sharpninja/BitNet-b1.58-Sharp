@@ -49,9 +49,11 @@ public sealed record HostedAgentBenchmarkComparisonReport(
 
 public static class HostedAgentBenchmarkReportRunner
 {
+    private const string StampedJsonTimestampFormat = "yyyyMMddTHHmmssZ";
     public static async Task<string> RunAsync(
         HostedAgentBenchmarkOptions options,
         string? outputDirectory,
+        string? commitHash = null,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -82,7 +84,7 @@ public static class HostedAgentBenchmarkReportRunner
             modelReports,
             performanceRows);
 
-        WriteReportSite(reportDirectory, report);
+        WriteReportSite(reportDirectory, report, commitHash);
         return reportDirectory;
     }
 
@@ -156,14 +158,23 @@ public static class HostedAgentBenchmarkReportRunner
             .ToArray();
     }
 
-    public static void WriteReportSite(string outputDirectory, HostedAgentBenchmarkComparisonReport report)
+    public static void WriteReportSite(string outputDirectory, HostedAgentBenchmarkComparisonReport report, string? commitHash = null)
     {
         ArgumentNullException.ThrowIfNull(report);
 
         Directory.CreateDirectory(outputDirectory);
         File.WriteAllText(Path.Combine(outputDirectory, "comparison-report.json"), JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
         File.WriteAllText(Path.Combine(outputDirectory, "comparison-report.md"), BuildMarkdown(report));
-        File.WriteAllText(Path.Combine(outputDirectory, "index.html"), BuildHtml(report));
+        File.WriteAllText(Path.Combine(outputDirectory, "index.html"), BuildHtml(report, commitHash));
+
+        if (!string.IsNullOrWhiteSpace(commitHash))
+        {
+            var timestamp = report.GeneratedAtUtc.ToString(StampedJsonTimestampFormat);
+            var stampedJsonFileName = $"comparison-report-{commitHash}-{timestamp}.json";
+            File.WriteAllText(
+                Path.Combine(outputDirectory, stampedJsonFileName),
+                JsonSerializer.Serialize(report, new JsonSerializerOptions { WriteIndented = true }));
+        }
     }
 
     private static async Task<IReadOnlyList<HostedAgentBenchmarkModelReport>> CreateModelReportsAsync(
@@ -272,7 +283,7 @@ public static class HostedAgentBenchmarkReportRunner
         return builder.ToString();
     }
 
-    private static string BuildHtml(HostedAgentBenchmarkComparisonReport report)
+    private static string BuildHtml(HostedAgentBenchmarkComparisonReport report, string? commitHash = null)
     {
         var builder = new StringBuilder();
         builder.AppendLine("<!DOCTYPE html>");
@@ -348,7 +359,10 @@ public static class HostedAgentBenchmarkReportRunner
 
         builder.AppendLine("    </tbody>");
         builder.AppendLine("  </table>");
-        builder.AppendLine("  <p><a href=\"comparison-report.md\">Download the Markdown report</a> · <a href=\"comparison-report.json\">Download the JSON report</a></p>");
+        var stampedJsonLink = !string.IsNullOrWhiteSpace(commitHash)
+            ? $" · <a href=\"comparison-report-{Encode(commitHash)}-{Encode(report.GeneratedAtUtc.ToString(StampedJsonTimestampFormat))}.json\">Download the stamped JSON report</a>"
+            : string.Empty;
+        builder.AppendLine($"  <p><a href=\"comparison-report.md\">Download the Markdown report</a> · <a href=\"comparison-report.json\">Download the JSON report</a>{stampedJsonLink}</p>");
         builder.AppendLine("</body>");
         builder.AppendLine("</html>");
         return builder.ToString();

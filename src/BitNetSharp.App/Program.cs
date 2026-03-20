@@ -19,9 +19,11 @@ if (command == "benchmark")
 if (command == "benchmark-report")
 {
     var reportDirectory = ParseOption(args, "--output=");
+    var commitHash = ParseOption(args, "--commit=");
     var outputPath = await HostedAgentBenchmarkReportRunner.RunAsync(
         HostedAgentBenchmarkOptions.Parse(args, verbosity),
-        reportDirectory);
+        reportDirectory,
+        commitHash);
     Console.WriteLine($"Saved benchmark comparison report to {outputPath}");
     return;
 }

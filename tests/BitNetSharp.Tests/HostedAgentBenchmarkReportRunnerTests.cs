@@ -108,4 +108,99 @@ public sealed class HostedAgentBenchmarkReportRunnerTests
             Directory.Delete(outputDirectory, recursive: true);
         }
     }
+
+    [Fact]
+    public void WriteReportSiteDoesNotCreateStampedJsonWithoutCommitHash()
+    {
+        var outputDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outputDirectory);
+
+        try
+        {
+            var report = new HostedAgentBenchmarkComparisonReport(
+                DateTimeOffset.Parse("2026-03-18T00:00:00Z"),
+                ["hello"],
+                [
+                    new HostedAgentBenchmarkModelReport(
+                        HostedAgentModelFactory.DefaultModelId,
+                        "Paper-aligned BitNet b1.58 transformer",
+                        TrainingSupported: false,
+                        TrainingCompleted: false,
+                        TrainingExamples: 0,
+                        TrainingEpochs: 0,
+                        SuccessfulQueries: 1,
+                        TotalQueries: 1,
+                        ExactMatches: 0,
+                        AverageExpectedTokenRecall: 0.5d,
+                        QueryResults:
+                        [
+                            new HostedAgentBenchmarkQueryResult("hello", "Hello!", "Hello!", true, true, 1.0d)
+                        ])
+                ],
+                []);
+
+            HostedAgentBenchmarkReportRunner.WriteReportSite(outputDirectory, report);
+
+            // No stamped JSON file should be created when no commit hash is provided.
+            Assert.Empty(Directory.GetFiles(outputDirectory, "comparison-report-*-*.json"));
+        }
+        finally
+        {
+            Directory.Delete(outputDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void WriteReportSiteCreatesStampedJsonWhenCommitHashIsProvided()
+    {
+        var outputDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outputDirectory);
+
+        try
+        {
+            const string CommitHash = "abc1234def5678901234567890abcdef12345678";
+            var report = new HostedAgentBenchmarkComparisonReport(
+                DateTimeOffset.Parse("2026-03-18T12:34:56Z"),
+                ["hello"],
+                [
+                    new HostedAgentBenchmarkModelReport(
+                        HostedAgentModelFactory.DefaultModelId,
+                        "Paper-aligned BitNet b1.58 transformer",
+                        TrainingSupported: false,
+                        TrainingCompleted: false,
+                        TrainingExamples: 0,
+                        TrainingEpochs: 0,
+                        SuccessfulQueries: 1,
+                        TotalQueries: 1,
+                        ExactMatches: 0,
+                        AverageExpectedTokenRecall: 0.5d,
+                        QueryResults:
+                        [
+                            new HostedAgentBenchmarkQueryResult("hello", "Hello!", "Hello!", true, true, 1.0d)
+                        ])
+                ],
+                []);
+
+            HostedAgentBenchmarkReportRunner.WriteReportSite(outputDirectory, report, CommitHash);
+
+            // The canonical JSON report must always be written.
+            Assert.True(File.Exists(Path.Combine(outputDirectory, "comparison-report.json")));
+
+            // A stamped copy must be written with the commit hash and timestamp embedded.
+            var expectedStampedFileName = $"comparison-report-{CommitHash}-20260318T123456Z.json";
+            var stampedJsonPath = Path.Combine(outputDirectory, expectedStampedFileName);
+            Assert.True(File.Exists(stampedJsonPath), $"Expected stamped JSON file '{expectedStampedFileName}' was not created.");
+
+            var stampedJson = File.ReadAllText(stampedJsonPath);
+            Assert.Contains("\"ModelSpecifier\": \"bitnet-b1.58-sharp\"", stampedJson, StringComparison.Ordinal);
+
+            // The HTML must include a link to the stamped JSON file.
+            var html = File.ReadAllText(Path.Combine(outputDirectory, "index.html"));
+            Assert.Contains(expectedStampedFileName, html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(outputDirectory, recursive: true);
+        }
+    }
 }
