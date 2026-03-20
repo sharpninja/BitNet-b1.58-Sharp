@@ -136,7 +136,7 @@ public sealed class HostedAgentBenchmarkReportRunnerTests
             Assert.Contains("<response>", markdown, StringComparison.Ordinal);
             Assert.Contains("&lt;response&gt;", html, StringComparison.Ordinal);
             Assert.Contains("Comparison charts", html, StringComparison.Ordinal);
-            Assert.Contains("BitNet quality delta vs traditional", html, StringComparison.Ordinal);
+            Assert.Contains("BitNet quality improvement vs traditional", html, StringComparison.Ordinal);
             Assert.Contains("Paper-alignment audit", html, StringComparison.Ordinal);
             Assert.Contains("comparison-report.md", html, StringComparison.Ordinal);
             Assert.Contains("\"ModelSpecifier\": \"bitnet-b1.58-sharp\"", json, StringComparison.Ordinal);

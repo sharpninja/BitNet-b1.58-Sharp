@@ -6,6 +6,7 @@ namespace BitNetSharp.Core;
 public sealed class BitNetPaperModel
 {
     private const int MaxPredictionLimit = 8;
+    private const double ProbabilityFloor = 1e-9d;
 
     private static readonly HashSet<string> ReservedTokens =
     [
@@ -272,10 +273,10 @@ public sealed class BitNetPaperModel
 
         if (partition <= 0d)
         {
-            return 1e-9d;
+            return ProbabilityFloor;
         }
 
-        return Math.Max(targetProbability / partition, 1e-9d);
+        return Math.Max(targetProbability / partition, ProbabilityFloor);
     }
 
     private static BitNetConfig CreateDefaultConfig(int vocabularySize) =>

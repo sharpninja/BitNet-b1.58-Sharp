@@ -72,6 +72,11 @@ public static class HostedAgentBenchmarkReportRunner
     private const string StampedJsonTimestampFormat = "yyyyMMddTHHmmssZ";
     private const string ResponseOperation = "SpecFlow: Generate a response for a prompt";
     private const string TrainingOperation = "SpecFlow: Train the selected model on the default dataset";
+    private const double NanosecondsPerMillisecond = 1_000_000d;
+    private const double MicrosecondsPerMillisecond = 1_000d;
+    private const double MillisecondsPerSecond = 1_000d;
+    private const double BytesPerMegabyte = 1024d * 1024d;
+    private const double KilobytesPerMegabyte = 1024d;
     public static async Task<string> RunAsync(
         HostedAgentBenchmarkOptions options,
         string? outputDirectory,
@@ -269,7 +274,7 @@ public static class HostedAgentBenchmarkReportRunner
                     && string.Equals(row.ModelSpecifier, modelReport.ModelSpecifier, StringComparison.Ordinal));
                 var responseMeanMilliseconds = TryParseDurationMilliseconds(responseRow?.Mean);
                 double? responseTokensPerSecond = responseMeanMilliseconds is > 0d && modelReport.BenchmarkPromptTokenCount > 0
-                    ? (modelReport.BenchmarkPromptTokenCount * 1000d) / responseMeanMilliseconds.Value
+                    ? (modelReport.BenchmarkPromptTokenCount * MillisecondsPerSecond) / responseMeanMilliseconds.Value
                     : null;
 
                 return new HostedAgentBenchmarkComparisonMetric(
@@ -294,7 +299,7 @@ public static class HostedAgentBenchmarkReportRunner
             bitNetMetric?.ResponseTokensPerSecond is > 0d && traditionalMetric?.ResponseTokensPerSecond is > 0d
                 ? bitNetMetric.ResponseTokensPerSecond / traditionalMetric.ResponseTokensPerSecond
                 : null,
-            bitNetMetric?.ResponseAllocatedMegabytes is not null && traditionalMetric?.ResponseAllocatedMegabytes is > 0d
+            bitNetMetric?.ResponseAllocatedMegabytes is > 0d && traditionalMetric?.ResponseAllocatedMegabytes is > 0d
                 ? ((traditionalMetric.ResponseAllocatedMegabytes.Value - bitNetMetric.ResponseAllocatedMegabytes.Value)
                     / traditionalMetric.ResponseAllocatedMegabytes.Value) * 100d
                 : null,
@@ -561,10 +566,10 @@ public static class HostedAgentBenchmarkReportRunner
 
         return parts[1] switch
         {
-            "ns" => magnitude / 1_000_000d,
-            "μs" or "us" => magnitude / 1_000d,
+            "ns" => magnitude / NanosecondsPerMillisecond,
+            "μs" or "us" => magnitude / MicrosecondsPerMillisecond,
             "ms" => magnitude,
-            "s" => magnitude * 1_000d,
+            "s" => magnitude * MillisecondsPerSecond,
             _ => null
         };
     }
@@ -584,10 +589,10 @@ public static class HostedAgentBenchmarkReportRunner
 
         return parts[1] switch
         {
-            "B" => magnitude / (1024d * 1024d),
-            "KB" => magnitude / 1024d,
+            "B" => magnitude / BytesPerMegabyte,
+            "KB" => magnitude / KilobytesPerMegabyte,
             "MB" => magnitude,
-            "GB" => magnitude * 1024d,
+            "GB" => magnitude * KilobytesPerMegabyte,
             _ => null
         };
     }
@@ -615,8 +620,8 @@ public static class HostedAgentBenchmarkReportRunner
         builder.AppendLine("| Delta | Value |");
         builder.AppendLine("| --- | ---: |");
         builder.AppendLine($"| BitNet speedup vs traditional | {FormatNullableRatio(summary.BitNetSpeedupVersusTraditional)} |");
-        builder.AppendLine($"| BitNet memory delta vs traditional | {FormatNullablePercent(summary.BitNetMemoryDeltaPercentVersusTraditional)} |");
-        builder.AppendLine($"| BitNet quality delta vs traditional | {FormatNullablePercent(summary.BitNetQualityDeltaPercentVersusTraditional)} |");
+        builder.AppendLine($"| BitNet memory reduction vs traditional | {FormatNullablePercent(summary.BitNetMemoryDeltaPercentVersusTraditional)} |");
+        builder.AppendLine($"| BitNet quality improvement vs traditional | {FormatNullablePercent(summary.BitNetQualityDeltaPercentVersusTraditional)} |");
     }
 
     private static void AppendComparisonSummaryHtml(StringBuilder builder, HostedAgentBenchmarkComparisonSummary? summary)
@@ -643,8 +648,8 @@ public static class HostedAgentBenchmarkReportRunner
         builder.AppendLine("    <thead><tr><th>Delta</th><th>Value</th></tr></thead>");
         builder.AppendLine("    <tbody>");
         builder.AppendLine($"      <tr><td>BitNet speedup vs traditional</td><td>{Encode(FormatNullableRatio(summary.BitNetSpeedupVersusTraditional))}</td></tr>");
-        builder.AppendLine($"      <tr><td>BitNet memory delta vs traditional</td><td>{Encode(FormatNullablePercent(summary.BitNetMemoryDeltaPercentVersusTraditional))}</td></tr>");
-        builder.AppendLine($"      <tr><td>BitNet quality delta vs traditional</td><td>{Encode(FormatNullablePercent(summary.BitNetQualityDeltaPercentVersusTraditional))}</td></tr>");
+        builder.AppendLine($"      <tr><td>BitNet memory reduction vs traditional</td><td>{Encode(FormatNullablePercent(summary.BitNetMemoryDeltaPercentVersusTraditional))}</td></tr>");
+        builder.AppendLine($"      <tr><td>BitNet quality improvement vs traditional</td><td>{Encode(FormatNullablePercent(summary.BitNetQualityDeltaPercentVersusTraditional))}</td></tr>");
         builder.AppendLine("    </tbody>");
         builder.AppendLine("  </table>");
         AppendComparisonChartsHtml(builder, summary);
@@ -655,11 +660,16 @@ public static class HostedAgentBenchmarkReportRunner
         var throughputMax = summary.Models.Max(static model => model.ResponseTokensPerSecond ?? 0d);
         var memoryMax = summary.Models.Max(static model => model.ResponseAllocatedMegabytes ?? 0d);
         var perplexityMax = summary.Models.Max(static model => model.WikiText2Perplexity ?? 0d);
+        var perplexityMin = summary.Models
+            .Where(static model => model.WikiText2Perplexity is > 0d)
+            .Select(static model => model.WikiText2Perplexity!.Value)
+            .DefaultIfEmpty(0d)
+            .Min();
 
         builder.AppendLine("  <h3>Comparison charts</h3>");
-        AppendBarChart(builder, "Response tokens/sec", summary.Models, throughputMax, static model => model.ResponseTokensPerSecond, FormatNullableNumber);
-        AppendBarChart(builder, "Response allocated (MB)", summary.Models, memoryMax, static model => model.ResponseAllocatedMegabytes, FormatNullableMegabytes);
-        AppendBarChart(builder, "Perplexity", summary.Models, perplexityMax, static model => model.WikiText2Perplexity, FormatNullableNumber);
+        AppendBarChart(builder, "Response tokens/sec", summary.Models, throughputMax, 0d, static model => model.ResponseTokensPerSecond, FormatNullableNumber);
+        AppendBarChart(builder, "Response allocated (MB)", summary.Models, memoryMax, 0d, static model => model.ResponseAllocatedMegabytes, FormatNullableMegabytes);
+        AppendBarChart(builder, "Perplexity", summary.Models, perplexityMax, perplexityMin, static model => model.WikiText2Perplexity, FormatNullableNumber, lowerIsBetter: true);
     }
 
     private static void AppendBarChart(
@@ -667,8 +677,10 @@ public static class HostedAgentBenchmarkReportRunner
         string title,
         IReadOnlyList<HostedAgentBenchmarkComparisonMetric> models,
         double maxValue,
+        double minValue,
         Func<HostedAgentBenchmarkComparisonMetric, double?> selector,
-        Func<double?, string> formatter)
+        Func<double?, string> formatter,
+        bool lowerIsBetter = false)
     {
         builder.AppendLine($"  <h4>{Encode(title)}</h4>");
         builder.AppendLine("  <table>");
@@ -677,13 +689,35 @@ public static class HostedAgentBenchmarkReportRunner
         foreach (var model in models)
         {
             var value = selector(model);
-            var widthPercent = value is > 0d && maxValue > 0d ? Math.Clamp((value.Value / maxValue) * 100d, 0d, 100d) : 0d;
+            var widthPercent = value is > 0d
+                ? GetBarWidthPercent(value.Value, minValue, maxValue, lowerIsBetter)
+                : 0d;
             builder.AppendLine(
                 $"      <tr><td>{Encode(model.ModelSpecifier)}</td><td>{Encode(formatter(value))}</td><td><div style=\"background:#e5e7eb;border-radius:9999px;height:0.9rem;min-width:12rem;\"><div style=\"background:#2563eb;border-radius:9999px;height:0.9rem;width:{widthPercent:0.#}%;\"></div></div></td></tr>");
         }
 
         builder.AppendLine("    </tbody>");
         builder.AppendLine("  </table>");
+    }
+
+    private static double GetBarWidthPercent(double value, double minValue, double maxValue, bool lowerIsBetter)
+    {
+        if (maxValue <= 0d)
+        {
+            return 0d;
+        }
+
+        if (!lowerIsBetter)
+        {
+            return Math.Clamp((value / maxValue) * 100d, 0d, 100d);
+        }
+
+        if (maxValue <= minValue)
+        {
+            return 100d;
+        }
+
+        return Math.Clamp(((maxValue - value) / (maxValue - minValue)) * 100d, 0d, 100d);
     }
 
     private static void AppendPaperAuditMarkdown(StringBuilder builder, HostedAgentBenchmarkComparisonReport report)
