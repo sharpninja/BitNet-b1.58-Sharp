@@ -1,6 +1,14 @@
 name: Benchmark report
 
 on:
+  push:
+    branches:
+      - main
+    paths:
+      - ".github/workflows/benchmark-report.yml"
+      - "src/BitNetSharp.App/**"
+      - "src/BitNetSharp.Core/**"
+      - "tests/BitNetSharp.Tests/**"
   workflow_dispatch:
 
 permissions:

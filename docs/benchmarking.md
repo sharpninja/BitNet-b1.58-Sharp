@@ -43,7 +43,7 @@ This command writes a static report site with:
 - raw BenchmarkDotNet HTML, CSV, and GitHub-flavored Markdown exports under `BenchmarkDotNet.Artifacts/results/`
 - a paper-alignment audit section for `bitnet-b1.58-sharp`
 
-The repository also includes a manual trigger workflow at `.github/workflows/benchmark-report.yml` that builds, tests, generates the same report, uploads it as an artifact, and deploys it with GitHub Pages.
+The repository also includes a GitHub Actions workflow at `.github/workflows/benchmark-report.yml` that runs on pushes to `main` for benchmark/runtime changes and can also be started manually. It builds, tests, generates the same report, uploads it as an artifact, and deploys it with GitHub Pages.
 
 ## Train the traditional local model
 
