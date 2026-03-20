@@ -32,10 +32,10 @@ public sealed class DataGenTests
         Assert.EndsWith(Path.Combine("data", "code-review.jsonl"), options.OutputPath, StringComparison.Ordinal);
         Assert.Equal("qa", options.TaskType);
         Assert.Equal(["Use American English", "Grounded", "Diverse"], options.Constraints);
-        Assert.Equal("/tmp/seeds.json", options.SeedsPath);
+        Assert.Equal(Path.GetFullPath("/tmp/seeds.json"), options.SeedsPath);
         Assert.Contains("\"instruction\"", options.OutputSchema, StringComparison.Ordinal);
         Assert.Equal("/tmp/template.json", options.TemplatePath);
-        Assert.Equal("/tmp/domain-lora.bin", options.LoraPath);
+        Assert.Equal(Path.GetFullPath("/tmp/domain-lora.bin"), options.LoraPath);
         Assert.Equal(5, options.CandidateCount);
         Assert.Equal(0.7d, options.MinimumQualityScore);
         Assert.Equal(64, options.MaxOutputTokens);
@@ -100,7 +100,7 @@ public sealed class DataGenTests
             Assert.Contains("Review", first.Prompt, StringComparison.Ordinal);
             Assert.Contains("Review null handling", first.GroundingContext);
             Assert.Contains("Review tests", first.GroundingContext);
-            Assert.Equal("/tmp/code-review-lora.bin", first.LoraPath);
+            Assert.Equal(Path.GetFullPath("/tmp/code-review-lora.bin"), first.LoraPath);
             Assert.False(string.IsNullOrWhiteSpace(first.SeedInstruction));
             Assert.False(string.IsNullOrWhiteSpace(first.SeedResponse));
             Assert.False(string.IsNullOrWhiteSpace(first.Variation));
