@@ -30,6 +30,11 @@ Feature: Hosted model runtime use cases
       | bitnet-b1.58-sharp |
       | traditional-local  |
 
+  Scenario: Inspect the paper-aligned transformer description
+    Given the hosted model named "bitnet-b1.58-sharp"
+    When I inspect the selected model description
+    Then the model description should enumerate the paper-aligned transformer topology
+
   Scenario Outline: Train the selected model on the default dataset
     Given the hosted model named "<model>"
     When I train the selected model on the default dataset

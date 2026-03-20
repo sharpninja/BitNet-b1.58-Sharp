@@ -15,6 +15,7 @@ public sealed class PaperAlignedRuntimeSteps
     private BitNetHostSummary? _hostSummary;
     private ChatResponse? _chatResponse;
     private List<ChatResponseUpdate>? _streamUpdates;
+    private IReadOnlyList<string>? _modelDescription;
     private int _trainedExampleCount;
 
     [Given(@"the hosted model named ""(.*)""")]
@@ -94,6 +95,13 @@ public sealed class PaperAlignedRuntimeSteps
         BuildHost();
     }
 
+    [When("I inspect the selected model description")]
+    public void WhenIInspectTheSelectedModelDescription()
+    {
+        Assert.NotNull(_model);
+        _modelDescription = _model.DescribeModel();
+    }
+
     [Then("the host summary should describe the selected model registration")]
     public void ThenTheHostSummaryShouldDescribeTheSelectedModelRegistration()
     {
@@ -109,6 +117,22 @@ public sealed class PaperAlignedRuntimeSteps
     public void ThenTheTrainingRunShouldCompleteOverTheDefaultDataset()
     {
         Assert.Equal(BitNetTrainingCorpus.CreateDefaultExamples().Count, _trainedExampleCount);
+    }
+
+    [Then("the model description should enumerate the paper-aligned transformer topology")]
+    public void ThenTheModelDescriptionShouldEnumerateThePaperAlignedTransformerTopology()
+    {
+        var bitNetModel = Assert.IsType<BitNetHostedAgentModel>(_model);
+        Assert.NotNull(_modelDescription);
+
+        Assert.Contains(bitNetModel.DisplayName, _modelDescription);
+        Assert.Contains($"Model ID: {bitNetModel.ModelId}", _modelDescription);
+        Assert.Contains($"Vocabulary size: {bitNetModel.Model.Config.VocabSize}", _modelDescription);
+        Assert.Contains($"Layers: {bitNetModel.Model.Config.LayerCount}", _modelDescription);
+        Assert.Contains($"Dimension: {bitNetModel.Model.Config.Dimension}", _modelDescription);
+        Assert.Contains($"Hidden dimension: {bitNetModel.Model.Config.HiddenDimension}", _modelDescription);
+        Assert.Contains($"Heads: {bitNetModel.Model.Config.HeadCount}", _modelDescription);
+        Assert.Contains($"Max sequence length: {bitNetModel.Model.Config.MaxSequenceLength}", _modelDescription);
     }
 
     [AfterScenario]
