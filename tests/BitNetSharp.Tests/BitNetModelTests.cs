@@ -14,8 +14,10 @@ public sealed class BitNetPaperModelTests
         var model = BitNetBootstrap.CreatePaperModel(VerbosityLevel.Normal);
         var result = model.GenerateResponse("how are you hosted");
 
-        Assert.Contains("Top next-token predictions:", result.ResponseText, StringComparison.Ordinal);
+        Assert.False(string.IsNullOrWhiteSpace(result.ResponseText));
+        Assert.DoesNotContain("Top next-token predictions:", result.ResponseText, StringComparison.Ordinal);
         Assert.NotEmpty(result.Tokens);
+        Assert.Contains("microsoft agent framework", result.ResponseText, StringComparison.OrdinalIgnoreCase);
         Assert.Contains("decoder-only transformer", result.Diagnostics[1], StringComparison.OrdinalIgnoreCase);
     }
 
