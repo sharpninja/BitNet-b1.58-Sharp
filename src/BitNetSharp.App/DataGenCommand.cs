@@ -273,7 +273,7 @@ public static class DataGenCommand
         if (acceptedEntries.Count < options.Count)
         {
             throw new InvalidOperationException(
-                $"DataGen could only accept {acceptedEntries.Count} examples after evaluating {candidateTarget} candidates. Lower --min-quality, increase --candidate-count, or add seeds/constraints.");
+                $"DataGen could only accept {acceptedEntries.Count} examples after evaluating {candidateTarget} candidates. Lower --min-quality, reduce the requested --count, or add seeds/constraints.");
         }
 
         return options.OutputPath;
