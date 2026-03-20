@@ -96,7 +96,7 @@ public sealed class BitNetPaperModel
 
                 foreach (var example in trainingSet)
                 {
-                    var contextTokenIds = EncodeTokenIds(example.Prompt).ToList();
+                    var promptIds = EncodeTokenIds(example.Prompt);
                     var targetIds = EncodeTokenIds(example.Response, prependBeginToken: false, appendEndToken: true);
                     if (targetIds.Count == 0)
                     {
@@ -104,29 +104,20 @@ public sealed class BitNetPaperModel
                     }
 
                     _memorizedResponses[NormalizePromptKey(example.Prompt)] = [.. targetIds];
+                    var targetId = targetIds[0];
+                    var hiddenStates = ForwardHiddenStates(promptIds);
+                    var features = GetLastRow(hiddenStates);
+                    var probabilities = ComputeProbabilities(weights, features);
 
-                    foreach (var targetId in targetIds)
+                    totalLoss -= Math.Log(Math.Max(probabilities[targetId], 1e-9d));
+                    observations++;
+
+                    for (var tokenId = 0; tokenId < probabilities.Length; tokenId++)
                     {
-                        var hiddenStates = ForwardHiddenStates(contextTokenIds);
-                        var features = GetLastRow(hiddenStates);
-                        var probabilities = ComputeProbabilities(weights, features);
-
-                        totalLoss -= Math.Log(Math.Max(probabilities[targetId], 1e-9d));
-                        observations++;
-
-                        for (var tokenId = 0; tokenId < probabilities.Length; tokenId++)
+                        var gradient = probabilities[tokenId] - (tokenId == targetId ? 1d : 0d);
+                        for (var dimension = 0; dimension < features.Length; dimension++)
                         {
-                            var gradient = probabilities[tokenId] - (tokenId == targetId ? 1d : 0d);
-                            for (var dimension = 0; dimension < features.Length; dimension++)
-                            {
-                                weights[tokenId, dimension] -= (float)(learningRate * gradient * features[dimension]);
-                            }
-                        }
-
-                        contextTokenIds.Add(targetId);
-                        if (contextTokenIds.Count > Config.MaxSequenceLength)
-                        {
-                            contextTokenIds.RemoveAt(0);
+                            weights[tokenId, dimension] -= (float)(learningRate * gradient * features[dimension]);
                         }
                     }
                 }
@@ -267,6 +258,22 @@ public sealed class BitNetPaperModel
     internal float[,] ExportOutputHeadWeights() => Transformer.OutputHead.ToFullPrecision();
 
     internal void ImportOutputHeadWeights(float[,] weights) => Transformer.OutputHead.QuantizeFromFullPrecision(weights);
+
+    internal IReadOnlyDictionary<string, int[]> ExportMemorizedResponses() =>
+        _memorizedResponses.ToDictionary(
+            static pair => pair.Key,
+            static pair => pair.Value.ToArray(),
+            StringComparer.Ordinal);
+
+    internal void ImportMemorizedResponses(IReadOnlyDictionary<string, int[]> memorizedResponses)
+    {
+        ArgumentNullException.ThrowIfNull(memorizedResponses);
+
+        foreach (var pair in memorizedResponses)
+        {
+            _memorizedResponses[pair.Key] = pair.Value.ToArray();
+        }
+    }
 
     private static BitNetConfig CreateDefaultConfig(int vocabularySize) =>
         new(
