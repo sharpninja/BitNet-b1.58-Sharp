@@ -186,6 +186,27 @@ public sealed class BitNetPaperModel
             diagnostics);
     }
 
+    public double CalculatePerplexity(IEnumerable<string> validationSamples)
+    {
+        ArgumentNullException.ThrowIfNull(validationSamples);
+
+        var totalLoss = 0d;
+        var totalTokens = 0;
+        foreach (var sample in validationSamples)
+        {
+            var tokenIds = EncodeTokenIds(sample, appendEndToken: true);
+            for (var index = 0; index < tokenIds.Count - 1; index++)
+            {
+                var context = tokenIds.Take(index + 1).ToArray();
+                var logits = ForwardLogits(context);
+                totalLoss -= Math.Log(GetTargetProbability(logits, tokenIds[index + 1]));
+                totalTokens++;
+            }
+        }
+
+        return totalTokens == 0 ? 0d : Math.Exp(totalLoss / totalTokens);
+    }
+
     public TernaryWeightStats GetTernaryWeightStats()
     {
         var negative = 0;
@@ -227,6 +248,35 @@ public sealed class BitNetPaperModel
     internal float[,] ExportOutputHeadWeights() => Transformer.OutputHead.ToFullPrecision();
 
     internal void ImportOutputHeadWeights(float[,] weights) => Transformer.OutputHead.QuantizeFromFullPrecision(weights);
+
+    private static double GetTargetProbability(float[,] logits, int targetId)
+    {
+        var lastRow = logits.GetLength(0) - 1;
+        var maxLogit = double.NegativeInfinity;
+        for (var column = 0; column < logits.GetLength(1); column++)
+        {
+            maxLogit = Math.Max(maxLogit, logits[lastRow, column]);
+        }
+
+        var partition = 0d;
+        var targetProbability = 0d;
+        for (var column = 0; column < logits.GetLength(1); column++)
+        {
+            var probabilityMass = Math.Exp(logits[lastRow, column] - maxLogit);
+            partition += probabilityMass;
+            if (column == targetId)
+            {
+                targetProbability = probabilityMass;
+            }
+        }
+
+        if (partition <= 0d)
+        {
+            return 1e-9d;
+        }
+
+        return Math.Max(targetProbability / partition, 1e-9d);
+    }
 
     private static BitNetConfig CreateDefaultConfig(int vocabularySize) =>
         new(

@@ -58,13 +58,6 @@ public static class BitNetPaperAuditor
     private const double TheoreticalTernaryUpperBoundBitsPerWeight = 1.584962500721156d;
     private const double ProbabilityFloor = 1e-9d;
 
-    private static readonly (string Dataset, string[] Samples)[] PerplexityFixtures =
-    [
-        ("WikiText2", ["hello i am bitnet sharp", "i default to american english"]),
-        ("C4", ["use the training command to review the loss chart", "microsoft agent framework hosting stays clear"]),
-        ("RedPajama", ["visualize the ternary weight histogram", "how are you hosted with a local agent framework"])
-    ];
-
     private static readonly (string Task, string Prompt, string ExpectedToken)[] ZeroShotFixtures =
     [
         ("ARC-Easy", "hello choose help or chart", "help"),
@@ -290,7 +283,7 @@ public static class BitNetPaperAuditor
     }
 
     private static IReadOnlyList<BitNetPaperPerplexityDatasetResult> EvaluatePerplexity(BitNetPaperModel model) =>
-        PerplexityFixtures
+        BitNetBenchmarkFixtures.PerplexityDatasets
             .Select(fixture =>
             {
                 var totalLoss = 0d;
@@ -310,8 +303,8 @@ public static class BitNetPaperAuditor
 
                 var averageCrossEntropy = totalTokens == 0 ? 0d : totalLoss / totalTokens;
                 return new BitNetPaperPerplexityDatasetResult(
-                    fixture.Dataset,
-                    fixture.Samples.Length,
+                    fixture.Name,
+                    fixture.Samples.Count,
                     averageCrossEntropy,
                     Math.Exp(averageCrossEntropy));
             })

@@ -221,6 +221,35 @@ public sealed class TraditionalLocalModel
         }
     }
 
+    public double CalculatePerplexity(IEnumerable<string> validationSamples)
+    {
+        ArgumentNullException.ThrowIfNull(validationSamples);
+        EnsureTrained();
+
+        lock (_gate)
+        {
+            var totalLoss = 0d;
+            var totalTokens = 0;
+            var hidden = new float[InputDimension];
+            var logits = new float[_idToToken.Length];
+            var probabilities = new float[_idToToken.Length];
+
+            foreach (var sample in validationSamples)
+            {
+                var tokenIds = TokenizeToIds(sample).Concat([_endTokenId]).ToArray();
+                for (var index = 0; index < tokenIds.Length - 1; index++)
+                {
+                    BuildHiddenState(tokenIds.Take(index + 1).TakeLast(ContextWindow).ToArray(), hidden);
+                    ComputeProbabilities(hidden, logits, probabilities);
+                    totalLoss -= Math.Log(Math.Max(probabilities[tokenIds[index + 1]], MinimumProbability));
+                    totalTokens++;
+                }
+            }
+
+            return totalTokens == 0 ? 0d : Math.Exp(totalLoss / totalTokens);
+        }
+    }
+
     private void EnsureTrained()
     {
         if (_isTrained)

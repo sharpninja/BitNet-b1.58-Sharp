@@ -124,6 +124,21 @@ public sealed class HostedAgentBenchmarksExecutionTests
             });
     }
 
+    [Fact]
+    public void PerplexityEvaluationProducesFiniteValuesForBuiltInModels()
+    {
+        var bitNetModel = BitNetPaperModel.CreateDefault();
+        var traditionalModel = TraditionalLocalModel.CreateDefault();
+
+        var bitNetPerplexity = bitNetModel.CalculatePerplexity(BitNetBenchmarkFixtures.WikiText2ValidationSamples);
+        var traditionalPerplexity = traditionalModel.CalculatePerplexity(BitNetBenchmarkFixtures.WikiText2ValidationSamples);
+
+        Assert.True(double.IsFinite(bitNetPerplexity));
+        Assert.True(double.IsFinite(traditionalPerplexity));
+        Assert.True(bitNetPerplexity > 0d);
+        Assert.True(traditionalPerplexity > 0d);
+    }
+
     private static async Task WithBenchmarkOptionsAsync(HostedAgentBenchmarkOptions options, Func<Task> assertion)
     {
         var originalValue = Environment.GetEnvironmentVariable(HostedAgentBenchmarkOptions.EnvironmentVariableName);

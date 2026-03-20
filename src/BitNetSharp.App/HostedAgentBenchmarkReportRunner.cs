@@ -25,12 +25,23 @@ public sealed record HostedAgentBenchmarkModelReport(
     int ExactMatches,
     double AverageExpectedTokenRecall,
     IReadOnlyList<HostedAgentBenchmarkQueryResult> QueryResults,
-    BitNetPaperAuditReport? PaperAlignmentAudit = null)
+    BitNetPaperAuditReport? PaperAlignmentAudit = null,
+    double? WikiText2Perplexity = null,
+    int BenchmarkPromptTokenCount = 0)
 {
     public double EfficacyRate => TotalQueries == 0 ? 0d : SuccessfulQueries / (double)TotalQueries;
 
     public double ExactMatchRate => TotalQueries == 0 ? 0d : ExactMatches / (double)TotalQueries;
 }
+
+public sealed record HostedAgentBenchmarkComparisonMetric(
+    string ModelSpecifier,
+    string DisplayName,
+    string? ResponseMean,
+    string? TrainingMean,
+    double? ResponseTokensPerSecond,
+    double? ResponseAllocatedMegabytes,
+    double? WikiText2Perplexity);
 
 public sealed record HostedAgentBenchmarkPerformanceRow(
     string Operation,
@@ -46,11 +57,21 @@ public sealed record HostedAgentBenchmarkComparisonReport(
     DateTimeOffset GeneratedAtUtc,
     IReadOnlyList<string> QueryScript,
     IReadOnlyList<HostedAgentBenchmarkModelReport> Models,
-    IReadOnlyList<HostedAgentBenchmarkPerformanceRow> PerformanceRows);
+    IReadOnlyList<HostedAgentBenchmarkPerformanceRow> PerformanceRows,
+    HostedAgentBenchmarkComparisonSummary? ComparisonSummary = null);
+
+public sealed record HostedAgentBenchmarkComparisonSummary(
+    string PerplexityDataset,
+    IReadOnlyList<HostedAgentBenchmarkComparisonMetric> Models,
+    double? BitNetSpeedupVersusTraditional,
+    double? BitNetMemoryDeltaPercentVersusTraditional,
+    double? BitNetQualityDeltaPercentVersusTraditional);
 
 public static class HostedAgentBenchmarkReportRunner
 {
     private const string StampedJsonTimestampFormat = "yyyyMMddTHHmmssZ";
+    private const string ResponseOperation = "SpecFlow: Generate a response for a prompt";
+    private const string TrainingOperation = "SpecFlow: Train the selected model on the default dataset";
     public static async Task<string> RunAsync(
         HostedAgentBenchmarkOptions options,
         string? outputDirectory,
@@ -73,11 +94,13 @@ public static class HostedAgentBenchmarkReportRunner
         var trainingExamples = BitNetTrainingCorpus.CreateDefaultExamples();
         var modelReports = await CreateModelReportsAsync(options, trainingExamples, cancellationToken);
         var performanceRows = ParsePerformanceRows(reportDirectory);
+        var comparisonSummary = CreateComparisonSummary(modelReports, performanceRows);
         var report = new HostedAgentBenchmarkComparisonReport(
             DateTimeOffset.UtcNow,
             trainingExamples.Select(static example => example.Prompt).ToArray(),
             modelReports,
-            performanceRows);
+            performanceRows,
+            comparisonSummary);
 
         WriteReportSite(reportDirectory, report, commitHash);
         return reportDirectory;
@@ -218,10 +241,67 @@ public static class HostedAgentBenchmarkReportRunner
                 queryResults.Count(static result => result.ExactMatch),
                 queryResults.Count == 0 ? 0d : queryResults.Average(static result => result.ExpectedTokenRecall),
                 queryResults,
-                model is BitNetHostedAgentModel bitNetModel ? BitNetPaperAuditor.CreateReport(bitNetModel.Model) : null));
+                model is BitNetHostedAgentModel bitNetModel ? BitNetPaperAuditor.CreateReport(bitNetModel.Model) : null,
+                GetWikiText2Perplexity(model),
+                await GetBenchmarkPromptTokenCountAsync(model, options, cancellationToken)));
         }
 
         return reports;
+    }
+
+    private static HostedAgentBenchmarkComparisonSummary? CreateComparisonSummary(
+        IReadOnlyList<HostedAgentBenchmarkModelReport> modelReports,
+        IReadOnlyList<HostedAgentBenchmarkPerformanceRow> performanceRows)
+    {
+        if (modelReports.Count == 0)
+        {
+            return null;
+        }
+
+        var metrics = modelReports
+            .Select(modelReport =>
+            {
+                var responseRow = performanceRows.FirstOrDefault(row =>
+                    string.Equals(row.Operation, ResponseOperation, StringComparison.Ordinal)
+                    && string.Equals(row.ModelSpecifier, modelReport.ModelSpecifier, StringComparison.Ordinal));
+                var trainingRow = performanceRows.FirstOrDefault(row =>
+                    string.Equals(row.Operation, TrainingOperation, StringComparison.Ordinal)
+                    && string.Equals(row.ModelSpecifier, modelReport.ModelSpecifier, StringComparison.Ordinal));
+                var responseMeanMilliseconds = TryParseDurationMilliseconds(responseRow?.Mean);
+                double? responseTokensPerSecond = responseMeanMilliseconds is > 0d && modelReport.BenchmarkPromptTokenCount > 0
+                    ? (modelReport.BenchmarkPromptTokenCount * 1000d) / responseMeanMilliseconds.Value
+                    : null;
+
+                return new HostedAgentBenchmarkComparisonMetric(
+                    modelReport.ModelSpecifier,
+                    modelReport.DisplayName,
+                    responseRow?.Mean,
+                    trainingRow?.Mean,
+                    responseTokensPerSecond,
+                    TryParseAllocatedMegabytes(responseRow?.Allocated),
+                    modelReport.WikiText2Perplexity);
+            })
+            .ToArray();
+
+        var bitNetMetric = metrics.FirstOrDefault(metric =>
+            string.Equals(metric.ModelSpecifier, HostedAgentModelFactory.DefaultModelId, StringComparison.Ordinal));
+        var traditionalMetric = metrics.FirstOrDefault(metric =>
+            string.Equals(metric.ModelSpecifier, HostedAgentModelFactory.TraditionalLocalModelId, StringComparison.Ordinal));
+
+        return new HostedAgentBenchmarkComparisonSummary(
+            "WikiText2",
+            metrics,
+            bitNetMetric?.ResponseTokensPerSecond is > 0d && traditionalMetric?.ResponseTokensPerSecond is > 0d
+                ? bitNetMetric.ResponseTokensPerSecond / traditionalMetric.ResponseTokensPerSecond
+                : null,
+            bitNetMetric?.ResponseAllocatedMegabytes is not null && traditionalMetric?.ResponseAllocatedMegabytes is > 0d
+                ? ((traditionalMetric.ResponseAllocatedMegabytes.Value - bitNetMetric.ResponseAllocatedMegabytes.Value)
+                    / traditionalMetric.ResponseAllocatedMegabytes.Value) * 100d
+                : null,
+            bitNetMetric?.WikiText2Perplexity is > 0d && traditionalMetric?.WikiText2Perplexity is > 0d
+                ? ((traditionalMetric.WikiText2Perplexity.Value - bitNetMetric.WikiText2Perplexity.Value)
+                    / traditionalMetric.WikiText2Perplexity.Value) * 100d
+                : null);
     }
 
     private static string BuildMarkdown(HostedAgentBenchmarkComparisonReport report)
@@ -251,6 +331,8 @@ public static class HostedAgentBenchmarkReportRunner
                 $"| {model.ModelSpecifier} | {FormatTrainingStatus(model)} | {model.EfficacyRate:P1} | {model.ExactMatchRate:P1} | {model.AverageExpectedTokenRecall:P1} |");
         }
 
+        builder.AppendLine();
+        AppendComparisonSummaryMarkdown(builder, report.ComparisonSummary);
         builder.AppendLine();
         builder.AppendLine("## Query script results");
         builder.AppendLine();
@@ -329,6 +411,7 @@ public static class HostedAgentBenchmarkReportRunner
 
         builder.AppendLine("    </tbody>");
         builder.AppendLine("  </table>");
+        AppendComparisonSummaryHtml(builder, report.ComparisonSummary);
 
         builder.AppendLine("  <h2>Query script results</h2>");
         builder.AppendLine("  <table>");
@@ -438,6 +521,171 @@ public static class HostedAgentBenchmarkReportRunner
             ? $"Completed ({model.TrainingExamples} examples, {model.TrainingEpochs} epochs)"
             : "Not supported";
 
+    private static async Task<int> GetBenchmarkPromptTokenCountAsync(
+        IHostedAgentModel model,
+        HostedAgentBenchmarkOptions options,
+        CancellationToken cancellationToken)
+    {
+        var benchmarkResponse = await model.GetResponseAsync(options.Prompt, options.MaxOutputTokens, cancellationToken);
+        return CountResponseTokens(model, benchmarkResponse.Text);
+    }
+
+    private static double? GetWikiText2Perplexity(IHostedAgentModel model) =>
+        model switch
+        {
+            BitNetHostedAgentModel bitNetModel => bitNetModel.Model.CalculatePerplexity(BitNetBenchmarkFixtures.WikiText2ValidationSamples),
+            TraditionalLocalHostedAgentModel traditionalModel => traditionalModel.Model.CalculatePerplexity(BitNetBenchmarkFixtures.WikiText2ValidationSamples),
+            _ => null
+        };
+
+    private static int CountResponseTokens(IHostedAgentModel model, string responseText) =>
+        model switch
+        {
+            BitNetHostedAgentModel bitNetModel => bitNetModel.Model.Tokenizer.Tokenize(responseText).Count(),
+            TraditionalLocalHostedAgentModel traditionalModel => traditionalModel.Model.Tokenizer.Tokenize(responseText).Count(),
+            _ => Tokenize(responseText).Length
+        };
+
+    private static double? TryParseDurationMilliseconds(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            return null;
+        }
+
+        var parts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length < 2 || !double.TryParse(parts[0], out var magnitude))
+        {
+            return null;
+        }
+
+        return parts[1] switch
+        {
+            "ns" => magnitude / 1_000_000d,
+            "μs" or "us" => magnitude / 1_000d,
+            "ms" => magnitude,
+            "s" => magnitude * 1_000d,
+            _ => null
+        };
+    }
+
+    private static double? TryParseAllocatedMegabytes(string? value)
+    {
+        if (string.IsNullOrWhiteSpace(value) || string.Equals(value, "-", StringComparison.Ordinal))
+        {
+            return null;
+        }
+
+        var parts = value.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+        if (parts.Length < 2 || !double.TryParse(parts[0], out var magnitude))
+        {
+            return null;
+        }
+
+        return parts[1] switch
+        {
+            "B" => magnitude / (1024d * 1024d),
+            "KB" => magnitude / 1024d,
+            "MB" => magnitude,
+            "GB" => magnitude * 1024d,
+            _ => null
+        };
+    }
+
+    private static void AppendComparisonSummaryMarkdown(StringBuilder builder, HostedAgentBenchmarkComparisonSummary? summary)
+    {
+        if (summary is null)
+        {
+            return;
+        }
+
+        builder.AppendLine("## BitNet vs traditional comparison summary");
+        builder.AppendLine();
+        builder.AppendLine($"Perplexity dataset: `{summary.PerplexityDataset}`");
+        builder.AppendLine();
+        builder.AppendLine("| Model | Response mean | Response tokens/sec | Training mean | Perplexity | Response allocated |");
+        builder.AppendLine("| --- | ---: | ---: | ---: | ---: | ---: |");
+        foreach (var model in summary.Models)
+        {
+            builder.AppendLine(
+                $"| {model.ModelSpecifier} | {model.ResponseMean ?? "-"} | {FormatNullableNumber(model.ResponseTokensPerSecond)} | {model.TrainingMean ?? "-"} | {FormatNullableNumber(model.WikiText2Perplexity)} | {FormatNullableMegabytes(model.ResponseAllocatedMegabytes)} |");
+        }
+
+        builder.AppendLine();
+        builder.AppendLine("| Delta | Value |");
+        builder.AppendLine("| --- | ---: |");
+        builder.AppendLine($"| BitNet speedup vs traditional | {FormatNullableRatio(summary.BitNetSpeedupVersusTraditional)} |");
+        builder.AppendLine($"| BitNet memory delta vs traditional | {FormatNullablePercent(summary.BitNetMemoryDeltaPercentVersusTraditional)} |");
+        builder.AppendLine($"| BitNet quality delta vs traditional | {FormatNullablePercent(summary.BitNetQualityDeltaPercentVersusTraditional)} |");
+    }
+
+    private static void AppendComparisonSummaryHtml(StringBuilder builder, HostedAgentBenchmarkComparisonSummary? summary)
+    {
+        if (summary is null)
+        {
+            return;
+        }
+
+        builder.AppendLine("  <h2>BitNet vs traditional comparison summary</h2>");
+        builder.AppendLine($"  <p>Perplexity dataset: <code>{Encode(summary.PerplexityDataset)}</code></p>");
+        builder.AppendLine("  <table>");
+        builder.AppendLine("    <thead><tr><th>Model</th><th>Response mean</th><th>Response tokens/sec</th><th>Training mean</th><th>Perplexity</th><th>Response allocated</th></tr></thead>");
+        builder.AppendLine("    <tbody>");
+        foreach (var model in summary.Models)
+        {
+            builder.AppendLine(
+                $"      <tr><td>{Encode(model.ModelSpecifier)}</td><td>{Encode(model.ResponseMean ?? "-")}</td><td>{Encode(FormatNullableNumber(model.ResponseTokensPerSecond))}</td><td>{Encode(model.TrainingMean ?? "-")}</td><td>{Encode(FormatNullableNumber(model.WikiText2Perplexity))}</td><td>{Encode(FormatNullableMegabytes(model.ResponseAllocatedMegabytes))}</td></tr>");
+        }
+
+        builder.AppendLine("    </tbody>");
+        builder.AppendLine("  </table>");
+        builder.AppendLine("  <table>");
+        builder.AppendLine("    <thead><tr><th>Delta</th><th>Value</th></tr></thead>");
+        builder.AppendLine("    <tbody>");
+        builder.AppendLine($"      <tr><td>BitNet speedup vs traditional</td><td>{Encode(FormatNullableRatio(summary.BitNetSpeedupVersusTraditional))}</td></tr>");
+        builder.AppendLine($"      <tr><td>BitNet memory delta vs traditional</td><td>{Encode(FormatNullablePercent(summary.BitNetMemoryDeltaPercentVersusTraditional))}</td></tr>");
+        builder.AppendLine($"      <tr><td>BitNet quality delta vs traditional</td><td>{Encode(FormatNullablePercent(summary.BitNetQualityDeltaPercentVersusTraditional))}</td></tr>");
+        builder.AppendLine("    </tbody>");
+        builder.AppendLine("  </table>");
+        AppendComparisonChartsHtml(builder, summary);
+    }
+
+    private static void AppendComparisonChartsHtml(StringBuilder builder, HostedAgentBenchmarkComparisonSummary summary)
+    {
+        var throughputMax = summary.Models.Max(static model => model.ResponseTokensPerSecond ?? 0d);
+        var memoryMax = summary.Models.Max(static model => model.ResponseAllocatedMegabytes ?? 0d);
+        var perplexityMax = summary.Models.Max(static model => model.WikiText2Perplexity ?? 0d);
+
+        builder.AppendLine("  <h3>Comparison charts</h3>");
+        AppendBarChart(builder, "Response tokens/sec", summary.Models, throughputMax, static model => model.ResponseTokensPerSecond, FormatNullableNumber);
+        AppendBarChart(builder, "Response allocated (MB)", summary.Models, memoryMax, static model => model.ResponseAllocatedMegabytes, FormatNullableMegabytes);
+        AppendBarChart(builder, "Perplexity", summary.Models, perplexityMax, static model => model.WikiText2Perplexity, FormatNullableNumber);
+    }
+
+    private static void AppendBarChart(
+        StringBuilder builder,
+        string title,
+        IReadOnlyList<HostedAgentBenchmarkComparisonMetric> models,
+        double maxValue,
+        Func<HostedAgentBenchmarkComparisonMetric, double?> selector,
+        Func<double?, string> formatter)
+    {
+        builder.AppendLine($"  <h4>{Encode(title)}</h4>");
+        builder.AppendLine("  <table>");
+        builder.AppendLine("    <thead><tr><th>Model</th><th>Value</th><th>Chart</th></tr></thead>");
+        builder.AppendLine("    <tbody>");
+        foreach (var model in models)
+        {
+            var value = selector(model);
+            var widthPercent = value is > 0d && maxValue > 0d ? Math.Clamp((value.Value / maxValue) * 100d, 0d, 100d) : 0d;
+            builder.AppendLine(
+                $"      <tr><td>{Encode(model.ModelSpecifier)}</td><td>{Encode(formatter(value))}</td><td><div style=\"background:#e5e7eb;border-radius:9999px;height:0.9rem;min-width:12rem;\"><div style=\"background:#2563eb;border-radius:9999px;height:0.9rem;width:{widthPercent:0.#}%;\"></div></div></td></tr>");
+        }
+
+        builder.AppendLine("    </tbody>");
+        builder.AppendLine("  </table>");
+    }
+
     private static void AppendPaperAuditMarkdown(StringBuilder builder, HostedAgentBenchmarkComparisonReport report)
     {
         var auditedModels = report.Models.Where(static model => model.PaperAlignmentAudit is not null).ToArray();
@@ -506,6 +754,14 @@ public static class HostedAgentBenchmarkReportRunner
 
     private static string EscapeMarkdownInline(string value) =>
         value.Replace("|", "\\|", StringComparison.Ordinal).Replace(Environment.NewLine, "<br />", StringComparison.Ordinal);
+
+    private static string FormatNullableNumber(double? value) => value is null ? "-" : value.Value.ToString("0.##");
+
+    private static string FormatNullableMegabytes(double? value) => value is null ? "-" : $"{value.Value:0.##} MB";
+
+    private static string FormatNullablePercent(double? value) => value is null ? "-" : $"{value.Value:0.##}%";
+
+    private static string FormatNullableRatio(double? value) => value is null ? "-" : $"{value.Value:0.##}x";
 
     private static string Encode(string value) => WebUtility.HtmlEncode(value);
 }
