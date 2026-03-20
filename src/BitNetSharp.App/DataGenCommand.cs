@@ -51,7 +51,7 @@ public sealed record DataGenCommandOptions(
     private static string? ReadOptionalOption(string[] args, string optionName)
     {
         var equalsPrefix = $"{optionName}=";
-        var requiresValue = false;
+        var foundWithoutValue = false;
         for (var index = 0; index < args.Length; index++)
         {
             var argument = args[index];
@@ -65,14 +65,14 @@ public sealed record DataGenCommandOptions(
                 var nextIndex = index + 1;
                 if (nextIndex >= args.Length)
                 {
-                    requiresValue = true;
+                    foundWithoutValue = true;
                     continue;
                 }
 
                 var nextArgument = args[nextIndex];
                 if (nextArgument.StartsWith("--", StringComparison.Ordinal))
                 {
-                    requiresValue = true;
+                    foundWithoutValue = true;
                     continue;
                 }
 
@@ -80,7 +80,7 @@ public sealed record DataGenCommandOptions(
             }
         }
 
-        if (requiresValue)
+        if (foundWithoutValue)
         {
             throw new ArgumentException($"Option '{optionName}' requires a value.", nameof(args));
         }
