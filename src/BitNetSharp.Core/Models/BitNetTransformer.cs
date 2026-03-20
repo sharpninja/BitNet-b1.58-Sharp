@@ -31,7 +31,10 @@ public sealed class BitNetTransformer
 
     public BitLinear OutputHead { get; }
 
-    public float[,] Forward(IReadOnlyList<int> tokenIds)
+    public float[,] Forward(IReadOnlyList<int> tokenIds) =>
+        OutputHead.Forward(ForwardHiddenStates(tokenIds));
+
+    public float[,] ForwardHiddenStates(IReadOnlyList<int> tokenIds)
     {
         ArgumentNullException.ThrowIfNull(tokenIds);
 
@@ -52,7 +55,7 @@ public sealed class BitNetTransformer
             hidden = layer.Forward(hidden);
         }
 
-        return OutputHead.Forward(FinalNorm.Forward(hidden));
+        return FinalNorm.Forward(hidden);
     }
 
     private float[,] Embed(IReadOnlyList<int> tokenIds)

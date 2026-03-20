@@ -39,7 +39,7 @@ Feature: Hosted model runtime use cases
     Given the hosted model named "bitnet-b1.58-sharp"
     When I run the paper-alignment audit
     Then the paper-alignment architecture checks should all pass
-    And the paper-alignment audit should identify pending canonical workflow items
+    And the paper-alignment audit should verify repository runtime coverage
 
   Scenario Outline: Train the selected model on the default dataset
     Given the hosted model named "<model>"
@@ -47,4 +47,5 @@ Feature: Hosted model runtime use cases
     Then the training run should complete over the default dataset
     Examples:
       | model            |
+      | bitnet-b1.58-sharp |
       | traditional-local |

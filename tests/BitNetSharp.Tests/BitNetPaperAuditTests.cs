@@ -6,7 +6,7 @@ namespace BitNetSharp.Tests;
 public sealed class BitNetPaperAuditTests
 {
     [Fact]
-    public void PaperAuditPassesArchitectureChecksAndReportsCanonicalRoadmapGaps()
+    public void PaperAuditPassesArchitectureChecksAndReportsRuntimeCoverage()
     {
         var model = BitNetBootstrap.CreatePaperModel(VerbosityLevel.Normal);
 
@@ -14,12 +14,12 @@ public sealed class BitNetPaperAuditTests
 
         Assert.True(report.ArchitectureChecksPassed);
         Assert.Equal(0, report.FailedCount);
-        Assert.True(report.PassedCount >= 6);
-        Assert.True(report.PendingCount >= 4);
+        Assert.True(report.PassedCount >= 10);
+        Assert.Equal(0, report.PendingCount);
         Assert.Contains(
             report.Checks,
-            check => check.Status == BitNetPaperAuditStatus.Pending
-                && check.Requirement.Contains("Zero-shot paper benchmark tasks", StringComparison.Ordinal));
+            check => check.Status == BitNetPaperAuditStatus.Passed
+                && check.Requirement.Contains("Zero-shot benchmark fixtures", StringComparison.Ordinal));
     }
 
     [Fact]
@@ -34,6 +34,7 @@ public sealed class BitNetPaperAuditTests
         Assert.Contains("Passed:", formatted, StringComparison.Ordinal);
         Assert.Contains("Pending:", formatted, StringComparison.Ordinal);
         Assert.Contains("[PASS] Architecture", formatted, StringComparison.Ordinal);
-        Assert.Contains("[PENDING] Roadmap", formatted, StringComparison.Ordinal);
+        Assert.DoesNotContain("[PENDING]", formatted, StringComparison.Ordinal);
+        Assert.Contains("[PASS] Benchmark pipeline", formatted, StringComparison.Ordinal);
     }
 }

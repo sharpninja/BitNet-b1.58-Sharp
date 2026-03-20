@@ -35,10 +35,19 @@ public abstract class TrainableHostedAgentBenchmarkBase : HostedAgentBenchmarkBa
     public new string ModelSpecifier { get; set; } = HostedAgentModelFactory.TraditionalLocalModelId;
 
     public IEnumerable<string> TrainableModelSpecifiers => Options.ModelSpecifiers
-        .Where(static specifier =>
-            string.Equals(specifier, HostedAgentModelFactory.TraditionalLocalModelId, StringComparison.OrdinalIgnoreCase)
-            || File.Exists(specifier))
-        .DefaultIfEmpty(HostedAgentModelFactory.TraditionalLocalModelId);
+        .Where(IsTrainableSpecifier)
+        .DefaultIfEmpty(HostedAgentModelFactory.DefaultModelId);
+
+    private static bool IsTrainableSpecifier(string specifier)
+    {
+        if (File.Exists(specifier))
+        {
+            return true;
+        }
+
+        return string.Equals(specifier, HostedAgentModelFactory.DefaultModelId, StringComparison.OrdinalIgnoreCase)
+            || string.Equals(specifier, HostedAgentModelFactory.TraditionalLocalModelId, StringComparison.OrdinalIgnoreCase);
+    }
 }
 
 [MemoryDiagnoser, ShortRunJob]

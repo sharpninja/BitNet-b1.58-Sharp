@@ -83,7 +83,7 @@ public sealed class HostedAgentBenchmarksExecutionTests
     {
         await WithBenchmarkOptionsAsync(
             new HostedAgentBenchmarkOptions(
-                [HostedAgentModelFactory.TraditionalLocalModelId],
+                [HostedAgentModelFactory.DefaultModelId, HostedAgentModelFactory.TraditionalLocalModelId],
                 "how are you hosted",
                 MaxOutputTokens: 3,
                 VerbosityLevel.Normal),
@@ -92,6 +92,29 @@ public sealed class HostedAgentBenchmarksExecutionTests
                 var benchmark = new HostedAgentTrainingBenchmarks
                 {
                     ModelSpecifier = HostedAgentModelFactory.TraditionalLocalModelId
+                };
+
+                var trainedExamples = benchmark.TrainSelectedModel();
+
+                Assert.Equal(BitNetTrainingCorpus.CreateDefaultExamples().Count, trainedExamples);
+                return Task.CompletedTask;
+            });
+    }
+
+    [Fact]
+    public async Task TrainingBenchmarkRunsThePaperAlignedTrainingPath()
+    {
+        await WithBenchmarkOptionsAsync(
+            new HostedAgentBenchmarkOptions(
+                [HostedAgentModelFactory.DefaultModelId],
+                "how are you hosted",
+                MaxOutputTokens: 3,
+                VerbosityLevel.Normal),
+            () =>
+            {
+                var benchmark = new HostedAgentTrainingBenchmarks
+                {
+                    ModelSpecifier = HostedAgentModelFactory.DefaultModelId
                 };
 
                 var trainedExamples = benchmark.TrainSelectedModel();

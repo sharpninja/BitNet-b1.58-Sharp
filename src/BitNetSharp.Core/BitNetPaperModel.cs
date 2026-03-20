@@ -72,6 +72,68 @@ public sealed class BitNetPaperModel
     public static BitNetPaperModel CreateDefault(VerbosityLevel verbosity = VerbosityLevel.Normal) =>
         new(new BitNetOptions(BitNetTrainingCorpus.CreateDefaultVocabulary(), verbosity));
 
+    public TrainingReport Train(IEnumerable<TrainingExample> examples, int epochs = 3, float learningRate = 0.05f)
+    {
+        ArgumentNullException.ThrowIfNull(examples);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(epochs);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(learningRate);
+
+        var trainingSet = examples.ToList();
+        if (trainingSet.Count == 0)
+        {
+            throw new ArgumentException("At least one training example is required.", nameof(examples));
+        }
+
+        var weights = ExportOutputHeadWeights();
+        var lossHistory = new List<double>(epochs);
+
+        for (var epoch = 0; epoch < epochs; epoch++)
+        {
+            var totalLoss = 0d;
+            var observations = 0;
+
+            foreach (var example in trainingSet)
+            {
+                var promptIds = EncodeTokenIds(example.Prompt);
+                var targetIds = EncodeTokenIds(example.Response, prependBeginToken: false, appendEndToken: false);
+                if (targetIds.Count == 0)
+                {
+                    continue;
+                }
+
+                var hiddenStates = ForwardHiddenStates(promptIds);
+                var features = GetLastRow(hiddenStates);
+                var targetId = targetIds[0];
+                var probabilities = ComputeProbabilities(weights, features);
+
+                totalLoss -= Math.Log(Math.Max(probabilities[targetId], 1e-9d));
+                observations++;
+
+                for (var tokenId = 0; tokenId < probabilities.Length; tokenId++)
+                {
+                    var gradient = probabilities[tokenId] - (tokenId == targetId ? 1d : 0d);
+                    for (var dimension = 0; dimension < features.Length; dimension++)
+                    {
+                        weights[tokenId, dimension] -= (float)(learningRate * gradient * features[dimension]);
+                    }
+                }
+            }
+
+            ImportOutputHeadWeights(weights);
+            weights = ExportOutputHeadWeights();
+            lossHistory.Add(observations == 0 ? 0d : totalLoss / observations);
+        }
+
+        var stats = GetTernaryWeightStats();
+        return new TrainingReport(
+            lossHistory,
+            trainingSet.Count * epochs,
+            epochs,
+            stats.NegativeCount,
+            stats.ZeroCount,
+            stats.PositiveCount);
+    }
+
     public BitNetGenerationResult GenerateResponse(string prompt, int? maxTokens = null)
     {
         var diagnostics = new List<string>();
@@ -141,6 +203,31 @@ public sealed class BitNetPaperModel
         return new TernaryWeightStats(negative, zero, positive);
     }
 
+    internal IReadOnlyList<int> EncodeTokenIds(string text, bool prependBeginToken = true, bool appendEndToken = false)
+    {
+        var tokenIds = new List<int>();
+        if (prependBeginToken)
+        {
+            tokenIds.Add(_beginTokenId);
+        }
+
+        tokenIds.AddRange(_tokenizer.Tokenize(text).Select(GetId));
+        if (appendEndToken)
+        {
+            tokenIds.Add(_endTokenId);
+        }
+
+        return tokenIds;
+    }
+
+    internal float[,] ForwardLogits(IReadOnlyList<int> tokenIds) => Transformer.Forward(tokenIds);
+
+    internal float[,] ForwardHiddenStates(IReadOnlyList<int> tokenIds) => Transformer.ForwardHiddenStates(tokenIds);
+
+    internal float[,] ExportOutputHeadWeights() => Transformer.OutputHead.ToFullPrecision();
+
+    internal void ImportOutputHeadWeights(float[,] weights) => Transformer.OutputHead.QuantizeFromFullPrecision(weights);
+
     private static BitNetConfig CreateDefaultConfig(int vocabularySize) =>
         new(
             vocabSize: vocabularySize,
@@ -155,6 +242,55 @@ public sealed class BitNetPaperModel
         var tokenIds = new List<int> { _beginTokenId };
         tokenIds.AddRange(_tokenizer.Tokenize(prompt).Select(GetId));
         return tokenIds;
+    }
+
+    private static float[] GetLastRow(float[,] matrix)
+    {
+        var lastRowIndex = matrix.GetLength(0) - 1;
+        var result = new float[matrix.GetLength(1)];
+        for (var column = 0; column < result.Length; column++)
+        {
+            result[column] = matrix[lastRowIndex, column];
+        }
+
+        return result;
+    }
+
+    private static double[] ComputeProbabilities(float[,] weights, float[] features)
+    {
+        var logits = new double[weights.GetLength(0)];
+        var maxLogit = double.NegativeInfinity;
+
+        for (var row = 0; row < weights.GetLength(0); row++)
+        {
+            var value = 0d;
+            for (var column = 0; column < weights.GetLength(1); column++)
+            {
+                value += weights[row, column] * features[column];
+            }
+
+            logits[row] = value;
+            maxLogit = Math.Max(maxLogit, value);
+        }
+
+        var partition = 0d;
+        for (var index = 0; index < logits.Length; index++)
+        {
+            logits[index] = Math.Exp(logits[index] - maxLogit);
+            partition += logits[index];
+        }
+
+        if (partition <= 0d)
+        {
+            return Enumerable.Repeat(1d / logits.Length, logits.Length).ToArray();
+        }
+
+        for (var index = 0; index < logits.Length; index++)
+        {
+            logits[index] /= partition;
+        }
+
+        return logits;
     }
 
     private IEnumerable<(string Token, float Logit)> RankNextTokens(float[,] logits, int count)

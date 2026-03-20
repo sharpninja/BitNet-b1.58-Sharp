@@ -82,7 +82,7 @@ public sealed class HostedAgentBenchmarkReportRunnerTests
                             "Paper audit",
                             [
                                 new BitNetPaperAuditCheck("Architecture", "Decoder-only transformer topology matches the paper-aligned BitNet surface.", BitNetPaperAuditStatus.Passed, "Verified."),
-                                new BitNetPaperAuditCheck("Roadmap", "Perplexity parity against the paper datasets is measured in-repository.", BitNetPaperAuditStatus.Pending, "Not yet implemented.")
+                                new BitNetPaperAuditCheck("Benchmark pipeline", "Perplexity measurements are implemented and reported for named benchmark fixture slices.", BitNetPaperAuditStatus.Passed, "WikiText2=12.3 ppl, C4=14.1 ppl, RedPajama=13.7 ppl.")
                             ]))
                 ],
                 [
@@ -106,12 +106,58 @@ public sealed class HostedAgentBenchmarkReportRunnerTests
             Assert.Contains("BitNet benchmark comparison report", markdown, StringComparison.Ordinal);
             Assert.Contains("Expected-token recall", markdown, StringComparison.Ordinal);
             Assert.Contains("Paper-alignment audit", markdown, StringComparison.Ordinal);
-            Assert.Contains("Perplexity parity against the paper datasets is measured in-repository.", markdown, StringComparison.Ordinal);
+            Assert.Contains("Perplexity measurements are implemented and reported for named benchmark fixture slices.", markdown, StringComparison.Ordinal);
+            Assert.Contains("| bitnet-b1.58-sharp | 2 | 0 | 0 |", markdown, StringComparison.Ordinal);
             Assert.Contains("<response>", markdown, StringComparison.Ordinal);
             Assert.Contains("&lt;response&gt;", html, StringComparison.Ordinal);
             Assert.Contains("Paper-alignment audit", html, StringComparison.Ordinal);
             Assert.Contains("comparison-report.md", html, StringComparison.Ordinal);
             Assert.Contains("\"ModelSpecifier\": \"bitnet-b1.58-sharp\"", json, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(outputDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
+    public void WriteReportSiteShowsCompletedTrainingWhenBitNetTrainingIsSupported()
+    {
+        var outputDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outputDirectory);
+
+        try
+        {
+            var report = new HostedAgentBenchmarkComparisonReport(
+                DateTimeOffset.Parse("2026-03-18T00:00:00Z"),
+                ["hello"],
+                [
+                    new HostedAgentBenchmarkModelReport(
+                        HostedAgentModelFactory.DefaultModelId,
+                        "Paper-aligned BitNet b1.58 transformer",
+                        TrainingSupported: true,
+                        TrainingCompleted: true,
+                        TrainingExamples: 6,
+                        TrainingEpochs: 3,
+                        SuccessfulQueries: 1,
+                        TotalQueries: 1,
+                        ExactMatches: 0,
+                        AverageExpectedTokenRecall: 0.5d,
+                        QueryResults:
+                        [
+                            new HostedAgentBenchmarkQueryResult("hello", "Hello!", "Hello!", true, true, 1.0d)
+                        ])
+                ],
+                []);
+
+            HostedAgentBenchmarkReportRunner.WriteReportSite(outputDirectory, report);
+
+            var markdown = File.ReadAllText(Path.Combine(outputDirectory, "comparison-report.md"));
+            var html = File.ReadAllText(Path.Combine(outputDirectory, "index.html"));
+
+            Assert.Contains("| bitnet-b1.58-sharp | Completed (6 examples, 3 epochs) |", markdown, StringComparison.Ordinal);
+            Assert.Contains("<td>Completed (6 examples, 3 epochs)</td>", html, StringComparison.Ordinal);
+            Assert.DoesNotContain("Not supported", markdown, StringComparison.Ordinal);
         }
         finally
         {

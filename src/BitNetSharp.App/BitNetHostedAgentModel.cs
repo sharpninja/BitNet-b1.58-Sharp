@@ -3,7 +3,7 @@ using BitNetSharp.Core.Quantization;
 
 namespace BitNetSharp.App;
 
-public sealed class BitNetHostedAgentModel(BitNetPaperModel model) : IHostedAgentModel, IInspectableHostedAgentModel
+public sealed class BitNetHostedAgentModel(BitNetPaperModel model) : IHostedAgentModel, IInspectableHostedAgentModel, ITrainableHostedAgentModel
 {
     public BitNetPaperModel Model { get; } = model ?? throw new ArgumentNullException(nameof(model));
 
@@ -42,6 +42,11 @@ public sealed class BitNetHostedAgentModel(BitNetPaperModel model) : IHostedAgen
     }
 
     public TernaryWeightStats GetTernaryWeightStats() => Model.GetTernaryWeightStats();
+
+    public void Train(IEnumerable<TrainingExample> examples, int epochs = 1)
+    {
+        Model.Train(examples, epochs);
+    }
 
     public void Dispose()
     {
