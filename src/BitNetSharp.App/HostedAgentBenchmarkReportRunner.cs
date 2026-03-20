@@ -419,12 +419,12 @@ public static class HostedAgentBenchmarkReportRunner
             Directory.Delete(destinationDirectory, recursive: true);
         }
 
+        Directory.CreateDirectory(destinationDirectory);
         foreach (var directory in Directory.GetDirectories(sourceDirectory, "*", SearchOption.AllDirectories))
         {
             Directory.CreateDirectory(directory.Replace(sourceDirectory, destinationDirectory, StringComparison.Ordinal));
         }
 
-        Directory.CreateDirectory(destinationDirectory);
         foreach (var file in Directory.GetFiles(sourceDirectory, "*", SearchOption.AllDirectories))
         {
             var destinationFile = file.Replace(sourceDirectory, destinationDirectory, StringComparison.Ordinal);
