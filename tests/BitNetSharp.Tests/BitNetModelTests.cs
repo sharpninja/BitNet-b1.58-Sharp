@@ -241,6 +241,38 @@ public sealed class BitNetPaperModelTests
     }
 
     [Fact]
+    public void DataGenCommandOptionsRejectEmptyRequiredValues()
+    {
+        var exception = Assert.Throws<ArgumentException>(
+            () => DataGenCommandOptions.Parse(
+                [
+                    "datagen",
+                    "--domain=",
+                    "--count", "12",
+                    "--seeds", "examples/seed-examples.json",
+                    "--output", "data/synthetic-medical.jsonl"
+                ]));
+
+        Assert.Contains("non-empty value", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DataGenCommandOptionsRejectOptionLikeNextToken()
+    {
+        var exception = Assert.Throws<ArgumentException>(
+            () => DataGenCommandOptions.Parse(
+                [
+                    "datagen",
+                    "--domain", "--count",
+                    "--count", "12",
+                    "--seeds", "examples/seed-examples.json",
+                    "--output", "data/synthetic-medical.jsonl"
+                ]));
+
+        Assert.Contains("requires a value", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
     public async Task DataGenCommandWritesJsonlDataset()
     {
         var outputPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-synthetic.jsonl");

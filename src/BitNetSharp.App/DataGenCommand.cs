@@ -32,13 +32,26 @@ public sealed record DataGenCommandOptions(
             ReadOptionalOption(args, "--lora"));
     }
 
-    private static string ReadRequiredOption(string[] args, string optionName) =>
-        ReadOptionalOption(args, optionName)
-        ?? throw new ArgumentException($"Missing required option '{optionName}'.", nameof(args));
+    private static string ReadRequiredOption(string[] args, string optionName)
+    {
+        var value = ReadOptionalOption(args, optionName);
+        if (value is null)
+        {
+            throw new ArgumentException($"Missing required option '{optionName}'.", nameof(args));
+        }
+
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            throw new ArgumentException($"Option '{optionName}' requires a non-empty value.", nameof(args));
+        }
+
+        return value;
+    }
 
     private static string? ReadOptionalOption(string[] args, string optionName)
     {
         var equalsPrefix = $"{optionName}=";
+        var requiresValue = false;
         for (var index = 0; index < args.Length; index++)
         {
             var argument = args[index];
@@ -49,13 +62,27 @@ public sealed record DataGenCommandOptions(
 
             if (string.Equals(argument, optionName, StringComparison.OrdinalIgnoreCase))
             {
-                if (index + 1 >= args.Length)
+                var nextIndex = index + 1;
+                if (nextIndex >= args.Length)
                 {
-                    throw new ArgumentException($"Option '{optionName}' requires a value.", nameof(args));
+                    requiresValue = true;
+                    continue;
                 }
 
-                return args[index + 1];
+                var nextArgument = args[nextIndex];
+                if (nextArgument.StartsWith("--", StringComparison.Ordinal))
+                {
+                    requiresValue = true;
+                    continue;
+                }
+
+                return nextArgument;
             }
+        }
+
+        if (requiresValue)
+        {
+            throw new ArgumentException($"Option '{optionName}' requires a value.", nameof(args));
         }
 
         return null;
@@ -89,7 +116,7 @@ public static class DataGenCommand
         {
             cancellationToken.ThrowIfCancellationRequested();
             var line = JsonSerializer.Serialize(example, OutputJsonOptions);
-            await writer.WriteLineAsync(line);
+            await writer.WriteLineAsync(line.AsMemory(), cancellationToken);
         }
 
         return options.OutputPath;

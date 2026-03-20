@@ -28,7 +28,7 @@ dotnet test BitNet-b1.58-Sharp.slnx
 - [Architecture](architecture.md)
 - [Benchmarking and model comparison](benchmarking.md)
 - [DataGen guide](datagen-guide.md)
-- [Implementation plan](implementation-plan.md)
+- [Implementation plan](implementation-plan-v3.md)
 - [Releases and packaging](releases-and-packaging.md)
 - [Usage](usage.md)
 - [Training and visualization](training-and-visualization.md)

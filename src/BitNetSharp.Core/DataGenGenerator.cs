@@ -71,11 +71,15 @@ public sealed class DataGenGenerator(BitNetPaperModel model)
         }
 
         var normalizedDomain = domain.Trim();
+        var domainTokens = TokenizeDomain(normalizedDomain);
+        var tagsByVariation = Enumerable.Range(0, InstructionPatterns.Length)
+            .Select(index => BuildTags(domainTokens, $"pattern-{index + 1}"))
+            .ToArray();
         var seedContexts = seeds
             .Select(seed => new
             {
                 Seed = seed,
-                Focus = BuildFocus(seed, normalizedDomain)
+                Focus = BuildFocus(seed, normalizedDomain, domainTokens)
             })
             .ToArray();
 
@@ -94,7 +98,7 @@ public sealed class DataGenGenerator(BitNetPaperModel model)
                 Variation: variation,
                 GeneratorModel: _model.ModelId,
                 LoraAdapter: string.IsNullOrWhiteSpace(loraAdapter) ? null : Path.GetFileName(loraAdapter),
-                Tags: BuildTags(normalizedDomain, variation));
+                Tags: tagsByVariation[variationIndex]);
         }
     }
 
@@ -137,22 +141,25 @@ public sealed class DataGenGenerator(BitNetPaperModel model)
         return $"{response} Adapter hint: {Path.GetFileName(loraAdapter)}.";
     }
 
-    private static IReadOnlyList<string> BuildTags(string domain, string variation) =>
+    private static string[] BuildTags(IReadOnlyList<string> domainTokens, string variation) =>
     [
         "synthetic",
         "offline",
         variation,
-        .. domain
-            .Split([' ', '-', '_'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(token => token.ToLowerInvariant())
+        .. domainTokens
     ];
 
-    private string BuildFocus(DataGenSeedExample seed, string domain)
+    private static string[] TokenizeDomain(string domain) =>
+        domain
+            .Split([' ', '-', '_'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(token => token.ToLowerInvariant())
+            .ToArray();
+
+    private string BuildFocus(DataGenSeedExample seed, string domain, IReadOnlyList<string> domainTokens)
     {
         var prompt = $"{domain} {seed.Instruction}";
         var result = _model.GenerateResponse(prompt, maxTokens: 3);
-        var focusTerms = domain
-            .Split([' ', '-', '_'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+        var focusTerms = domainTokens
             .Concat(seed.Instruction.Split([' ', '-', '_', ',', '.', ':', ';'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             .Concat(result.Tokens)
             .Where(token => !string.IsNullOrWhiteSpace(token))
