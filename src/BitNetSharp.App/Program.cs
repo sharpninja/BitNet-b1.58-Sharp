@@ -51,7 +51,7 @@ switch (command)
         }
         else
         {
-            Console.WriteLine("Paper-aligned transformer training is not implemented yet in this branch.");
+            Console.WriteLine($"Model '{model.ModelId}' does not expose repository-local training.");
         }
 
         Console.WriteLine(FormatModelSummary(model));

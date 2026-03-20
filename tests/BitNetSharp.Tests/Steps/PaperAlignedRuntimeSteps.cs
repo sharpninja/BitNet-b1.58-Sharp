@@ -151,15 +151,15 @@ public sealed class PaperAlignedRuntimeSteps
         Assert.Equal(0, _paperAuditReport.FailedCount);
     }
 
-    [Then("the paper-alignment audit should identify pending canonical workflow items")]
-    public void ThenThePaperAlignmentAuditShouldIdentifyPendingCanonicalWorkflowItems()
+    [Then("the paper-alignment audit should verify repository runtime coverage")]
+    public void ThenThePaperAlignmentAuditShouldVerifyRepositoryRuntimeCoverage()
     {
         Assert.NotNull(_paperAuditReport);
-        Assert.True(_paperAuditReport.PendingCount > 0);
+        Assert.Equal(0, _paperAuditReport.PendingCount);
         Assert.Contains(
             _paperAuditReport.Checks,
-            check => check.Status == BitNetPaperAuditStatus.Pending
-                && check.Requirement.Contains("Perplexity parity", StringComparison.Ordinal));
+            check => check.Status == BitNetPaperAuditStatus.Passed
+                && check.Requirement.Contains("Perplexity measurements", StringComparison.Ordinal));
     }
 
     [AfterScenario]

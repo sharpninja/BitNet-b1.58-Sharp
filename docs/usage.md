@@ -40,7 +40,7 @@ dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src
 
 The `visualize` command prints the current model summary. When the selected model is the paper-aligned BitNet transformer, it also prints the ternary weight histogram across the transformer's `BitLinear` projections.
 
-The `paper-audit` command turns the paper checklist into an executable report. It confirms the implemented architecture requirements that the repository currently satisfies and explicitly lists the remaining paper-reproduction work that is still pending, such as end-to-end training, perplexity measurement, zero-shot task evaluation, and external checkpoint interoperability.
+The `paper-audit` command turns the paper checklist into an executable report. It confirms the implemented architecture requirements that the repository currently satisfies and also verifies the repository-local runtime surface for paper-model fine-tuning, named perplexity fixture measurements, zero-shot fixture evaluation, and checkpoint round-tripping.
 
 ## Benchmark
 
@@ -57,7 +57,7 @@ dotnet run --configuration Release --project src/BitNetSharp.App/BitNetSharp.App
 ```
 
 This command runs the BenchmarkDotNet suite, evaluates both built-in models against the shared default training corpus/query script, and writes HTML, Markdown, and JSON comparison reports to the selected output directory.
-For the paper-aligned BitNet model, the generated report also includes a paper-alignment audit section with architecture checks and pending canonical workflow items.
+For the paper-aligned BitNet model, the generated report also includes a paper-alignment audit section with architecture checks and benchmark-pipeline coverage for training, perplexity fixtures, zero-shot fixtures, and checkpoint export/import validation.
 
 ## DataGen
 
@@ -74,4 +74,4 @@ This command reads optional seed examples, merges the built-in pattern prompts w
 dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- train --model=traditional-local
 ```
 
-The paper-aligned transformer still reports that training is not implemented in this branch. The `traditional-local` model trains a small tensor-based local language model on the default corpus for 24 epochs so its training and query performance can be benchmarked on the same dataset.
+The paper-aligned transformer now exposes repository-local output-head fine-tuning on the default corpus so the benchmark pipeline can exercise its training path alongside inference. The `traditional-local` model still runs its 24-epoch tensor-based training loop for comparison on the same dataset.

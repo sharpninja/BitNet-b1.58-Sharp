@@ -20,7 +20,7 @@ The manual GitHub Actions benchmark report workflow runs the same benchmark suit
 - efficacy, measured as non-empty responses across the shared default query script
 - accuracy, measured as exact-match and expected-token recall against the default corpus responses
 - performance, measured from the exported BenchmarkDotNet results
-- a paper-alignment audit for the canonical BitNet model so the report shows both implemented architecture guarantees and still-pending paper reproduction work
+- a paper-alignment audit for the canonical BitNet model so the report shows implemented architecture guarantees plus repository-local training, perplexity, zero-shot fixture, and checkpoint round-trip coverage
 
 ## Run the built-in comparison benchmark
 

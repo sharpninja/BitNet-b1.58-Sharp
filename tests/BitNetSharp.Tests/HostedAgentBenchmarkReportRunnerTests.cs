@@ -82,7 +82,7 @@ public sealed class HostedAgentBenchmarkReportRunnerTests
                             "Paper audit",
                             [
                                 new BitNetPaperAuditCheck("Architecture", "Decoder-only transformer topology matches the paper-aligned BitNet surface.", BitNetPaperAuditStatus.Passed, "Verified."),
-                                new BitNetPaperAuditCheck("Roadmap", "Perplexity parity against the paper datasets is measured in-repository.", BitNetPaperAuditStatus.Pending, "Not yet implemented.")
+                                new BitNetPaperAuditCheck("Benchmark pipeline", "Perplexity measurements are implemented and reported for named benchmark fixture slices.", BitNetPaperAuditStatus.Passed, "WikiText2=12.3 ppl, C4=14.1 ppl, RedPajama=13.7 ppl.")
                             ]))
                 ],
                 [
@@ -106,7 +106,8 @@ public sealed class HostedAgentBenchmarkReportRunnerTests
             Assert.Contains("BitNet benchmark comparison report", markdown, StringComparison.Ordinal);
             Assert.Contains("Expected-token recall", markdown, StringComparison.Ordinal);
             Assert.Contains("Paper-alignment audit", markdown, StringComparison.Ordinal);
-            Assert.Contains("Perplexity parity against the paper datasets is measured in-repository.", markdown, StringComparison.Ordinal);
+            Assert.Contains("Perplexity measurements are implemented and reported for named benchmark fixture slices.", markdown, StringComparison.Ordinal);
+            Assert.Contains("| bitnet-b1.58-sharp | 2 | 0 | 0 |", markdown, StringComparison.Ordinal);
             Assert.Contains("<response>", markdown, StringComparison.Ordinal);
             Assert.Contains("&lt;response&gt;", html, StringComparison.Ordinal);
             Assert.Contains("Paper-alignment audit", html, StringComparison.Ordinal);
