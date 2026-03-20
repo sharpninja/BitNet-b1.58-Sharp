@@ -7,7 +7,7 @@
 ## Command
 
 ```bash
-dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen --domain=code-review --count=100 --output=/absolute/path/to/data/code-review.jsonl
+dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen --domain=code-review --count=100 --output=/absolute/path/to/data/code-review.jsonl
 ```
 
 ## Supported options

@@ -14,7 +14,7 @@ public sealed class DataGenGenerator(IHostedAgentModel model, DataGenPromptTempl
         var seeds = DataGenSeedExample.LoadMany(options.SeedPath);
         var accepted = new List<DataGenDatasetEntry>();
         var attempts = 0;
-        var maxAttempts = Math.Max(options.Count * 10, options.Count);
+        var maxAttempts = options.Count * 10;
 
         while (accepted.Count < options.Count && attempts < maxAttempts)
         {

@@ -58,7 +58,7 @@ This command runs the BenchmarkDotNet suite, evaluates both built-in models agai
 ## DataGen synthetic dataset generation
 
 ```bash
-dotnet run --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen --domain=code-review --count=2 --output=/absolute/path/to/data/code-review.jsonl --constraint="Use American English"
+dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen --domain=code-review --count=2 --output=/absolute/path/to/data/code-review.jsonl --constraint="Use American English"
 ```
 
 The `datagen` command generates domain-agnostic synthetic instruction-response pairs and writes them as JSONL records that include `instruction`, `response`, `prompt`, `domain`, `task_type`, `quality_score`, and `generation_timestamp`. You can optionally add `--seeds=/absolute/path/to/seeds.json`, `--task-type=...`, `--output-schema=...`, `--template=/absolute/path/to/template.json`, `--lora=/absolute/path/to/domain-lora.bin`, `--candidate-count=N`, and `--min-quality=0.55`.
