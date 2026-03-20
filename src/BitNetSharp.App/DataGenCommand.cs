@@ -55,7 +55,7 @@ public sealed record DataGenCommandOptions(
             string.IsNullOrWhiteSpace(seedsPath) ? null : Path.GetFullPath(seedsPath),
             ReadOptionalOption(args, "--output-schema")?.Trim() ?? DefaultOutputSchema,
             ReadOptionalOption(args, "--template"),
-            ReadOptionalOption(args, "--lora"),
+            ResolveOptionalPath(ReadOptionalOption(args, "--lora")),
             candidateCount,
             minimumQualityScore,
             ParseNullableInt(ReadOptionalOption(args, "--max-tokens")));
@@ -187,10 +187,26 @@ public sealed record DataGenCommandOptions(
 
     private static int? ParseNullableInt(string? value) =>
         int.TryParse(value, out var parsed) ? parsed : null;
+
+    private static string? ResolveOptionalPath(string? value) =>
+        string.IsNullOrWhiteSpace(value) ? null : Path.GetFullPath(value);
 }
 
 public static class DataGenCommand
 {
+    // Generate a 5x surplus of candidates so low-quality samples can be rejected with enough headroom
+    // for typical small and medium runs without pushing runtime costs toward unbounded regeneration.
+    private const int CandidateExpansionMultiplier = 5;
+
+    // Schema validity matters most, consistency comes next, and diversity provides a smaller balancing signal
+    // so repeated low-value phrasing does not dominate accepted output.
+    private const double SchemaWeight = 0.4d;
+    private const double ConsistencyWeight = 0.35d;
+    private const double DiversityWeight = 0.25d;
+    private const int DefaultQualityProbeMaxTokens = 16;
+
+    // These delimiters intentionally keep tokenization lightweight and deterministic so diversity scoring
+    // compares coarse lexical overlap without pulling in a heavier NLP dependency for JSONL generation.
     private static readonly char[] TokenDelimiters = [' ', '\r', '\n', '\t', ',', '.', ':', ';', '!', '?', '(', ')', '[', ']', '{', '}', '"', '\''];
 
     private static readonly JsonSerializerOptions OutputJsonOptions = new()
@@ -217,7 +233,7 @@ public static class DataGenCommand
         await using var writer = new StreamWriter(stream);
 
         var acceptedEntries = new List<DataGenDatasetEntry>();
-        var candidateTarget = Math.Max(options.Count * 5, options.Count);
+        var candidateTarget = options.Count * CandidateExpansionMultiplier;
         foreach (var example in generator.Generate(options.Domain, candidateTarget, seeds, options.LoraPath))
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -242,7 +258,7 @@ public static class DataGenCommand
                 qualityScore,
                 DateTimeOffset.UtcNow,
                 seeds.Select(seed => seed.Instruction).ToArray(),
-                string.IsNullOrWhiteSpace(options.LoraPath) ? null : Path.GetFullPath(options.LoraPath),
+                options.LoraPath,
                 example.SeedInstruction,
                 example.SeedResponse,
                 example.Variation,
@@ -257,7 +273,7 @@ public static class DataGenCommand
         if (acceptedEntries.Count < options.Count)
         {
             throw new InvalidOperationException(
-                $"DataGen could only accept {acceptedEntries.Count} examples after evaluating {candidateTarget} candidates. Lower --min-quality or add seeds/constraints.");
+                $"DataGen could only accept {acceptedEntries.Count} examples after evaluating {candidateTarget} candidates. Lower --min-quality, increase --candidate-count, or add seeds/constraints.");
         }
 
         return options.OutputPath;
@@ -286,7 +302,7 @@ public static class DataGenCommand
         DataGenCommandOptions options)
     {
         var candidates = Enumerable.Range(0, options.CandidateCount)
-            .Select(_ => model.GenerateResponse(prompt, options.MaxOutputTokens ?? 16).ResponseText)
+            .Select(_ => model.GenerateResponse(prompt, options.MaxOutputTokens ?? DefaultQualityProbeMaxTokens).ResponseText)
             .ToArray();
 
         var majorityCount = candidates
@@ -295,10 +311,10 @@ public static class DataGenCommand
             .DefaultIfEmpty(0)
             .Max();
 
-        var consistencyScore = candidates.Length == 0 ? 0d : majorityCount / (double)candidates.Length;
-        var schemaScore = !string.IsNullOrWhiteSpace(prompt) && !string.IsNullOrWhiteSpace(response) ? 1d : 0d;
+        var consistencyScore = majorityCount / (double)candidates.Length;
+        var completenessScore = !string.IsNullOrWhiteSpace(prompt) && !string.IsNullOrWhiteSpace(response) ? 1d : 0d;
         var diversityScore = ComputeDiversityScore(response, acceptedEntries);
-        return Math.Round((schemaScore * 0.4d) + (consistencyScore * 0.35d) + (diversityScore * 0.25d), 4);
+        return Math.Round((completenessScore * SchemaWeight) + (consistencyScore * ConsistencyWeight) + (diversityScore * DiversityWeight), 4);
     }
 
     private static double ComputeDiversityScore(string candidate, IReadOnlyList<DataGenDatasetEntry> acceptedEntries)
@@ -325,7 +341,7 @@ public static class DataGenCommand
         }
 
         var intersection = left.Intersect(right, StringComparer.Ordinal).Count();
-        var union = left.Union(right, StringComparer.Ordinal).Count();
+        var union = left.Count + right.Count - intersection;
         return union == 0 ? 0d : intersection / (double)union;
     }
 

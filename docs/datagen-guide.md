@@ -85,6 +85,8 @@ Each JSONL line includes the instruction-response pair plus generation metadata:
 }
 ```
 
+The trailing `[sample N]` suffix in `instruction` is part of the actual generated output. It gives each accepted example a stable batch-local ordinal so preview runs and large exports can be inspected without losing their original generation order.
+
 ## Templates
 
 The repository ships with a default JSON template at `/templates/datagen/default.json`. Templates expose the placeholders `{domain}`, `{task_type}`, `{seed_examples}`, `{constraints}`, `{output_schema}`, `{count}`, `{sample_number}`, `{variation}`, `{seed_instruction}`, and `{seed_response}`. The built-in variation patterns from the core generator are injected into that template so the two prompt systems stay merged rather than diverging, while the emitted JSON uses camelCase metadata fields such as `taskType`, `qualityScore`, `generationTimestamp`, and `generatorModel`.

@@ -106,7 +106,8 @@ public sealed class DataGenTests
             Assert.False(string.IsNullOrWhiteSpace(first.Variation));
             Assert.Equal("bitnet-b1.58-sharp", first.GeneratorModel);
             Assert.Contains("synthetic", first.Tags);
-            Assert.Contains("Prefer focused regression coverage.", first.Prompt, StringComparison.Ordinal);
+            Assert.Contains(first.SeedInstruction, first.Prompt, StringComparison.Ordinal);
+            Assert.Contains(first.SeedResponse, first.Prompt, StringComparison.Ordinal);
         }
         finally
         {
@@ -144,6 +145,7 @@ public sealed class DataGenTests
             Assert.Equal("education", entry.Domain);
             Assert.Equal("classification", entry.TaskType);
             Assert.Single(entry.GroundingContext);
+            Assert.Equal("Create a classification example for the education domain.", entry.GroundingContext[0]);
             Assert.Contains("education", entry.SeedInstruction, StringComparison.OrdinalIgnoreCase);
         }
         finally
