@@ -21,6 +21,14 @@ public sealed class BitNetPaperModel
     private readonly string[] _idToToken;
     private readonly BitNetTokenizer _tokenizer;
 
+    public BitNetPaperModel(IEnumerable<TrainingExample> trainingExamples, VerbosityLevel verbosity = VerbosityLevel.Normal, BitNetConfig? config = null, int seed = 42)
+        : this(
+            new BitNetOptions(BitNetTrainingCorpus.CreateVocabulary(trainingExamples), verbosity),
+            config,
+            seed)
+    {
+    }
+
     public BitNetPaperModel(BitNetOptions options, BitNetConfig? config = null, int seed = 42)
     {
         ArgumentNullException.ThrowIfNull(options);
@@ -72,6 +80,11 @@ public sealed class BitNetPaperModel
 
     public static BitNetPaperModel CreateDefault(VerbosityLevel verbosity = VerbosityLevel.Normal) =>
         new(new BitNetOptions(BitNetTrainingCorpus.CreateDefaultVocabulary(), verbosity));
+
+    public static BitNetPaperModel CreateForTrainingCorpus(
+        IEnumerable<TrainingExample> trainingExamples,
+        VerbosityLevel verbosity = VerbosityLevel.Normal) =>
+        new(trainingExamples, verbosity);
 
     public TrainingReport Train(IEnumerable<TrainingExample> examples, int epochs = 3, float learningRate = 0.05f)
     {

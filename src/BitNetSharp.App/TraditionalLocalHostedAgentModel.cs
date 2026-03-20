@@ -4,10 +4,17 @@ namespace BitNetSharp.App;
 
 public sealed class TraditionalLocalHostedAgentModel : IHostedAgentModel, ITrainableHostedAgentModel
 {
-    public TraditionalLocalHostedAgentModel(VerbosityLevel verbosity)
+    private readonly string _trainingCorpusDescription;
+
+    public TraditionalLocalHostedAgentModel(VerbosityLevel verbosity, IEnumerable<TrainingExample>? trainingExamples = null)
     {
         Verbosity = verbosity;
-        Model = TraditionalLocalModel.CreateDefault(verbosity);
+        _trainingCorpusDescription = trainingExamples is null
+            ? "default corpus"
+            : BitNetTrainingCorpus.BenchmarkDatasetName;
+        Model = trainingExamples is null
+            ? TraditionalLocalModel.CreateDefault(verbosity)
+            : TraditionalLocalModel.CreateForTrainingCorpus(trainingExamples, verbosity);
     }
 
     public TraditionalLocalModel Model { get; }
@@ -30,7 +37,7 @@ public sealed class TraditionalLocalHostedAgentModel : IHostedAgentModel, ITrain
         $"Model ID: {ModelId}",
         $"Embedding dimension: {Model.EmbeddingDimension}",
         $"Context window: {Model.ContextWindow}",
-        "Training: tensor-based softmax next-token optimization over the default corpus",
+        $"Training: tensor-based softmax next-token optimization over the {_trainingCorpusDescription}",
         "Execution: in-process local comparator using System.Numerics.Tensors"
     ];
 

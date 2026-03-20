@@ -79,7 +79,7 @@ public sealed class HostedAgentBenchmarksExecutionTests
     }
 
     [Fact]
-    public async Task TrainingBenchmarkRunsTheSharedDefaultDatasetForTrainableModels()
+    public async Task TrainingBenchmarkRunsTheSharedTinyLlamaDatasetForTrainableModels()
     {
         await WithBenchmarkOptionsAsync(
             new HostedAgentBenchmarkOptions(
@@ -96,13 +96,13 @@ public sealed class HostedAgentBenchmarksExecutionTests
 
                 var trainedExamples = benchmark.TrainSelectedModel();
 
-                Assert.Equal(BitNetTrainingCorpus.CreateDefaultExamples().Count, trainedExamples);
+                Assert.Equal(BitNetTrainingCorpus.CreateBenchmarkExamples().Count, trainedExamples);
                 return Task.CompletedTask;
             });
     }
 
     [Fact]
-    public async Task TrainingBenchmarkRunsThePaperAlignedTrainingPath()
+    public async Task TrainingBenchmarkRunsThePaperAlignedTinyLlamaTrainingPath()
     {
         await WithBenchmarkOptionsAsync(
             new HostedAgentBenchmarkOptions(
@@ -119,16 +119,20 @@ public sealed class HostedAgentBenchmarksExecutionTests
 
                 var trainedExamples = benchmark.TrainSelectedModel();
 
-                Assert.Equal(BitNetTrainingCorpus.CreateDefaultExamples().Count, trainedExamples);
+                Assert.Equal(BitNetTrainingCorpus.CreateBenchmarkExamples().Count, trainedExamples);
                 return Task.CompletedTask;
             });
     }
 
     [Fact]
-    public void PerplexityEvaluationProducesFiniteValuesForBuiltInModels()
+    public void PerplexityEvaluationProducesFiniteValuesForBuiltInModelsAfterTinyLlamaBenchmarkTraining()
     {
-        var bitNetModel = BitNetPaperModel.CreateDefault();
-        var traditionalModel = TraditionalLocalModel.CreateDefault();
+        var examples = BitNetTrainingCorpus.CreateBenchmarkExamples();
+        var bitNetModel = BitNetPaperModel.CreateForTrainingCorpus(examples);
+        var traditionalModel = TraditionalLocalModel.CreateForTrainingCorpus(examples);
+
+        bitNetModel.Train(examples, epochs: 3);
+        traditionalModel.Train(examples, epochs: TraditionalLocalModel.DefaultTrainingEpochs);
 
         var bitNetPerplexity = bitNetModel.CalculatePerplexity(BitNetBenchmarkFixtures.WikiText2ValidationSamples);
         var traditionalPerplexity = traditionalModel.CalculatePerplexity(BitNetBenchmarkFixtures.WikiText2ValidationSamples);
@@ -137,6 +141,17 @@ public sealed class HostedAgentBenchmarksExecutionTests
         Assert.True(double.IsFinite(traditionalPerplexity));
         Assert.True(bitNetPerplexity > 0d);
         Assert.True(traditionalPerplexity > 0d);
+    }
+
+    [Fact]
+    public void BenchmarkModelConstructionUsesTheTinyLlamaTrainingVocabulary()
+    {
+        var examples = BitNetTrainingCorpus.CreateBenchmarkExamples();
+        using var bitNet = HostedAgentModelFactory.Create(HostedAgentModelFactory.DefaultModelId, VerbosityLevel.Quiet, examples);
+        using var traditional = HostedAgentModelFactory.Create(HostedAgentModelFactory.TraditionalLocalModelId, VerbosityLevel.Quiet, examples);
+
+        Assert.Equal("tinyllama", ((BitNetHostedAgentModel)bitNet).Model.Tokenizer.Normalize("tinyllama"));
+        Assert.Equal("tinyllama", ((TraditionalLocalHostedAgentModel)traditional).Model.Tokenizer.Normalize("tinyllama"));
     }
 
     private static async Task WithBenchmarkOptionsAsync(HostedAgentBenchmarkOptions options, Func<Task> assertion)

@@ -58,7 +58,8 @@ public sealed record HostedAgentBenchmarkComparisonReport(
     IReadOnlyList<string> QueryScript,
     IReadOnlyList<HostedAgentBenchmarkModelReport> Models,
     IReadOnlyList<HostedAgentBenchmarkPerformanceRow> PerformanceRows,
-    HostedAgentBenchmarkComparisonSummary? ComparisonSummary = null);
+    HostedAgentBenchmarkComparisonSummary? ComparisonSummary = null,
+    string TrainingDataset = "BitNetTrainingCorpus.CreateDefaultExamples()");
 
 public sealed record HostedAgentBenchmarkComparisonSummary(
     string PerplexityDataset,
@@ -71,7 +72,7 @@ public static class HostedAgentBenchmarkReportRunner
 {
     private const string StampedJsonTimestampFormat = "yyyyMMddTHHmmssZ";
     private const string ResponseOperation = "SpecFlow: Generate a response for a prompt";
-    private const string TrainingOperation = "SpecFlow: Train the selected model on the default dataset";
+    private const string TrainingOperation = "SpecFlow: Train the selected model on the TinyLlama-1.1B benchmark dataset";
     private const double NanosecondsPerMillisecond = 1_000_000d;
     private const double MicrosecondsPerMillisecond = 1_000d;
     private const double MillisecondsPerSecond = 1_000d;
@@ -96,7 +97,7 @@ public static class HostedAgentBenchmarkReportRunner
             Path.Combine(originalWorkingDirectory, "BenchmarkDotNet.Artifacts"),
             Path.Combine(reportDirectory, "BenchmarkDotNet.Artifacts"));
 
-        var trainingExamples = BitNetTrainingCorpus.CreateDefaultExamples();
+        var trainingExamples = BitNetTrainingCorpus.CreateBenchmarkExamples();
         var modelReports = await CreateModelReportsAsync(options, trainingExamples, cancellationToken);
         var performanceRows = ParsePerformanceRows(reportDirectory);
         var comparisonSummary = CreateComparisonSummary(modelReports, performanceRows);
@@ -105,7 +106,8 @@ public static class HostedAgentBenchmarkReportRunner
             trainingExamples.Select(static example => example.Prompt).ToArray(),
             modelReports,
             performanceRows,
-            comparisonSummary);
+            comparisonSummary,
+            BitNetTrainingCorpus.BenchmarkDatasetName);
 
         WriteReportSite(reportDirectory, report, commitHash);
         return reportDirectory;
@@ -208,7 +210,7 @@ public static class HostedAgentBenchmarkReportRunner
         var reports = new List<HostedAgentBenchmarkModelReport>();
         foreach (var modelSpecifier in options.ModelSpecifiers)
         {
-            using var model = HostedAgentModelFactory.Create(modelSpecifier, options.Verbosity);
+            using var model = HostedAgentModelFactory.Create(modelSpecifier, options.Verbosity, trainingExamples);
             var trainingSupported = model is ITrainableHostedAgentModel;
             var trainingCompleted = false;
             var trainingEpochs = 0;
@@ -318,7 +320,7 @@ public static class HostedAgentBenchmarkReportRunner
         builder.AppendLine();
         builder.AppendLine("## Shared integration inputs");
         builder.AppendLine();
-        builder.AppendLine("- Training set: `BitNetTrainingCorpus.CreateDefaultExamples()`");
+        builder.AppendLine($"- Training set: `{report.TrainingDataset}`");
         builder.AppendLine("- Query script:");
         foreach (var prompt in report.QueryScript)
         {
@@ -393,7 +395,7 @@ public static class HostedAgentBenchmarkReportRunner
         builder.AppendLine($"  <p class=\"muted\">Generated {Encode(report.GeneratedAtUtc.ToString("O"))}</p>");
         builder.AppendLine("  <h2>Shared integration inputs</h2>");
         builder.AppendLine("  <ul>");
-        builder.AppendLine("    <li>Training set: <code>BitNetTrainingCorpus.CreateDefaultExamples()</code></li>");
+        builder.AppendLine($"    <li>Training set: <code>{Encode(report.TrainingDataset)}</code></li>");
         builder.AppendLine("    <li>Query script:");
         builder.AppendLine("      <ul>");
         foreach (var prompt in report.QueryScript)

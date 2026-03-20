@@ -93,16 +93,16 @@ public class HostedAgentStreamingBenchmarks : HostedAgentBenchmarkBase
 [MemoryDiagnoser, ShortRunJob]
 public class HostedAgentTrainingBenchmarks : TrainableHostedAgentBenchmarkBase
 {
-    [Benchmark(Description = "SpecFlow: Train the selected model on the default dataset")]
+    [Benchmark(Description = "SpecFlow: Train the selected model on the TinyLlama-1.1B benchmark dataset")]
     public int TrainSelectedModel()
     {
-        using var model = HostedAgentModelFactory.Create(ModelSpecifier, Options.Verbosity);
+        var examples = BitNetTrainingCorpus.CreateBenchmarkExamples();
+        using var model = HostedAgentModelFactory.Create(ModelSpecifier, Options.Verbosity, examples);
         if (model is not ITrainableHostedAgentModel trainableModel)
         {
             return 0;
         }
 
-        var examples = BitNetTrainingCorpus.CreateDefaultExamples();
         var epochs = string.Equals(ModelSpecifier, HostedAgentModelFactory.TraditionalLocalModelId, StringComparison.Ordinal)
             ? TraditionalLocalModel.DefaultTrainingEpochs
             : 3;
