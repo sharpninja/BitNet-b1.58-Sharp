@@ -33,6 +33,14 @@ public sealed class MultiHeadAttention : Module
 
     public BitLinear OutputProjection { get; }
 
+    public bool UsesRotaryPositionEmbedding => true;
+
+    public bool AppliesRotaryPositionEmbeddingToQueriesAndKeysOnly => true;
+
+    public bool UsesCausalAttentionMask => true;
+
+    public float AttentionScale => _attentionScale;
+
     public override float[,] Forward(float[,] input)
     {
         ArgumentNullException.ThrowIfNull(input);

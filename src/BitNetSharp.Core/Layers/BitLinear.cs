@@ -4,7 +4,7 @@ namespace BitNetSharp.Core.Layers;
 
 public sealed class BitLinear : Module
 {
-    private const int ActivationQuantizationBound = 127;
+    private const int ActivationQuantizationMaxMagnitude = 127;
     private const float WeightQuantizationEpsilon = 1e-6f;
 
     private readonly float[,] _fullPrecisionWeights;
@@ -22,6 +22,12 @@ public sealed class BitLinear : Module
     public BitLinearConfig Config { get; }
 
     public float Gamma { get; private set; }
+
+    public bool HasBias => false;
+
+    public int ActivationQuantizationBound => ActivationQuantizationMaxMagnitude;
+
+    public int ActivationQuantizationBitWidth => 8;
 
     public override float[,] Forward(float[,] input)
     {
@@ -157,10 +163,10 @@ public sealed class BitLinear : Module
                 continue;
             }
 
-            var scale = maxAbs / ActivationQuantizationBound;
+            var scale = maxAbs / ActivationQuantizationMaxMagnitude;
             for (var column = 0; column < input.GetLength(1); column++)
             {
-                var quantized = Math.Clamp((int)MathF.Round(input[row, column] / scale, MidpointRounding.AwayFromZero), -ActivationQuantizationBound, ActivationQuantizationBound);
+                var quantized = Math.Clamp((int)MathF.Round(input[row, column] / scale, MidpointRounding.AwayFromZero), -ActivationQuantizationMaxMagnitude, ActivationQuantizationMaxMagnitude);
                 result[row, column] = quantized * scale;
             }
         }

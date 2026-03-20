@@ -70,6 +70,18 @@ switch (command)
         }
         break;
 
+    case "paper-audit":
+        if (model is BitNetHostedAgentModel bitNetModel)
+        {
+            Console.WriteLine(BitNetPaperAuditCommand.FormatReport(BitNetPaperAuditor.CreateReport(bitNetModel.Model)));
+        }
+        else
+        {
+            Console.WriteLine($"Model '{model.ModelId}' does not expose the paper-aligned BitNet audit surface.");
+        }
+
+        break;
+
     case "host":
         Console.WriteLine($"Agent: {hostSummary.AgentName}");
         Console.WriteLine($"Model: {hostSummary.ModelId}");

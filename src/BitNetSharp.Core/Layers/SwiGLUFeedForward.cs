@@ -25,6 +25,8 @@ public sealed class SwiGLUFeedForward : Module
 
     public BitLinear DownProjection { get; }
 
+    public bool UsesSwiGLUActivation => true;
+
     public override float[,] Forward(float[,] input)
     {
         ArgumentNullException.ThrowIfNull(input);
