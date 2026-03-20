@@ -7,6 +7,7 @@ BitNet b1.58 Sharp targets the paper-aligned BitNet b1.58 decoder-only transform
 `/src/BitNetSharp.Core` contains the paper-model runtime and transformer building blocks:
 
 - `BitNetPaperModel` wraps tokenizer state, the seeded transformer, and next-token inspection output
+- `DataGenGenerator` expands JSON seed examples into synthetic JSONL records while recording BitNet model provenance
 - `VerbosityLevel` exposes exactly three interaction levels: `Quiet`, `Normal`, and `Verbose`
 - `BitLinear` implements absmean-scaled ternary projections with signed int8 activation quantization
 - `RmsNorm`, `RotaryPositionEmbedding`, `MultiHeadAttention`, `SwiGLUFeedForward`, `BitNetLayer`, and `BitNetTransformer` implement the decoder-only paper architecture
@@ -27,6 +28,8 @@ The hosting layer now resolves multiple local model types behind the same agent 
 - local command models described by JSON configuration files
 
 This lets BenchmarkDotNet measure host construction, querying, streaming, and local training through one shared path.
+
+The same app surface also exposes a `datagen` command that keeps synthetic data generation local to the repository checkout.
 
 ## Language and interaction model
 

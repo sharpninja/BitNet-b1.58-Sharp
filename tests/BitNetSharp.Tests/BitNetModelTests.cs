@@ -2,6 +2,7 @@ using BitNetSharp.App;
 using BitNetSharp.Core;
 using Microsoft.Extensions.DependencyInjection;
 using System.Reflection;
+using System.Text.Json;
 
 namespace BitNetSharp.Tests;
 
@@ -142,5 +143,179 @@ public sealed class BitNetPaperModelTests
         Assert.Equal("how are you hosted", options.Prompt);
         Assert.Equal(3, options.MaxOutputTokens);
         Assert.Equal(VerbosityLevel.Verbose, options.Verbosity);
+    }
+
+    [Fact]
+    public void DataGenSeedLoaderSupportsSeedAliases()
+    {
+        var seedPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-datagen-seeds.json");
+        File.WriteAllText(
+            seedPath,
+            """
+            [
+              {
+                "prompt": "draft a medical triage question",
+                "response": "summarize the complaint and first safety check"
+              },
+              {
+                "instruction": "collect missing medication context",
+                "answer": "review active prescriptions and contraindications"
+              }
+            ]
+            """);
+
+        try
+        {
+            var seeds = DataGenGenerator.LoadSeeds(seedPath);
+
+            Assert.Collection(
+                seeds,
+                seed =>
+                {
+                    Assert.Equal("draft a medical triage question", seed.Instruction);
+                    Assert.Equal("summarize the complaint and first safety check", seed.Response);
+                },
+                seed =>
+                {
+                    Assert.Equal("collect missing medication context", seed.Instruction);
+                    Assert.Equal("review active prescriptions and contraindications", seed.Response);
+                });
+        }
+        finally
+        {
+            File.Delete(seedPath);
+        }
+    }
+
+    [Fact]
+    public void DataGenGeneratorProducesStructuredExamples()
+    {
+        var generator = new DataGenGenerator(BitNetBootstrap.CreatePaperModel(VerbosityLevel.Quiet));
+        var examples = generator.Generate(
+                "medical-diagnosis",
+                count: 3,
+                seeds:
+                [
+                    new DataGenSeedExample(
+                        "summarize the patient complaint",
+                        "restate the complaint and note the top safety concern")
+                ],
+                loraAdapter: "/tmp/medical-lora.bin")
+            .ToArray();
+
+        Assert.Equal(3, examples.Length);
+        Assert.All(
+            examples,
+            example =>
+            {
+                Assert.Equal("medical-diagnosis", example.Domain);
+                Assert.Contains("medical-diagnosis", example.Instruction, StringComparison.Ordinal);
+                Assert.Contains("medical-diagnosis", example.Response, StringComparison.Ordinal);
+                Assert.Equal("bitnet-b1.58-sharp", example.GeneratorModel);
+                Assert.Equal("medical-lora.bin", example.LoraAdapter);
+                Assert.Contains("synthetic", example.Tags);
+            });
+        Assert.Contains(examples, example => example.Variation == "pattern-1");
+        Assert.Contains(examples, example => example.Variation == "pattern-2");
+        Assert.Contains(examples, example => example.Variation == "pattern-3");
+    }
+
+    [Fact]
+    public void DataGenCommandOptionsParseSpaceSeparatedArguments()
+    {
+        var options = DataGenCommandOptions.Parse(
+            [
+                "datagen",
+                "--domain", "medical-diagnosis",
+                "--count", "12",
+                "--seeds", "examples/seed-examples.json",
+                "--output", "data/synthetic-medical.jsonl",
+                "--lora", "medical-lora.bin"
+            ]);
+
+        Assert.Equal("medical-diagnosis", options.Domain);
+        Assert.Equal(12, options.Count);
+        Assert.EndsWith(Path.Combine("examples", "seed-examples.json"), options.SeedsPath, StringComparison.Ordinal);
+        Assert.EndsWith(Path.Combine("data", "synthetic-medical.jsonl"), options.OutputPath, StringComparison.Ordinal);
+        Assert.Equal("medical-lora.bin", options.LoraPath);
+    }
+
+    [Fact]
+    public void DataGenCommandOptionsRejectEmptyRequiredValues()
+    {
+        var exception = Assert.Throws<ArgumentException>(
+            () => DataGenCommandOptions.Parse(
+                [
+                    "datagen",
+                    "--domain=",
+                    "--count", "12",
+                    "--seeds", "examples/seed-examples.json",
+                    "--output", "data/synthetic-medical.jsonl"
+                ]));
+
+        Assert.Contains("non-empty value", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public void DataGenCommandOptionsRejectOptionLikeNextToken()
+    {
+        var exception = Assert.Throws<ArgumentException>(
+            () => DataGenCommandOptions.Parse(
+                [
+                    "datagen",
+                    "--domain", "--count",
+                    "--count", "12",
+                    "--seeds", "examples/seed-examples.json",
+                    "--output", "data/synthetic-medical.jsonl"
+                ]));
+
+        Assert.Contains("requires a value", exception.Message, StringComparison.Ordinal);
+    }
+
+    [Fact]
+    public async Task DataGenCommandWritesJsonlDataset()
+    {
+        var outputPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-synthetic.jsonl");
+        var seedPath = Path.Combine(Path.GetTempPath(), $"{Guid.NewGuid():N}-seeds.json");
+
+        try
+        {
+            await File.WriteAllTextAsync(
+                seedPath,
+                """
+                [
+                  {
+                    "prompt": "draft a support troubleshooting request",
+                    "response": "summarize the issue and confirm the first diagnostic step"
+                  }
+                ]
+                """);
+
+            var writtenPath = await DataGenCommand.RunAsync(
+                [
+                    "datagen",
+                    "--domain", "customer-support",
+                    "--count", "2",
+                    "--seeds", seedPath,
+                    "--output", outputPath
+                ],
+                VerbosityLevel.Quiet);
+
+            Assert.Equal(outputPath, writtenPath);
+
+            var lines = await File.ReadAllLinesAsync(outputPath);
+            Assert.Equal(2, lines.Length);
+
+            using var document = JsonDocument.Parse(lines[0]);
+            Assert.Equal("customer-support", document.RootElement.GetProperty("domain").GetString());
+            Assert.Equal("bitnet-b1.58-sharp", document.RootElement.GetProperty("generatorModel").GetString());
+            Assert.True(document.RootElement.GetProperty("instruction").GetString()!.Length > 0);
+            Assert.True(document.RootElement.GetProperty("response").GetString()!.Length > 0);
+        }
+        finally
+        {
+            File.Delete(outputPath);
+            File.Delete(seedPath);
+        }
     }
 }

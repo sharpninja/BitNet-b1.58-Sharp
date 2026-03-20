@@ -28,6 +28,13 @@ if (command == "benchmark-report")
     return;
 }
 
+if (command == "datagen")
+{
+    var outputPath = await DataGenCommand.RunAsync(args, verbosity);
+    Console.WriteLine($"Saved synthetic dataset to {outputPath}");
+    return;
+}
+
 using var model = HostedAgentModelFactory.Create(modelSpecifier, verbosity);
 using var host = BitNetAgentHost.Build(model);
 var hostSummary = host.Services.GetRequiredService<BitNetHostSummary>();
