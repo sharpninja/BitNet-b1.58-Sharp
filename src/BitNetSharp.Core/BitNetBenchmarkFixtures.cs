@@ -6,10 +6,13 @@ public sealed record BitNetBenchmarkTextFixture(
 
 public static class BitNetBenchmarkFixtures
 {
-    private const string WikiText2ValidationResourceName = "BitNetSharp.Core.Data.WikiText2.wiki.valid.tokens";
-    private static readonly Lazy<IReadOnlyList<string>> WikiText2ValidationSamplesLazy = new(LoadWikiText2ValidationSamples);
+    private static readonly Lazy<IReadOnlyList<string>> WikiText2TrainingSamplesLazy = new(() => LoadWikiText2Split("wiki.train.tokens"));
+    private static readonly Lazy<IReadOnlyList<string>> WikiText2ValidationSamplesLazy = new(() => LoadWikiText2Split("wiki.valid.tokens"));
+    private static readonly Lazy<IReadOnlyList<string>> WikiText2TestSamplesLazy = new(() => LoadWikiText2Split("wiki.test.tokens"));
 
+    public static IReadOnlyList<string> WikiText2TrainingSamples => WikiText2TrainingSamplesLazy.Value;
     public static IReadOnlyList<string> WikiText2ValidationSamples => WikiText2ValidationSamplesLazy.Value;
+    public static IReadOnlyList<string> WikiText2TestSamples => WikiText2TestSamplesLazy.Value;
 
     public static IReadOnlyList<string> C4ValidationSamples { get; } =
     [
@@ -30,10 +33,11 @@ public static class BitNetBenchmarkFixtures
         new("RedPajama", RedPajamaValidationSamples)
     ];
 
-    private static IReadOnlyList<string> LoadWikiText2ValidationSamples()
+    private static IReadOnlyList<string> LoadWikiText2Split(string resourceFileName)
     {
-        using var stream = typeof(BitNetBenchmarkFixtures).Assembly.GetManifestResourceStream(WikiText2ValidationResourceName)
-            ?? throw new InvalidOperationException($"Could not load embedded resource '{WikiText2ValidationResourceName}'.");
+        var resourceName = $"BitNetSharp.Core.Data.WikiText2.{resourceFileName}";
+        using var stream = typeof(BitNetBenchmarkFixtures).Assembly.GetManifestResourceStream(resourceName)
+            ?? throw new InvalidOperationException($"Could not load internal WikiText-2 embedded resource '{resourceName}'. Verify the file is included as an EmbeddedResource in BitNetSharp.Core.csproj.");
         using var reader = new StreamReader(stream);
         return reader.ReadToEnd()
             .Split('\n')
