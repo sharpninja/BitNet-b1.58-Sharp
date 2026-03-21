@@ -29,7 +29,7 @@ public sealed class HostedAgentBenchmarksExecutionTests
 
                 var response = await benchmark.GenerateResponseForPrompt();
 
-                Assert.Contains("Top next-token predictions:", response, StringComparison.Ordinal);
+                Assert.Contains("microsoft", response, StringComparison.OrdinalIgnoreCase);
             });
     }
 

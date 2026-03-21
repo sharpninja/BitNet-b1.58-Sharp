@@ -16,6 +16,7 @@ internal sealed record BitNetPaperCheckpointDocument(
     BitNetConfig Config,
     IReadOnlyList<string> Vocabulary,
     float[][] OutputHeadWeights,
+    Dictionary<string, int[]>? MemorizedResponses,
     int MaxResponseTokens,
     string PrimaryLanguage);
 
@@ -42,6 +43,10 @@ public static class BitNetPaperCheckpoint
             model.Config,
             model.Options.Vocabulary.ToArray(),
             ToJagged(model.ExportOutputHeadWeights()),
+            model.ExportMemorizedResponses().ToDictionary(
+                static pair => pair.Key,
+                static pair => pair.Value.ToArray(),
+                StringComparer.Ordinal),
             model.Options.MaxResponseTokens,
             model.Options.PrimaryLanguage);
         File.WriteAllText(path, JsonSerializer.Serialize(document, new JsonSerializerOptions { WriteIndented = true }));
@@ -67,6 +72,7 @@ public static class BitNetPaperCheckpoint
             document.Config,
             document.BootstrapSeed);
         model.ImportOutputHeadWeights(ToMatrix(document.OutputHeadWeights));
+        model.ImportMemorizedResponses(document.MemorizedResponses ?? new Dictionary<string, int[]>(StringComparer.Ordinal));
         return model;
     }
 

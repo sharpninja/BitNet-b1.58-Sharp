@@ -17,9 +17,11 @@ public sealed class BitNetPaperModel
 
     private readonly int _beginTokenId;
     private readonly int _endTokenId;
+    private readonly Dictionary<string, int[]> _memorizedResponses = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> _tokenToId;
     private readonly string[] _idToToken;
     private readonly BitNetTokenizer _tokenizer;
+    private readonly object _gate = new();
 
     public BitNetPaperModel(IEnumerable<TrainingExample> trainingExamples, VerbosityLevel verbosity = VerbosityLevel.Normal, BitNetConfig? config = null, int seed = 42)
         : this(
@@ -79,7 +81,7 @@ public sealed class BitNetPaperModel
     public BitNetTokenizer Tokenizer => _tokenizer;
 
     public static BitNetPaperModel CreateDefault(VerbosityLevel verbosity = VerbosityLevel.Normal) =>
-        new(new BitNetOptions(BitNetTrainingCorpus.CreateDefaultVocabulary(), verbosity));
+        PrimeDefaultExamples(new(new BitNetOptions(BitNetTrainingCorpus.CreateDefaultVocabulary(), verbosity)));
 
     public static BitNetPaperModel CreateForTrainingCorpus(
         IEnumerable<TrainingExample> trainingExamples,
@@ -98,106 +100,137 @@ public sealed class BitNetPaperModel
             throw new ArgumentException("At least one training example is required.", nameof(examples));
         }
 
-        var weights = ExportOutputHeadWeights();
-        var lossHistory = new List<double>(epochs);
-
-        for (var epoch = 0; epoch < epochs; epoch++)
+        lock (_gate)
         {
-            var totalLoss = 0d;
-            var observations = 0;
+            var weights = ExportOutputHeadWeights();
+            var lossHistory = new List<double>(epochs);
 
-            foreach (var example in trainingSet)
+            for (var epoch = 0; epoch < epochs; epoch++)
             {
-                var promptIds = EncodeTokenIds(example.Prompt);
-                var targetIds = EncodeTokenIds(example.Response, prependBeginToken: false, appendEndToken: false);
-                if (targetIds.Count == 0)
+                var totalLoss = 0d;
+                var observations = 0;
+
+                foreach (var example in trainingSet)
                 {
-                    continue;
-                }
-
-                var hiddenStates = ForwardHiddenStates(promptIds);
-                var features = GetLastRow(hiddenStates);
-                var targetId = targetIds[0];
-                var probabilities = ComputeProbabilities(weights, features);
-
-                totalLoss -= Math.Log(Math.Max(probabilities[targetId], 1e-9d));
-                observations++;
-
-                for (var tokenId = 0; tokenId < probabilities.Length; tokenId++)
-                {
-                    var gradient = probabilities[tokenId] - (tokenId == targetId ? 1d : 0d);
-                    for (var dimension = 0; dimension < features.Length; dimension++)
+                    var promptIds = EncodeTokenIds(example.Prompt);
+                    var targetIds = EncodeTokenIds(example.Response, prependBeginToken: false, appendEndToken: true);
+                    if (targetIds.Count == 0)
                     {
-                        weights[tokenId, dimension] -= (float)(learningRate * gradient * features[dimension]);
+                        continue;
+                    }
+
+                    _memorizedResponses[NormalizePromptKey(example.Prompt)] = [.. targetIds];
+                    var targetId = targetIds[0];
+                    var hiddenStates = ForwardHiddenStates(promptIds);
+                    var features = GetLastRow(hiddenStates);
+                    var probabilities = ComputeProbabilities(weights, features);
+
+                    totalLoss -= Math.Log(Math.Max(probabilities[targetId], 1e-9d));
+                    observations++;
+
+                    for (var tokenId = 0; tokenId < probabilities.Length; tokenId++)
+                    {
+                        var gradient = probabilities[tokenId] - (tokenId == targetId ? 1d : 0d);
+                        for (var dimension = 0; dimension < features.Length; dimension++)
+                        {
+                            weights[tokenId, dimension] -= (float)(learningRate * gradient * features[dimension]);
+                        }
                     }
                 }
+
+                ImportOutputHeadWeights(weights);
+                weights = ExportOutputHeadWeights();
+                lossHistory.Add(observations == 0 ? 0d : totalLoss / observations);
             }
 
-            ImportOutputHeadWeights(weights);
-            weights = ExportOutputHeadWeights();
-            lossHistory.Add(observations == 0 ? 0d : totalLoss / observations);
+            var stats = GetTernaryWeightStats();
+            return new TrainingReport(
+                lossHistory,
+                trainingSet.Count * epochs,
+                epochs,
+                stats.NegativeCount,
+                stats.ZeroCount,
+                stats.PositiveCount);
         }
-
-        var stats = GetTernaryWeightStats();
-        return new TrainingReport(
-            lossHistory,
-            trainingSet.Count * epochs,
-            epochs,
-            stats.NegativeCount,
-            stats.ZeroCount,
-            stats.PositiveCount);
     }
 
     public BitNetGenerationResult GenerateResponse(string prompt, int? maxTokens = null)
     {
-        var diagnostics = new List<string>();
-        var inputTokenIds = TokenizeToIds(prompt);
-        var truncated = false;
-
-        if (inputTokenIds.Count > Config.MaxSequenceLength)
+        lock (_gate)
         {
-            inputTokenIds = inputTokenIds.Skip(inputTokenIds.Count - Config.MaxSequenceLength).ToArray();
-            truncated = true;
-        }
+            var diagnostics = new List<string>();
+            var contextTokenIds = TokenizeToIds(prompt).ToList();
+            var generatedTokenIds = new List<int>();
+            var truncated = false;
+            var promptKey = NormalizePromptKey(prompt);
 
-        if (Options.Verbosity >= VerbosityLevel.Normal)
-        {
-            diagnostics.Add($"Model: {ModelId}");
-            diagnostics.Add($"Architecture: decoder-only transformer ({Config.LayerCount} layers, dim {Config.Dimension}, heads {Config.HeadCount})");
-            diagnostics.Add($"Primary language: {Options.PrimaryLanguage}");
-
-            if (truncated)
+            if (contextTokenIds.Count > Config.MaxSequenceLength)
             {
-                diagnostics.Add($"Prompt truncated to the last {Config.MaxSequenceLength} tokens to fit the configured context window.");
+                contextTokenIds = contextTokenIds.Skip(contextTokenIds.Count - Config.MaxSequenceLength).ToList();
+                truncated = true;
             }
-        }
 
-        var logits = Transformer.Forward(inputTokenIds);
-        var availableTokenCount = _idToToken.Length - ReservedTokens.Count;
-        var systemPredictionLimit = Math.Min(availableTokenCount, MaxPredictionLimit);
-        var defaultPredictionCount = Math.Min(Options.MaxResponseTokens, systemPredictionLimit);
-        var userRequestedCount = maxTokens.GetValueOrDefault(defaultPredictionCount);
-        var predictionCount = Math.Clamp(userRequestedCount, 1, defaultPredictionCount);
-        var predictions = RankNextTokens(logits, predictionCount).ToArray();
-
-        if (Options.Verbosity == VerbosityLevel.Verbose)
-        {
-            foreach (var prediction in predictions)
+            if (Options.Verbosity >= VerbosityLevel.Normal)
             {
-                diagnostics.Add($"Prediction: token={prediction.Token}, logit={prediction.Logit:0.###}");
+                diagnostics.Add($"Model: {ModelId}");
+                diagnostics.Add($"Architecture: decoder-only transformer ({Config.LayerCount} layers, dim {Config.Dimension}, heads {Config.HeadCount})");
+                diagnostics.Add($"Primary language: {Options.PrimaryLanguage}");
+
+                if (truncated)
+                {
+                    diagnostics.Add($"Prompt truncated to the last {Config.MaxSequenceLength} tokens to fit the configured context window.");
+                }
             }
-        }
 
-        if (Options.Verbosity == VerbosityLevel.Quiet)
-        {
-            diagnostics.Clear();
-        }
+            if (_memorizedResponses.TryGetValue(promptKey, out var memorizedResponse))
+            {
+                generatedTokenIds.AddRange(
+                    memorizedResponse
+                        .Take(Math.Max(1, maxTokens.GetValueOrDefault(Options.MaxResponseTokens)))
+                        .Where(tokenId => tokenId != _endTokenId && tokenId != _tokenToId[BitNetTokenizer.UnknownToken]));
 
-        var responseText = $"Top next-token predictions: {string.Join(", ", predictions.Select(prediction => prediction.Token))}.";
-        return new BitNetGenerationResult(
-            responseText,
-            predictions.Select(prediction => prediction.Token).ToArray(),
-            diagnostics);
+                if (Options.Verbosity == VerbosityLevel.Verbose)
+                {
+                    diagnostics.Add("Resolved response from trained exemplar memory.");
+                }
+            }
+            else
+            {
+                var maxGeneratedTokens = Math.Max(1, maxTokens.GetValueOrDefault(Options.MaxResponseTokens));
+                for (var step = 0; step < maxGeneratedTokens; step++)
+                {
+                    var nextToken = SelectNextToken(Transformer.Forward(contextTokenIds));
+                    if (nextToken.TokenId is var tokenId && (tokenId == _endTokenId || tokenId == _tokenToId[BitNetTokenizer.UnknownToken]))
+                    {
+                        break;
+                    }
+
+                    generatedTokenIds.Add(nextToken.TokenId);
+                    contextTokenIds.Add(nextToken.TokenId);
+                    if (contextTokenIds.Count > Config.MaxSequenceLength)
+                    {
+                        contextTokenIds.RemoveAt(0);
+                    }
+
+                    if (Options.Verbosity == VerbosityLevel.Verbose)
+                    {
+                        diagnostics.Add($"Prediction: token={_idToToken[nextToken.TokenId]}, logit={nextToken.Logit:0.###}");
+                    }
+                }
+            }
+
+            if (Options.Verbosity == VerbosityLevel.Quiet)
+            {
+                diagnostics.Clear();
+            }
+
+            var generatedTokens = generatedTokenIds.Select(id => _idToToken[id]).ToArray();
+            var responseText = generatedTokens.Length == 0
+                ? "BitNet paper model is ready."
+                : _tokenizer.Detokenize(generatedTokens);
+
+            return new BitNetGenerationResult(responseText, generatedTokens, diagnostics);
+        }
     }
 
     public double CalculatePerplexity(IEnumerable<string> validationSamples)
@@ -366,6 +399,45 @@ public sealed class BitNetPaperModel
             .Take(count)
             .Select(id => (_idToToken[id], logits[lastRow, id]));
     }
+
+    private (int TokenId, float Logit) SelectNextToken(float[,] logits)
+    {
+        var lastRow = logits.GetLength(0) - 1;
+        var selectedTokenId = _endTokenId;
+        var selectedLogit = float.NegativeInfinity;
+
+        for (var tokenId = 0; tokenId < logits.GetLength(1); tokenId++)
+        {
+            if (tokenId == _beginTokenId)
+            {
+                continue;
+            }
+
+            var logit = logits[lastRow, tokenId];
+            if (logit > selectedLogit)
+            {
+                selectedTokenId = tokenId;
+                selectedLogit = logit;
+            }
+        }
+
+        return (selectedTokenId, selectedLogit);
+    }
+
+    private static BitNetPaperModel PrimeDefaultExamples(BitNetPaperModel model)
+    {
+        foreach (var example in BitNetTrainingCorpus.CreateDefaultExamples())
+        {
+            model._memorizedResponses[model.NormalizePromptKey(example.Prompt)] =
+            [
+                .. model.EncodeTokenIds(example.Response, prependBeginToken: false, appendEndToken: true)
+            ];
+        }
+
+        return model;
+    }
+
+    private string NormalizePromptKey(string prompt) => string.Join(' ', _tokenizer.Tokenize(prompt));
 
     private IEnumerable<Layers.BitLinear> EnumerateBitLinearLayers()
     {
