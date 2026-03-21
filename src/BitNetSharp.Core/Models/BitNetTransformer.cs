@@ -31,6 +31,22 @@ public sealed class BitNetTransformer
 
     public BitLinear OutputHead { get; }
 
+    public long EstimateResidentParameterBytes()
+    {
+        var total = EstimateTokenEmbeddingBytes()
+            + FinalNorm.EstimateResidentParameterBytes()
+            + OutputHead.EstimateResidentParameterBytes();
+
+        foreach (var layer in Layers)
+        {
+            total += layer.EstimateResidentParameterBytes();
+        }
+
+        return total;
+    }
+
+    public long EstimateTokenEmbeddingBytes() => (long)_tokenEmbeddings.Length * sizeof(float);
+
     public float[,] Forward(IReadOnlyList<int> tokenIds) =>
         OutputHead.Forward(ForwardHiddenStates(tokenIds));
 

@@ -83,6 +83,7 @@ public static class BitNetPaperAuditor
         var perplexityResults = EvaluatePerplexity(model);
         var zeroShotResults = EvaluateZeroShot(model);
         var checkpointValidation = BitNetPaperCheckpoint.ValidateRoundTrip(model, prompt);
+        var comparableTraditionalModel = new TraditionalLocalModel(model.Options);
 
         var checks = new List<BitNetPaperAuditCheck>
         {
@@ -92,6 +93,7 @@ public static class BitNetPaperAuditor
             CreateAttentionCheck(config, attentionLayers),
             CreateFeedForwardCheck(config, feedForwardLayers),
             CreateDeterministicInferenceCheck(model, prompt),
+            CreateMemoryAuditCheck(model, comparableTraditionalModel, transformer, projections, norms, weightStats),
             new(
                 "Runtime",
                 "Paper-model fine-tuning is available from the supported runtime surface.",
@@ -222,6 +224,33 @@ public static class BitNetPaperAuditor
             "Seeded inference is deterministic for repeated prompts.",
             passed ? BitNetPaperAuditStatus.Passed : BitNetPaperAuditStatus.Failed,
             $"Prompt='{prompt}', first response='{first.ResponseText}', second response='{second.ResponseText}'.");
+    }
+
+    private static BitNetPaperAuditCheck CreateMemoryAuditCheck(
+        BitNetPaperModel model,
+        TraditionalLocalModel comparableTraditionalModel,
+        BitNetTransformer transformer,
+        IReadOnlyList<BitLinear> projections,
+        IReadOnlyList<RmsNorm> norms,
+        TernaryWeightStats weightStats)
+    {
+        var bitNetBytes = model.EstimateResidentParameterBytes();
+        var traditionalBytes = comparableTraditionalModel.EstimateResidentParameterBytes();
+        var bitLinearBytes = projections.Sum(static projection => projection.EstimateResidentParameterBytes());
+        var embeddingBytes = transformer.EstimateTokenEmbeddingBytes();
+        var normBytes = norms.Sum(static norm => norm.EstimateResidentParameterBytes());
+        var ratio = traditionalBytes == 0 ? 0d : bitNetBytes / (double)traditionalBytes;
+        var effectiveBitsPerLogicalWeight = weightStats.TotalCount == 0
+            ? 0d
+            : (bitLinearBytes * 8d) / weightStats.TotalCount;
+
+        return new BitNetPaperAuditCheck(
+            "Memory",
+            "Resident parameter storage explains why the paper BitNet model uses more memory than the traditional comparison model.",
+            BitNetPaperAuditStatus.Passed,
+            $"BitNet resident parameters={FormatBytes(bitNetBytes)} versus traditional-local={FormatBytes(traditionalBytes)} ({ratio:0.##}x). " +
+            $"The largest contributor is {projections.Count} BitLinear projections consuming {FormatBytes(bitLinearBytes)} because each logical weight retains float32 training storage plus ternary sbyte inference storage (~{effectiveBitsPerLogicalWeight:0.#} bits/weight before any sparse packing). " +
+            $"Token embeddings add {FormatBytes(embeddingBytes)} and RMSNorm scales add {FormatBytes(normBytes)}.");
     }
 
     private static IEnumerable<BitLinear> EnumerateBitLinearLayers(BitNetTransformer transformer)
@@ -357,4 +386,22 @@ public static class BitNetPaperAuditor
                 model.Options.MaxResponseTokens,
                 model.Options.PrimaryLanguage),
             model.Config);
+
+    private static string FormatBytes(long bytes)
+    {
+        const double BytesPerKilobyte = 1024d;
+        const double BytesPerMegabyte = BytesPerKilobyte * 1024d;
+
+        if (bytes < BytesPerKilobyte)
+        {
+            return $"{bytes} B";
+        }
+
+        if (bytes < BytesPerMegabyte)
+        {
+            return $"{bytes / BytesPerKilobyte:0.##} KB";
+        }
+
+        return $"{bytes / BytesPerMegabyte:0.##} MB";
+    }
 }

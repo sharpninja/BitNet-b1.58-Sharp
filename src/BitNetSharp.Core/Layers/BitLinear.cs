@@ -29,6 +29,9 @@ public sealed class BitLinear : Module
 
     public int ActivationQuantizationBitWidth => 8;
 
+    public long EstimateResidentParameterBytes() =>
+        ((long)_fullPrecisionWeights.Length * sizeof(float)) + ((long)_ternaryWeights.Length * sizeof(sbyte));
+
     public override float[,] Forward(float[,] input)
     {
         ArgumentNullException.ThrowIfNull(input);

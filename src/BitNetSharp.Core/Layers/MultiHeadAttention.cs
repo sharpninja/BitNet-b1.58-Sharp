@@ -41,6 +41,12 @@ public sealed class MultiHeadAttention : Module
 
     public float AttentionScale => _attentionScale;
 
+    public long EstimateResidentParameterBytes() =>
+        QueryProjection.EstimateResidentParameterBytes()
+        + KeyProjection.EstimateResidentParameterBytes()
+        + ValueProjection.EstimateResidentParameterBytes()
+        + OutputProjection.EstimateResidentParameterBytes();
+
     public override float[,] Forward(float[,] input)
     {
         ArgumentNullException.ThrowIfNull(input);
