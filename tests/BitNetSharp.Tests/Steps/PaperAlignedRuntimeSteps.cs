@@ -10,7 +10,6 @@ namespace BitNetSharp.Tests.Steps;
 [Binding]
 public sealed class PaperAlignedRuntimeSteps
 {
-    private const string BlankSeparatorLine = " ";
     private IHostedAgentModel? _model;
     private IHost? _host;
     private BitNetHostSummary? _hostSummary;
@@ -110,18 +109,7 @@ public sealed class PaperAlignedRuntimeSteps
         var bitNetModel = Assert.IsType<BitNetHostedAgentModel>(_model);
         _paperAuditReport = BitNetPaperAuditor.CreateReport(
             bitNetModel.Model,
-            perplexityDatasets:
-            [
-                new(
-                    "WikiText2",
-                    BitNetBenchmarkFixtures.WikiText2ValidationSamples
-                        .Where(static sample => string.Equals(sample, BlankSeparatorLine, StringComparison.Ordinal)
-                            || sample.StartsWith(" = ", StringComparison.Ordinal))
-                        .Take(8)
-                        .ToArray()),
-                new("C4", BitNetBenchmarkFixtures.C4ValidationSamples),
-                new("RedPajama", BitNetBenchmarkFixtures.RedPajamaValidationSamples)
-            ]);
+            perplexityDatasets: BenchmarkFixtureTestData.CreateCompactPerplexityDatasets());
     }
 
     [Then("the host summary should describe the selected model registration")]
