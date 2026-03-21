@@ -25,7 +25,7 @@ The manual GitHub Actions benchmark report workflow runs the same benchmark suit
 ## Run the built-in comparison benchmark
 
 ```bash
-dotnet run --configuration Release --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- benchmark --model=bitnet-b1.58-sharp --compare-model=traditional-local --prompt="how are you hosted"
+dotnet run --framework net10.0 --configuration Release --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- benchmark --model=bitnet-b1.58-sharp --compare-model=traditional-local --prompt="how are you hosted"
 ```
 
 This runs the BenchmarkDotNet suite over both local models so their hosted response and host-construction costs can be compared directly.
@@ -33,7 +33,7 @@ This runs the BenchmarkDotNet suite over both local models so their hosted respo
 ## Generate the comparison report site
 
 ```bash
-dotnet run --configuration Release --project src/BitNetSharp.App/BitNetSharp.App.csproj -- benchmark-report --model=bitnet-b1.58-sharp --compare-model=traditional-local --output=/absolute/path/to/benchmark-report
+dotnet run --framework net10.0 --configuration Release --project src/BitNetSharp.App/BitNetSharp.App.csproj -- benchmark-report --model=bitnet-b1.58-sharp --compare-model=traditional-local --output=/absolute/path/to/benchmark-report
 ```
 
 This command writes a static report site with:
@@ -58,7 +58,7 @@ The traditional local model trains over `BitNetTrainingCorpus.CreateDefaultExamp
 Pass the absolute path to a JSON file that describes how to execute a locally available model runner:
 
 ```bash
-dotnet run --configuration Release --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- benchmark --model=/absolute/path/to/local-model.json --compare-model=traditional-local
+dotnet run --framework net10.0 --configuration Release --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- benchmark --model=/absolute/path/to/local-model.json --compare-model=traditional-local
 ```
 
 Example configuration:
