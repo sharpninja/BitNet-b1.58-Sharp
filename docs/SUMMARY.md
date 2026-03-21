@@ -2,6 +2,8 @@
 
 - [BitNet b1.58 Sharp](README.md)
   - [Architecture](architecture.md)
+  - [Bucketing guide](bucketing-guide.md)
+  - [Bucketing implementation plan v1.0](bucketing-implementation-plan-v1.0.md)
   - [DataGen guide](datagen-guide.md)
   - [Implementation plan v3 (active)](implementation-plan-v3.md)
   - [Implementation plan v2 (archived)](implementation-plan-v2.md)
