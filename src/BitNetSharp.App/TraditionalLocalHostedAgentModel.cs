@@ -4,13 +4,20 @@ namespace BitNetSharp.App;
 
 public sealed class TraditionalLocalHostedAgentModel : IHostedAgentModel, ITrainableHostedAgentModel
 {
-    private readonly TraditionalLocalModel _model;
+    private readonly string _trainingCorpusDescription;
 
-    public TraditionalLocalHostedAgentModel(VerbosityLevel verbosity)
+    public TraditionalLocalHostedAgentModel(VerbosityLevel verbosity, IEnumerable<TrainingExample>? trainingExamples = null)
     {
         Verbosity = verbosity;
-        _model = TraditionalLocalModel.CreateDefault(verbosity);
+        _trainingCorpusDescription = trainingExamples is null
+            ? "default corpus"
+            : BitNetTrainingCorpus.BenchmarkDatasetName;
+        Model = trainingExamples is null
+            ? TraditionalLocalModel.CreateDefault(verbosity)
+            : TraditionalLocalModel.CreateForTrainingCorpus(trainingExamples, verbosity);
     }
+
+    public TraditionalLocalModel Model { get; }
 
     public string AgentName => ModelId;
 
@@ -28,9 +35,9 @@ public sealed class TraditionalLocalHostedAgentModel : IHostedAgentModel, ITrain
     [
         DisplayName,
         $"Model ID: {ModelId}",
-        $"Embedding dimension: {_model.EmbeddingDimension}",
-        $"Context window: {_model.ContextWindow}",
-        "Training: tensor-based softmax next-token optimization over the default corpus",
+        $"Embedding dimension: {Model.EmbeddingDimension}",
+        $"Context window: {Model.ContextWindow}",
+        $"Training: tensor-based softmax next-token optimization over the {_trainingCorpusDescription}",
         "Execution: in-process local comparator using System.Numerics.Tensors"
     ];
 
@@ -40,13 +47,13 @@ public sealed class TraditionalLocalHostedAgentModel : IHostedAgentModel, ITrain
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var result = _model.GenerateResponse(prompt, maxOutputTokens);
+        var result = Model.GenerateResponse(prompt, maxOutputTokens);
         return Task.FromResult(new HostedAgentModelResponse(result.ResponseText, result.Diagnostics));
     }
 
     public void Train(IEnumerable<TrainingExample> examples, int epochs = 1)
     {
-        _model.Train(examples, Math.Max(TraditionalLocalModel.DefaultTrainingEpochs, epochs));
+        Model.Train(examples, Math.Max(TraditionalLocalModel.DefaultTrainingEpochs, epochs));
     }
 
     public void Dispose()

@@ -95,7 +95,31 @@ public sealed class HostedAgentBenchmarkReportRunnerTests
                         "BenchmarkDotNet.Artifacts/results/host-report.html",
                         "BenchmarkDotNet.Artifacts/results/host-report.csv",
                         "BenchmarkDotNet.Artifacts/results/host-report-github.md")
-                ]);
+                ],
+                new HostedAgentBenchmarkComparisonSummary(
+                    "WikiText2",
+                    [
+                        new HostedAgentBenchmarkComparisonMetric(
+                            HostedAgentModelFactory.DefaultModelId,
+                            "Paper-aligned BitNet b1.58 transformer",
+                            "10.0 ms",
+                            "18.0 ms",
+                            220.5d,
+                            2d,
+                            12.3d),
+                        new HostedAgentBenchmarkComparisonMetric(
+                            HostedAgentModelFactory.TraditionalLocalModelId,
+                            "Traditional local tensor language model",
+                            "12.0 ms",
+                            "25.0 ms",
+                            150.2d,
+                            4d,
+                            14.1d)
+                    ],
+                    1.47d,
+                    50d,
+                    12.77d),
+                TrainingDataset: BitNetTrainingCorpus.BenchmarkDatasetName);
 
             HostedAgentBenchmarkReportRunner.WriteReportSite(outputDirectory, report);
 
@@ -104,15 +128,22 @@ public sealed class HostedAgentBenchmarkReportRunnerTests
             var json = File.ReadAllText(Path.Combine(outputDirectory, "comparison-report.json"));
 
             Assert.Contains("BitNet benchmark comparison report", markdown, StringComparison.Ordinal);
+            Assert.Contains("Training set: `TinyLlama-1.1B`", markdown, StringComparison.Ordinal);
             Assert.Contains("Expected-token recall", markdown, StringComparison.Ordinal);
+            Assert.Contains("BitNet vs traditional comparison summary", markdown, StringComparison.Ordinal);
+            Assert.Contains("| BitNet speedup vs traditional | 1.47x |", markdown, StringComparison.Ordinal);
             Assert.Contains("Paper-alignment audit", markdown, StringComparison.Ordinal);
             Assert.Contains("Perplexity measurements are implemented and reported for named benchmark fixture slices.", markdown, StringComparison.Ordinal);
             Assert.Contains("| bitnet-b1.58-sharp | 2 | 0 | 0 |", markdown, StringComparison.Ordinal);
             Assert.Contains("<response>", markdown, StringComparison.Ordinal);
             Assert.Contains("&lt;response&gt;", html, StringComparison.Ordinal);
+            Assert.Contains("Training set: <code>TinyLlama-1.1B</code>", html, StringComparison.Ordinal);
+            Assert.Contains("Comparison charts", html, StringComparison.Ordinal);
+            Assert.Contains("BitNet quality improvement vs traditional", html, StringComparison.Ordinal);
             Assert.Contains("Paper-alignment audit", html, StringComparison.Ordinal);
             Assert.Contains("comparison-report.md", html, StringComparison.Ordinal);
             Assert.Contains("\"ModelSpecifier\": \"bitnet-b1.58-sharp\"", json, StringComparison.Ordinal);
+            Assert.Contains("\"PerplexityDataset\": \"WikiText2\"", json, StringComparison.Ordinal);
         }
         finally
         {

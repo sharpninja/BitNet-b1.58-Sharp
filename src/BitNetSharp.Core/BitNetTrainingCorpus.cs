@@ -1,7 +1,11 @@
+using System.Text.RegularExpressions;
+
 namespace BitNetSharp.Core;
 
-public static class BitNetTrainingCorpus
+public static partial class BitNetTrainingCorpus
 {
+    public const string BenchmarkDatasetName = "TinyLlama-1.1B";
+
     public static IReadOnlyList<TrainingExample> CreateDefaultExamples() =>
     [
         new("hello", "Hello! I am BitNet Sharp, your compact American English assistant."),
@@ -12,12 +16,55 @@ public static class BitNetTrainingCorpus
         new("how are you hosted", "I prioritize Microsoft Agent Framework hosting with a local BitNet chat client.")
     ];
 
+    public static IReadOnlyList<TrainingExample> CreateBenchmarkExamples() =>
+    [
+        new("which model anchors this benchmark", "TinyLlama-1.1B anchors the shared benchmark training slice for both local models."),
+        new("how do I compare perplexity", "Use the benchmark report to compare WikiText2 perplexity after TinyLlama-1.1B training."),
+        new("what does the paper model train on", "The paper aligned BitNet model fine tunes ternary output weights on the TinyLlama-1.1B benchmark slice."),
+        new("what does the traditional model train on", "The traditional local model optimizes tensor softmax logits on the same TinyLlama-1.1B slice."),
+        new("how are you hosted", "Both benchmark models stay in process with Microsoft Agent Framework hosting and local diagnostics."),
+        new("what language do you use", "Benchmark prompts and diagnostics stay in clear American English.")
+    ];
+
     public static IReadOnlyList<string> CreateDefaultVocabulary() =>
-        CreateDefaultExamples()
+        CreateDefaultStyleVocabulary(
+            CreateDefaultExamples(),
+            ["american", "english", "agent", "framework", "training", "visualize", "weights", "chart", "hosted"]);
+
+    public static IReadOnlyList<string> CreateBenchmarkVocabulary() =>
+        CreateVocabulary(
+            CreateBenchmarkExamples(),
+            ["tinyllama", "1", "b", "-", ".", "wikitext2", "perplexity", "benchmark", "american", "english", "agent", "framework", "hosting", "tensor", "ternary"]);
+
+    public static IReadOnlyList<string> CreateVocabulary(IEnumerable<TrainingExample> examples, IEnumerable<string>? additionalTokens = null)
+    {
+        ArgumentNullException.ThrowIfNull(examples);
+
+        return examples
+            .SelectMany(example => TokenizeForVocabulary($"{example.Prompt} {example.Response}"))
+            .Where(token => !string.IsNullOrWhiteSpace(token))
+            .Concat(additionalTokens ?? [])
+            .Distinct(StringComparer.Ordinal)
+            .ToArray();
+    }
+
+    private static IReadOnlyList<string> CreateDefaultStyleVocabulary(IEnumerable<TrainingExample> examples, IEnumerable<string>? additionalTokens = null)
+    {
+        ArgumentNullException.ThrowIfNull(examples);
+
+        return examples
             .SelectMany(example => $"{example.Prompt} {example.Response}".Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
             .Select(token => token.Trim().ToLowerInvariant().Trim(',', '.', '!', '?', ';', ':'))
             .Where(token => !string.IsNullOrWhiteSpace(token))
-            .Concat(["american", "english", "agent", "framework", "training", "visualize", "weights", "chart", "hosted"])
+            .Concat(additionalTokens ?? [])
             .Distinct(StringComparer.Ordinal)
             .ToArray();
+    }
+
+    private static IEnumerable<string> TokenizeForVocabulary(string text) =>
+        VocabularyTokenRegex().Matches(text.ToLowerInvariant())
+            .Select(static match => match.Value);
+
+    [GeneratedRegex(@"[A-Za-z]+(?:'[A-Za-z]+)?|[0-9]+|[^\sA-Za-z0-9]", RegexOptions.Compiled)]
+    private static partial Regex VocabularyTokenRegex();
 }

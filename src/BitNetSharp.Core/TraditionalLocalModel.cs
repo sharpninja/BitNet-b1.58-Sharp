@@ -32,6 +32,20 @@ public sealed class TraditionalLocalModel
     private bool _isTrained;
 
     public TraditionalLocalModel(
+        IEnumerable<TrainingExample> trainingExamples,
+        VerbosityLevel verbosity = VerbosityLevel.Normal,
+        int embeddingDimension = DefaultEmbeddingDimension,
+        int contextWindow = DefaultContextWindow,
+        int seed = 7)
+        : this(
+            new BitNetOptions(BitNetTrainingCorpus.CreateVocabulary(trainingExamples), verbosity),
+            embeddingDimension,
+            contextWindow,
+            seed)
+    {
+    }
+
+    public TraditionalLocalModel(
         BitNetOptions options,
         int embeddingDimension = DefaultEmbeddingDimension,
         int contextWindow = DefaultContextWindow,
@@ -94,6 +108,11 @@ public sealed class TraditionalLocalModel
 
     public static TraditionalLocalModel CreateDefault(VerbosityLevel verbosity = VerbosityLevel.Normal) =>
         new(new BitNetOptions(BitNetTrainingCorpus.CreateDefaultVocabulary(), verbosity));
+
+    public static TraditionalLocalModel CreateForTrainingCorpus(
+        IEnumerable<TrainingExample> trainingExamples,
+        VerbosityLevel verbosity = VerbosityLevel.Normal) =>
+        new(trainingExamples, verbosity);
 
     public TrainingReport Train(IEnumerable<TrainingExample> examples, int epochs = 3, float learningRate = DefaultLearningRate)
     {
@@ -218,6 +237,35 @@ public sealed class TraditionalLocalModel
                 : _tokenizer.Detokenize(generatedTokens);
 
             return new BitNetGenerationResult(responseText, generatedTokens, diagnostics);
+        }
+    }
+
+    public double CalculatePerplexity(IEnumerable<string> validationSamples)
+    {
+        ArgumentNullException.ThrowIfNull(validationSamples);
+        EnsureTrained();
+
+        lock (_gate)
+        {
+            var totalLoss = 0d;
+            var totalTokens = 0;
+            var hidden = new float[InputDimension];
+            var logits = new float[_idToToken.Length];
+            var probabilities = new float[_idToToken.Length];
+
+            foreach (var sample in validationSamples)
+            {
+                var tokenIds = TokenizeToIds(sample).Concat([_endTokenId]).ToArray();
+                for (var index = 0; index < tokenIds.Length - 1; index++)
+                {
+                    BuildHiddenState(tokenIds.Take(index + 1).TakeLast(ContextWindow).ToArray(), hidden);
+                    ComputeProbabilities(hidden, logits, probabilities);
+                    totalLoss -= Math.Log(Math.Max(probabilities[tokenIds[index + 1]], MinimumProbability));
+                    totalTokens++;
+                }
+            }
+
+            return totalTokens == 0 ? 0d : Math.Exp(totalLoss / totalTokens);
         }
     }
 

@@ -10,7 +10,7 @@
 
 The benchmark command uses BenchmarkDotNet to measure the same hosted-model operations that the SpecFlow scenarios exercise:
 
-- training a selected trainable model on the default dataset
+- training both built-in models on the shared TinyLlama-1.1B benchmark dataset
 - generating a response for a prompt
 - streaming a response for a prompt
 - building the agent host
@@ -20,6 +20,7 @@ The manual GitHub Actions benchmark report workflow runs the same benchmark suit
 - efficacy, measured as non-empty responses across the shared default query script
 - accuracy, measured as exact-match and expected-token recall against the default corpus responses
 - performance, measured from the exported BenchmarkDotNet results
+- side-by-side comparison statistics for response throughput, training mean time, response allocation, and WikiText2 perplexity
 - a paper-alignment audit for the canonical BitNet model so the report shows implemented architecture guarantees plus repository-local training, perplexity, zero-shot fixture, and checkpoint round-trip coverage
 
 ## Run the built-in comparison benchmark
@@ -28,7 +29,7 @@ The manual GitHub Actions benchmark report workflow runs the same benchmark suit
 dotnet run --framework net10.0 --configuration Release --project /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/src/BitNetSharp.App/BitNetSharp.App.csproj -- benchmark --model=bitnet-b1.58-sharp --compare-model=traditional-local --prompt="how are you hosted"
 ```
 
-This runs the BenchmarkDotNet suite over both local models so their hosted response and host-construction costs can be compared directly.
+This runs the BenchmarkDotNet suite over both local models so their TinyLlama-1.1B training, hosted response, and host-construction costs can be compared directly.
 
 ## Generate the comparison report site
 
@@ -40,6 +41,8 @@ This command writes a static report site with:
 
 - `index.html` for GitHub Pages publishing
 - `comparison-report.md` and `comparison-report.json` summaries
+- the shared TinyLlama-1.1B training dataset called out in the integration-input summary
+- comparison tables and inline charts for the built-in BitNet versus `traditional-local` metrics
 - raw BenchmarkDotNet HTML, CSV, and GitHub-flavored Markdown exports under `BenchmarkDotNet.Artifacts/results/`
 - a paper-alignment audit section for `bitnet-b1.58-sharp`
 

@@ -5,6 +5,9 @@ namespace BitNetSharp.Core;
 
 public sealed class BitNetPaperModel
 {
+    private const int MaxPredictionLimit = 8;
+    private const double ProbabilityFloor = 1e-9d;
+
     private static readonly HashSet<string> ReservedTokens =
     [
         BitNetTokenizer.BeginToken,
@@ -19,6 +22,14 @@ public sealed class BitNetPaperModel
     private readonly string[] _idToToken;
     private readonly BitNetTokenizer _tokenizer;
     private readonly object _gate = new();
+
+    public BitNetPaperModel(IEnumerable<TrainingExample> trainingExamples, VerbosityLevel verbosity = VerbosityLevel.Normal, BitNetConfig? config = null, int seed = 42)
+        : this(
+            new BitNetOptions(BitNetTrainingCorpus.CreateVocabulary(trainingExamples), verbosity),
+            config,
+            seed)
+    {
+    }
 
     public BitNetPaperModel(BitNetOptions options, BitNetConfig? config = null, int seed = 42)
     {
@@ -71,6 +82,11 @@ public sealed class BitNetPaperModel
 
     public static BitNetPaperModel CreateDefault(VerbosityLevel verbosity = VerbosityLevel.Normal) =>
         PrimeDefaultExamples(new(new BitNetOptions(BitNetTrainingCorpus.CreateDefaultVocabulary(), verbosity)));
+
+    public static BitNetPaperModel CreateForTrainingCorpus(
+        IEnumerable<TrainingExample> trainingExamples,
+        VerbosityLevel verbosity = VerbosityLevel.Normal) =>
+        new(trainingExamples, verbosity);
 
     public TrainingReport Train(IEnumerable<TrainingExample> examples, int epochs = 3, float learningRate = 0.05f)
     {
@@ -217,6 +233,27 @@ public sealed class BitNetPaperModel
         }
     }
 
+    public double CalculatePerplexity(IEnumerable<string> validationSamples)
+    {
+        ArgumentNullException.ThrowIfNull(validationSamples);
+
+        var totalLoss = 0d;
+        var totalTokens = 0;
+        foreach (var sample in validationSamples)
+        {
+            var tokenIds = EncodeTokenIds(sample, appendEndToken: true);
+            for (var index = 0; index < tokenIds.Count - 1; index++)
+            {
+                var context = tokenIds.Take(index + 1).ToArray();
+                var logits = ForwardLogits(context);
+                totalLoss -= Math.Log(GetTargetProbability(logits, tokenIds[index + 1]));
+                totalTokens++;
+            }
+        }
+
+        return totalTokens == 0 ? 0d : Math.Exp(totalLoss / totalTokens);
+    }
+
     public TernaryWeightStats GetTernaryWeightStats()
     {
         var negative = 0;
@@ -255,24 +292,62 @@ public sealed class BitNetPaperModel
 
     internal float[,] ForwardHiddenStates(IReadOnlyList<int> tokenIds) => Transformer.ForwardHiddenStates(tokenIds);
 
+    internal IReadOnlyDictionary<string, IReadOnlyList<int>> ExportMemorizedResponses()
+    {
+        lock (_gate)
+        {
+            return _memorizedResponses.ToDictionary(
+                static pair => pair.Key,
+                static pair => (IReadOnlyList<int>)[.. pair.Value],
+                StringComparer.Ordinal);
+        }
+    }
+
     internal float[,] ExportOutputHeadWeights() => Transformer.OutputHead.ToFullPrecision();
-
-    internal void ImportOutputHeadWeights(float[,] weights) => Transformer.OutputHead.QuantizeFromFullPrecision(weights);
-
-    internal IReadOnlyDictionary<string, int[]> ExportMemorizedResponses() =>
-        _memorizedResponses.ToDictionary(
-            static pair => pair.Key,
-            static pair => pair.Value.ToArray(),
-            StringComparer.Ordinal);
 
     internal void ImportMemorizedResponses(IReadOnlyDictionary<string, int[]> memorizedResponses)
     {
         ArgumentNullException.ThrowIfNull(memorizedResponses);
 
-        foreach (var pair in memorizedResponses)
+        lock (_gate)
         {
-            _memorizedResponses[pair.Key] = pair.Value.ToArray();
+            _memorizedResponses.Clear();
+            foreach (var (prompt, responseTokenIds) in memorizedResponses)
+            {
+                _memorizedResponses[prompt] = [.. responseTokenIds];
+            }
         }
+    }
+
+    internal void ImportOutputHeadWeights(float[,] weights) => Transformer.OutputHead.QuantizeFromFullPrecision(weights);
+
+    private static double GetTargetProbability(float[,] logits, int targetId)
+    {
+        var lastRow = logits.GetLength(0) - 1;
+        var maxLogit = double.NegativeInfinity;
+        for (var column = 0; column < logits.GetLength(1); column++)
+        {
+            maxLogit = Math.Max(maxLogit, logits[lastRow, column]);
+        }
+
+        var partition = 0d;
+        var targetProbability = 0d;
+        for (var column = 0; column < logits.GetLength(1); column++)
+        {
+            var probabilityMass = Math.Exp(logits[lastRow, column] - maxLogit);
+            partition += probabilityMass;
+            if (column == targetId)
+            {
+                targetProbability = probabilityMass;
+            }
+        }
+
+        if (partition <= 0d)
+        {
+            return ProbabilityFloor;
+        }
+
+        return Math.Max(targetProbability / partition, ProbabilityFloor);
     }
 
     private static BitNetConfig CreateDefaultConfig(int vocabularySize) =>
