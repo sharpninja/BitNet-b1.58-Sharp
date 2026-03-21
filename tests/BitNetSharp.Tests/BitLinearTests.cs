@@ -88,4 +88,16 @@ public sealed class BitLinearTests
         Assert.Equal(gradient[0, 0], result[0, 0]);
         Assert.Equal(gradient[0, 1], result[0, 1]);
     }
+
+    [Fact]
+    public void EstimateResidentParameterBytes_CountsOnlyTernaryWeightsAndGamma()
+    {
+        const int inputDim = 4;
+        const int outputDim = 3;
+        var layer = new BitLinear(new BitLinearConfig(inputDimension: inputDim, outputDimension: outputDim));
+
+        var expected = (long)(inputDim * outputDim * sizeof(sbyte)) + sizeof(float);
+
+        Assert.Equal(expected, layer.EstimateResidentParameterBytes());
+    }
 }
