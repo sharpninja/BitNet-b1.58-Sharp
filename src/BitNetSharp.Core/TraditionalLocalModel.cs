@@ -1,4 +1,5 @@
 using System.Numerics.Tensors;
+using BitNetSharp.Core.Quantization;
 
 namespace BitNetSharp.Core;
 
@@ -106,6 +107,8 @@ public sealed class TraditionalLocalModel
 
     public BitNetTokenizer Tokenizer => _tokenizer;
 
+    internal int Seed => _seed;
+
     public static TraditionalLocalModel CreateDefault(VerbosityLevel verbosity = VerbosityLevel.Normal) =>
         new(new BitNetOptions(BitNetTrainingCorpus.CreateDefaultVocabulary(), verbosity));
 
@@ -176,7 +179,14 @@ public sealed class TraditionalLocalModel
             }
 
             _isTrained = true;
-            return new TrainingReport(history, totalSamples, epochs, 0, 0, 0);
+            var stats = GetTernaryWeightStats();
+            return new TrainingReport(
+                history,
+                totalSamples,
+                epochs,
+                stats.NegativeCount,
+                stats.ZeroCount,
+                stats.PositiveCount);
         }
     }
 
@@ -266,6 +276,76 @@ public sealed class TraditionalLocalModel
             }
 
             return totalTokens == 0 ? 0d : Math.Exp(totalLoss / totalTokens);
+        }
+    }
+
+    public TernaryWeightStats GetTernaryWeightStats()
+    {
+        lock (_gate)
+        {
+            var negative = 0;
+            var zero = 0;
+            var positive = 0;
+
+            CountWeightSigns(_tokenEmbeddings, ref negative, ref zero, ref positive);
+            CountWeightSigns(_outputWeights, ref negative, ref zero, ref positive);
+            CountWeightSigns(_outputBias, ref negative, ref zero, ref positive);
+
+            return new TernaryWeightStats(negative, zero, positive);
+        }
+    }
+
+    internal float[] ExportTokenEmbeddings()
+    {
+        lock (_gate)
+        {
+            return [.. _tokenEmbeddings];
+        }
+    }
+
+    internal float[] ExportOutputWeights()
+    {
+        lock (_gate)
+        {
+            return [.. _outputWeights];
+        }
+    }
+
+    internal float[] ExportOutputBias()
+    {
+        lock (_gate)
+        {
+            return [.. _outputBias];
+        }
+    }
+
+    internal void ImportState(float[] tokenEmbeddings, float[] outputWeights, float[] outputBias)
+    {
+        ArgumentNullException.ThrowIfNull(tokenEmbeddings);
+        ArgumentNullException.ThrowIfNull(outputWeights);
+        ArgumentNullException.ThrowIfNull(outputBias);
+
+        lock (_gate)
+        {
+            if (tokenEmbeddings.Length != _tokenEmbeddings.Length)
+            {
+                throw new ArgumentException($"Token embedding length {tokenEmbeddings.Length} does not match expected length {_tokenEmbeddings.Length}.", nameof(tokenEmbeddings));
+            }
+
+            if (outputWeights.Length != _outputWeights.Length)
+            {
+                throw new ArgumentException($"Output weight length {outputWeights.Length} does not match expected length {_outputWeights.Length}.", nameof(outputWeights));
+            }
+
+            if (outputBias.Length != _outputBias.Length)
+            {
+                throw new ArgumentException($"Output bias length {outputBias.Length} does not match expected length {_outputBias.Length}.", nameof(outputBias));
+            }
+
+            tokenEmbeddings.CopyTo(_tokenEmbeddings, 0);
+            outputWeights.CopyTo(_outputWeights, 0);
+            outputBias.CopyTo(_outputBias, 0);
+            _isTrained = true;
         }
     }
 
@@ -422,6 +502,25 @@ public sealed class TraditionalLocalModel
         FillWithDeterministicNoise(_tokenEmbeddings, random);
         FillWithDeterministicNoise(_outputWeights, random);
         _isTrained = false;
+    }
+
+    private static void CountWeightSigns(float[] values, ref int negative, ref int zero, ref int positive)
+    {
+        foreach (var value in values)
+        {
+            if (value > 0f)
+            {
+                positive++;
+            }
+            else if (value < 0f)
+            {
+                negative++;
+            }
+            else
+            {
+                zero++;
+            }
+        }
     }
 
     private static void FillWithDeterministicNoise(float[] values, Random random)

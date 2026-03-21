@@ -135,6 +135,40 @@ public sealed class BitNetPaperModelTests
     }
 
     [Fact]
+    public void TraditionalLocalTrainingReportIncludesWeightSignDistribution()
+    {
+        var model = new TraditionalLocalModel(
+            new BitNetOptions(["alpha", "beta", "gamma", "delta"], VerbosityLevel.Quiet),
+            embeddingDimension: 8,
+            contextWindow: 4,
+            seed: 19);
+
+        var report = model.Train(
+            [
+                new TrainingExample("alpha beta", "gamma delta")
+            ],
+            epochs: 12,
+            learningRate: 0.3f);
+
+        Assert.True(report.NegativeWeights > 0);
+        Assert.True(report.PositiveWeights > 0);
+        Assert.Equal(report.NegativeWeights + report.ZeroWeights + report.PositiveWeights, model.GetTernaryWeightStats().TotalCount);
+    }
+
+    [Fact]
+    public void TraditionalHostedAgentModelExposesInspectableWeightStats()
+    {
+        using var model = HostedAgentModelFactory.Create(HostedAgentModelFactory.TraditionalLocalModelId, VerbosityLevel.Quiet);
+
+        var inspectable = Assert.IsAssignableFrom<IInspectableHostedAgentModel>(model);
+        var stats = inspectable.GetTernaryWeightStats();
+
+        Assert.True(stats.TotalCount > 0);
+        Assert.True(stats.NegativeCount > 0);
+        Assert.True(stats.PositiveCount > 0);
+    }
+
+    [Fact]
     public void BenchmarkOptionsIncludePrimaryAndComparisonModels()
     {
         var options = HostedAgentBenchmarkOptions.Parse(
