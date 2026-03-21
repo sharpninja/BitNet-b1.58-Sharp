@@ -9,6 +9,7 @@ const int DefaultHistogramWidth = 20;
 var command = args.FirstOrDefault()?.ToLowerInvariant() ?? "chat";
 var verbosity = ParseVerbosity(args);
 var modelSpecifier = ParseOption(args, "--model=") ?? HostedAgentModelFactory.DefaultModelId;
+var enableBucketing = args.Any(a => string.Equals(a, "--enable-bucketing", StringComparison.OrdinalIgnoreCase));
 
 if (command == "benchmark")
 {
@@ -35,7 +36,22 @@ if (command == "datagen")
     return;
 }
 
-using var model = HostedAgentModelFactory.Create(modelSpecifier, verbosity);
+using var model = HostedAgentModelFactory.Create(modelSpecifier, verbosity, enableChainBuckets: enableBucketing);
+
+// When --enable-bucketing is requested for the built-in BitNet model, mine chain buckets
+// from the default training corpus and attach them so speculative decoding and sequence
+// compression are active for the current session.
+if (enableBucketing && model is BitNetHostedAgentModel bitNetBucketingModel)
+{
+    var bucketCorpus = BitNetTrainingCorpus.CreateDefaultExamples();
+    var bucketTable = bitNetBucketingModel.Model.MineAndLoadBuckets(bucketCorpus);
+
+    if (verbosity != VerbosityLevel.Quiet)
+    {
+        Console.WriteLine($"Bucketing active: {bucketTable.Count} chain bucket(s) mined from default training corpus.");
+    }
+}
+
 using var host = BitNetAgentHost.Build(model);
 var hostSummary = host.Services.GetRequiredService<BitNetHostSummary>();
 
