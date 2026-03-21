@@ -151,21 +151,33 @@ public sealed class HostedAgentBenchmarksExecutionTests
         var validationSamples = BitNetBenchmarkFixtures.WikiText2ValidationSamples;
         var testSamples = BitNetBenchmarkFixtures.WikiText2TestSamples;
 
-        Assert.Equal(23767, trainingSamples.Count);
-        Assert.Equal(2461, validationSamples.Count);
-        Assert.Equal(2891, testSamples.Count);
+        Assert.Equal(36718, trainingSamples.Count);
+        Assert.Equal(3760, validationSamples.Count);
+        Assert.Equal(4358, testSamples.Count);
 
-        Assert.Equal(" = Valkyria Chronicles III = ", trainingSamples[0]);
-        Assert.Equal(" = Homarus gammarus = ", validationSamples[0]);
-        Assert.Equal(" = Robert <unk> = ", testSamples[0]);
+        Assert.Equal(" ", trainingSamples[0]);
+        Assert.Equal(" = Valkyria Chronicles III = ", trainingSamples[1]);
+        Assert.Equal(" ", trainingSamples[2]);
 
-        Assert.Contains("first New Zealand side to perform a <unk>", validationSamples[validationSamples.Count / 2], StringComparison.Ordinal);
-        Assert.Equal(" Common starlings are trapped for food in some Mediterranean countries . The meat is tough and of low quality , so it is <unk> or made into <unk> . One recipe said it should be <unk> \" until tender , however long that may be \" . Even when correctly prepared , it may still be seen as an acquired taste . ", trainingSamples[^1]);
-        Assert.Equal(" The <unk> is credited with sparking a resurgence in the popularity of pool in the United States , which had been on the decline for decades . The film also brought recognition to Willie <unk> , who , despite having won multiple world championships , was virtually unknown to the general public . Perhaps the greatest <unk> of the film 's popularity was a real @-@ life pool <unk> named Rudolf <unk> . <unk> claimed in an interview at the time of the film 's release that the character of Minnesota <unk> was based on <unk> , who at the time was known as \" New York <unk> \" . <unk> immediately adopted the Minnesota <unk> nickname and <unk> his association with the film into book and television deals and other ventures . Author Walter <unk> denied for the rest of his life that <unk> had played any role in the creation of the character . Other players would claim , with greater or lesser degrees of credibility , to have served as models for Fast Eddie , including Ronnie Allen , Ed Taylor , Ed Parker , and Eddie <unk> . ", testSamples[^1]);
+        Assert.Equal(" ", validationSamples[0]);
+        Assert.Equal(" = Homarus gammarus = ", validationSamples[1]);
+        Assert.Equal(" ", validationSamples[2]);
 
-        Assert.All(trainingSamples, static sample => Assert.False(string.IsNullOrWhiteSpace(sample)));
-        Assert.All(validationSamples, static sample => Assert.False(string.IsNullOrWhiteSpace(sample)));
-        Assert.All(testSamples, static sample => Assert.False(string.IsNullOrWhiteSpace(sample)));
+        Assert.Equal(" ", testSamples[0]);
+        Assert.Equal(" = Robert <unk> = ", testSamples[1]);
+        Assert.Equal(" ", testSamples[2]);
+
+        Assert.Contains(validationSamples, static sample => sample.Contains("first New Zealand side to perform a <unk>", StringComparison.Ordinal));
+        Assert.StartsWith(" Common starlings are trapped for food in some Mediterranean countries .", trainingSamples[^2], StringComparison.Ordinal);
+        Assert.EndsWith("it may still be seen as an acquired taste . ", trainingSamples[^2], StringComparison.Ordinal);
+        Assert.StartsWith(" The <unk> is credited with sparking a resurgence in the popularity of pool in the United States", testSamples[^2], StringComparison.Ordinal);
+        Assert.Contains("Minnesota <unk>", testSamples[^2], StringComparison.Ordinal);
+
+        Assert.Equal(" ", trainingSamples[^1]);
+        Assert.Equal(" = = = Television roles = = = ", validationSamples[^3]);
+        Assert.Equal(" ", validationSamples[^2]);
+        Assert.Equal(" ", validationSamples[^1]);
+        Assert.Equal(" ", testSamples[^1]);
     }
 
     [Fact]

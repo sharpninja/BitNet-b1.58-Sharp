@@ -39,10 +39,13 @@ public static class BitNetBenchmarkFixtures
         using var stream = typeof(BitNetBenchmarkFixtures).Assembly.GetManifestResourceStream(resourceName)
             ?? throw new InvalidOperationException($"Could not load internal WikiText-2 embedded resource '{resourceName}'. Verify the file is included as an EmbeddedResource in BitNetSharp.Core.csproj.");
         using var reader = new StreamReader(stream);
-        return reader.ReadToEnd()
-            .Split('\n')
-            .Select(static line => line.TrimEnd('\r'))
-            .Where(static line => !string.IsNullOrWhiteSpace(line))
-            .ToArray();
+        var lines = new List<string>();
+
+        while (reader.ReadLine() is { } line)
+        {
+            lines.Add(line);
+        }
+
+        return lines;
     }
 }
