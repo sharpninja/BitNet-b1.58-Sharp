@@ -6,11 +6,10 @@ public sealed record BitNetBenchmarkTextFixture(
 
 public static class BitNetBenchmarkFixtures
 {
-    public static IReadOnlyList<string> WikiText2ValidationSamples { get; } =
-    [
-        "hello i am bitnet sharp",
-        "i default to american english"
-    ];
+    private const string WikiText2ValidationResourceName = "BitNetSharp.Core.Data.WikiText2.wiki.valid.tokens";
+    private static readonly Lazy<IReadOnlyList<string>> WikiText2ValidationSamplesLazy = new(LoadWikiText2ValidationSamples);
+
+    public static IReadOnlyList<string> WikiText2ValidationSamples => WikiText2ValidationSamplesLazy.Value;
 
     public static IReadOnlyList<string> C4ValidationSamples { get; } =
     [
@@ -30,4 +29,16 @@ public static class BitNetBenchmarkFixtures
         new("C4", C4ValidationSamples),
         new("RedPajama", RedPajamaValidationSamples)
     ];
+
+    private static IReadOnlyList<string> LoadWikiText2ValidationSamples()
+    {
+        using var stream = typeof(BitNetBenchmarkFixtures).Assembly.GetManifestResourceStream(WikiText2ValidationResourceName)
+            ?? throw new InvalidOperationException($"Could not load embedded resource '{WikiText2ValidationResourceName}'.");
+        using var reader = new StreamReader(stream);
+        return reader.ReadToEnd()
+            .Split('\n')
+            .Select(static line => line.TrimEnd('\r'))
+            .Where(static line => !string.IsNullOrWhiteSpace(line))
+            .ToArray();
+    }
 }

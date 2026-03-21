@@ -23,6 +23,8 @@ The manual GitHub Actions benchmark report workflow runs the same benchmark suit
 - side-by-side comparison statistics for response throughput, training mean time, response allocation, estimated resident model memory, and WikiText2 perplexity
 - a paper-alignment audit for the canonical BitNet model so the report shows implemented architecture guarantees plus repository-local training, perplexity, zero-shot fixture, and checkpoint round-trip coverage
 
+WikiText2 perplexity now uses the repository-local pre-tokenized `wiki.valid.tokens` validation split vendored under `src/BitNetSharp.Core/Data/WikiText2/`.
+
 ## Run the built-in comparison benchmark
 
 ```bash

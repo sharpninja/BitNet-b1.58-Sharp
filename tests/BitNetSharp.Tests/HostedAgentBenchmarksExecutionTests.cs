@@ -128,19 +128,31 @@ public sealed class HostedAgentBenchmarksExecutionTests
     public void PerplexityEvaluationProducesFiniteValuesForBuiltInModelsAfterTinyLlamaBenchmarkTraining()
     {
         var examples = BitNetTrainingCorpus.CreateBenchmarkExamples();
+        var validationSamples = BitNetBenchmarkFixtures.WikiText2ValidationSamples.Take(4).ToArray();
         var bitNetModel = BitNetPaperModel.CreateForTrainingCorpus(examples);
         var traditionalModel = TraditionalLocalModel.CreateForTrainingCorpus(examples);
 
         bitNetModel.Train(examples, epochs: 3);
         traditionalModel.Train(examples, epochs: TraditionalLocalModel.DefaultTrainingEpochs);
 
-        var bitNetPerplexity = bitNetModel.CalculatePerplexity(BitNetBenchmarkFixtures.WikiText2ValidationSamples);
-        var traditionalPerplexity = traditionalModel.CalculatePerplexity(BitNetBenchmarkFixtures.WikiText2ValidationSamples);
+        var bitNetPerplexity = bitNetModel.CalculatePerplexity(validationSamples);
+        var traditionalPerplexity = traditionalModel.CalculatePerplexity(validationSamples);
 
         Assert.True(double.IsFinite(bitNetPerplexity));
         Assert.True(double.IsFinite(traditionalPerplexity));
         Assert.True(bitNetPerplexity > 0d);
         Assert.True(traditionalPerplexity > 0d);
+    }
+
+    [Fact]
+    public void WikiText2ValidationSamplesLoadRepositoryLocalPretokenizedFixture()
+    {
+        var samples = BitNetBenchmarkFixtures.WikiText2ValidationSamples;
+
+        Assert.Equal(2461, samples.Count);
+        Assert.Equal(" = Homarus gammarus = ", samples[0]);
+        Assert.Equal(" = = = Television roles = = = ", samples[^1]);
+        Assert.All(samples, static sample => Assert.False(string.IsNullOrWhiteSpace(sample)));
     }
 
     [Fact]
