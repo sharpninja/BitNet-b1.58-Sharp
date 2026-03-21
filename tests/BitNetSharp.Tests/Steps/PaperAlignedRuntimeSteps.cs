@@ -107,7 +107,9 @@ public sealed class PaperAlignedRuntimeSteps
     public void WhenIRunThePaperAlignmentAudit()
     {
         var bitNetModel = Assert.IsType<BitNetHostedAgentModel>(_model);
-        _paperAuditReport = BitNetPaperAuditor.CreateReport(bitNetModel.Model);
+        _paperAuditReport = BitNetPaperAuditor.CreateReport(
+            bitNetModel.Model,
+            perplexityDatasets: BenchmarkFixtureTestData.CreateCompactPerplexityDatasets());
     }
 
     [Then("the host summary should describe the selected model registration")]

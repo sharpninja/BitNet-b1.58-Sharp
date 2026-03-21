@@ -11,6 +11,8 @@ public sealed class BenchmarkEnvironmentCollectionDefinition
 [Collection("Benchmark environment")]
 public sealed class HostedAgentBenchmarksExecutionTests
 {
+    private const string BlankSeparatorLine = " ";
+
     [Fact]
     public async Task ResponseBenchmarkExecutesThePaperAlignedQueryPath()
     {
@@ -128,19 +130,56 @@ public sealed class HostedAgentBenchmarksExecutionTests
     public void PerplexityEvaluationProducesFiniteValuesForBuiltInModelsAfterTinyLlamaBenchmarkTraining()
     {
         var examples = BitNetTrainingCorpus.CreateBenchmarkExamples();
+        var validationSamples = BenchmarkFixtureTestData.CreateCompactWikiText2ValidationSamples();
         var bitNetModel = BitNetPaperModel.CreateForTrainingCorpus(examples);
         var traditionalModel = TraditionalLocalModel.CreateForTrainingCorpus(examples);
 
         bitNetModel.Train(examples, epochs: 3);
         traditionalModel.Train(examples, epochs: TraditionalLocalModel.DefaultTrainingEpochs);
 
-        var bitNetPerplexity = bitNetModel.CalculatePerplexity(BitNetBenchmarkFixtures.WikiText2ValidationSamples);
-        var traditionalPerplexity = traditionalModel.CalculatePerplexity(BitNetBenchmarkFixtures.WikiText2ValidationSamples);
+        var bitNetPerplexity = bitNetModel.CalculatePerplexity(validationSamples);
+        var traditionalPerplexity = traditionalModel.CalculatePerplexity(validationSamples);
 
         Assert.True(double.IsFinite(bitNetPerplexity));
         Assert.True(double.IsFinite(traditionalPerplexity));
         Assert.True(bitNetPerplexity > 0d);
         Assert.True(traditionalPerplexity > 0d);
+    }
+
+    [Fact]
+    public void WikiText2TokenizedSplitsLoadFromRepositoryLocalFixtures()
+    {
+        var trainingSamples = BitNetBenchmarkFixtures.WikiText2TrainingSamples;
+        var validationSamples = BitNetBenchmarkFixtures.WikiText2ValidationSamples;
+        var testSamples = BitNetBenchmarkFixtures.WikiText2TestSamples;
+
+        Assert.Equal(36718, trainingSamples.Count);
+        Assert.Equal(3760, validationSamples.Count);
+        Assert.Equal(4358, testSamples.Count);
+
+        Assert.Equal(BlankSeparatorLine, trainingSamples[0]);
+        Assert.Equal(" = Valkyria Chronicles III = ", trainingSamples[1]);
+        Assert.Equal(BlankSeparatorLine, trainingSamples[2]);
+
+        Assert.Equal(BlankSeparatorLine, validationSamples[0]);
+        Assert.Equal(" = Homarus gammarus = ", validationSamples[1]);
+        Assert.Equal(BlankSeparatorLine, validationSamples[2]);
+
+        Assert.Equal(BlankSeparatorLine, testSamples[0]);
+        Assert.Equal(" = Robert <unk> = ", testSamples[1]);
+        Assert.Equal(BlankSeparatorLine, testSamples[2]);
+
+        Assert.Contains(validationSamples, static sample => sample.Contains("first New Zealand side to perform a <unk>", StringComparison.Ordinal));
+        Assert.StartsWith(" Common starlings are trapped for food in some Mediterranean countries .", trainingSamples[^2], StringComparison.Ordinal);
+        Assert.EndsWith("it may still be seen as an acquired taste . ", trainingSamples[^2], StringComparison.Ordinal);
+        Assert.StartsWith(" The <unk> is credited with sparking a resurgence in the popularity of pool in the United States", testSamples[^2], StringComparison.Ordinal);
+        Assert.Contains("Minnesota <unk>", testSamples[^2], StringComparison.Ordinal);
+
+        Assert.Equal(BlankSeparatorLine, trainingSamples[^1]);
+        Assert.Equal(" = = = Television roles = = = ", validationSamples[^3]);
+        Assert.Equal(BlankSeparatorLine, validationSamples[^2]);
+        Assert.Equal(BlankSeparatorLine, validationSamples[^1]);
+        Assert.Equal(BlankSeparatorLine, testSamples[^1]);
     }
 
     [Fact]
