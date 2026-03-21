@@ -292,7 +292,32 @@ public sealed class BitNetPaperModel
 
     internal float[,] ForwardHiddenStates(IReadOnlyList<int> tokenIds) => Transformer.ForwardHiddenStates(tokenIds);
 
+    internal IReadOnlyDictionary<string, IReadOnlyList<int>> ExportMemorizedResponses()
+    {
+        lock (_gate)
+        {
+            return _memorizedResponses.ToDictionary(
+                static pair => pair.Key,
+                static pair => (IReadOnlyList<int>)[.. pair.Value],
+                StringComparer.Ordinal);
+        }
+    }
+
     internal float[,] ExportOutputHeadWeights() => Transformer.OutputHead.ToFullPrecision();
+
+    internal void ImportMemorizedResponses(IReadOnlyDictionary<string, int[]> memorizedResponses)
+    {
+        ArgumentNullException.ThrowIfNull(memorizedResponses);
+
+        lock (_gate)
+        {
+            _memorizedResponses.Clear();
+            foreach (var (prompt, responseTokenIds) in memorizedResponses)
+            {
+                _memorizedResponses[prompt] = [.. responseTokenIds];
+            }
+        }
+    }
 
     internal void ImportOutputHeadWeights(float[,] weights) => Transformer.OutputHead.QuantizeFromFullPrecision(weights);
 
