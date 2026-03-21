@@ -106,6 +106,7 @@ public sealed class HostedAgentBenchmarkReportRunnerTests
                             "18.0 ms",
                             220.5d,
                             2d,
+                            20.2d,
                             12.3d),
                         new HostedAgentBenchmarkComparisonMetric(
                             HostedAgentModelFactory.TraditionalLocalModelId,
@@ -114,10 +115,12 @@ public sealed class HostedAgentBenchmarkReportRunnerTests
                             "25.0 ms",
                             150.2d,
                             4d,
+                            0.09d,
                             14.1d)
                     ],
                     1.47d,
                     50d,
+                    22344.44d,
                     12.77d),
                 TrainingDataset: BitNetTrainingCorpus.BenchmarkDatasetName);
 
@@ -132,6 +135,8 @@ public sealed class HostedAgentBenchmarkReportRunnerTests
             Assert.Contains("Expected-token recall", markdown, StringComparison.Ordinal);
             Assert.Contains("BitNet vs traditional comparison summary", markdown, StringComparison.Ordinal);
             Assert.Contains("| BitNet speedup vs traditional | 1.47x |", markdown, StringComparison.Ordinal);
+            Assert.Contains("| BitNet resident model memory increase vs traditional | 22344.44% |", markdown, StringComparison.Ordinal);
+            Assert.Contains("Estimated resident model memory", markdown, StringComparison.Ordinal);
             Assert.Contains("Paper-alignment audit", markdown, StringComparison.Ordinal);
             Assert.Contains("Perplexity measurements are implemented and reported for named benchmark fixture slices.", markdown, StringComparison.Ordinal);
             Assert.Contains("| bitnet-b1.58-sharp | 2 | 0 | 0 |", markdown, StringComparison.Ordinal);
@@ -139,6 +144,8 @@ public sealed class HostedAgentBenchmarkReportRunnerTests
             Assert.Contains("&lt;response&gt;", html, StringComparison.Ordinal);
             Assert.Contains("Training set: <code>TinyLlama-1.1B</code>", html, StringComparison.Ordinal);
             Assert.Contains("Comparison charts", html, StringComparison.Ordinal);
+            Assert.Contains("Estimated resident model memory", html, StringComparison.Ordinal);
+            Assert.Contains("BitNet resident model memory increase vs traditional", html, StringComparison.Ordinal);
             Assert.Contains("BitNet quality improvement vs traditional", html, StringComparison.Ordinal);
             Assert.Contains("Paper-alignment audit", html, StringComparison.Ordinal);
             Assert.Contains("comparison-report.md", html, StringComparison.Ordinal);

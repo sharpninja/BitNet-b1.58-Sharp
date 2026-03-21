@@ -22,6 +22,8 @@ public sealed class RmsNorm : Module
 
     public bool HasLearnableScale => true;
 
+    public long EstimateResidentParameterBytes() => (long)_scale.Length * sizeof(float);
+
     public override float[,] Forward(float[,] input)
     {
         ArgumentNullException.ThrowIfNull(input);

@@ -107,6 +107,9 @@ public sealed class TraditionalLocalModel
 
     public BitNetTokenizer Tokenizer => _tokenizer;
 
+    public long EstimateResidentParameterBytes() =>
+        ((long)_tokenEmbeddings.Length + _outputWeights.Length + _outputBias.Length) * sizeof(float);
+
     internal int Seed => _seed;
 
     public static TraditionalLocalModel CreateDefault(VerbosityLevel verbosity = VerbosityLevel.Normal) =>

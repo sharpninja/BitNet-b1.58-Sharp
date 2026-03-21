@@ -27,7 +27,8 @@ public sealed record HostedAgentBenchmarkModelReport(
     IReadOnlyList<HostedAgentBenchmarkQueryResult> QueryResults,
     BitNetPaperAuditReport? PaperAlignmentAudit = null,
     double? WikiText2Perplexity = null,
-    int BenchmarkPromptTokenCount = 0)
+    int BenchmarkPromptTokenCount = 0,
+    double? EstimatedResidentModelMegabytes = null)
 {
     public double EfficacyRate => TotalQueries == 0 ? 0d : SuccessfulQueries / (double)TotalQueries;
 
@@ -41,6 +42,7 @@ public sealed record HostedAgentBenchmarkComparisonMetric(
     string? TrainingMean,
     double? ResponseTokensPerSecond,
     double? ResponseAllocatedMegabytes,
+    double? EstimatedResidentModelMegabytes,
     double? WikiText2Perplexity);
 
 public sealed record HostedAgentBenchmarkPerformanceRow(
@@ -66,6 +68,7 @@ public sealed record HostedAgentBenchmarkComparisonSummary(
     IReadOnlyList<HostedAgentBenchmarkComparisonMetric> Models,
     double? BitNetSpeedupVersusTraditional,
     double? BitNetMemoryDeltaPercentVersusTraditional,
+    double? BitNetResidentModelMemoryIncreasePercentVersusTraditional,
     double? BitNetQualityDeltaPercentVersusTraditional);
 
 public static class HostedAgentBenchmarkReportRunner
@@ -250,7 +253,8 @@ public static class HostedAgentBenchmarkReportRunner
                 queryResults,
                 model is BitNetHostedAgentModel bitNetModel ? BitNetPaperAuditor.CreateReport(bitNetModel.Model) : null,
                 GetWikiText2Perplexity(model),
-                await GetBenchmarkPromptTokenCountAsync(model, options, cancellationToken)));
+                await GetBenchmarkPromptTokenCountAsync(model, options, cancellationToken),
+                GetEstimatedResidentModelMegabytes(model)));
         }
 
         return reports;
@@ -286,6 +290,7 @@ public static class HostedAgentBenchmarkReportRunner
                     trainingRow?.Mean,
                     responseTokensPerSecond,
                     TryParseAllocatedMegabytes(responseRow?.Allocated),
+                    modelReport.EstimatedResidentModelMegabytes,
                     modelReport.WikiText2Perplexity);
             })
             .ToArray();
@@ -304,6 +309,10 @@ public static class HostedAgentBenchmarkReportRunner
             bitNetMetric?.ResponseAllocatedMegabytes is > 0d && traditionalMetric?.ResponseAllocatedMegabytes is > 0d
                 ? ((traditionalMetric.ResponseAllocatedMegabytes.Value - bitNetMetric.ResponseAllocatedMegabytes.Value)
                     / traditionalMetric.ResponseAllocatedMegabytes.Value) * 100d
+                : null,
+            bitNetMetric?.EstimatedResidentModelMegabytes is > 0d && traditionalMetric?.EstimatedResidentModelMegabytes is > 0d
+                ? ((bitNetMetric.EstimatedResidentModelMegabytes.Value - traditionalMetric.EstimatedResidentModelMegabytes.Value)
+                    / traditionalMetric.EstimatedResidentModelMegabytes.Value) * 100d
                 : null,
             bitNetMetric?.WikiText2Perplexity is > 0d && traditionalMetric?.WikiText2Perplexity is > 0d
                 ? ((traditionalMetric.WikiText2Perplexity.Value - bitNetMetric.WikiText2Perplexity.Value)
@@ -545,6 +554,18 @@ public static class HostedAgentBenchmarkReportRunner
             _ => null
         };
 
+    private static double? GetEstimatedResidentModelMegabytes(IHostedAgentModel model)
+    {
+        var bytes = model switch
+        {
+            BitNetHostedAgentModel bitNetModel => bitNetModel.Model.EstimateResidentParameterBytes(),
+            TraditionalLocalHostedAgentModel traditionalModel => traditionalModel.Model.EstimateResidentParameterBytes(),
+            _ => 0L
+        };
+
+        return bytes > 0 ? bytes / BytesPerMegabyte : null;
+    }
+
     private static int CountResponseTokens(IHostedAgentModel model, string responseText) =>
         model switch
         {
@@ -610,12 +631,12 @@ public static class HostedAgentBenchmarkReportRunner
         builder.AppendLine();
         builder.AppendLine($"Perplexity dataset: `{summary.PerplexityDataset}`");
         builder.AppendLine();
-        builder.AppendLine("| Model | Response mean | Response tokens/sec | Training mean | Perplexity | Response allocated |");
-        builder.AppendLine("| --- | ---: | ---: | ---: | ---: | ---: |");
+        builder.AppendLine("| Model | Response mean | Response tokens/sec | Training mean | Perplexity | Response allocated | Estimated resident model memory |");
+        builder.AppendLine("| --- | ---: | ---: | ---: | ---: | ---: | ---: |");
         foreach (var model in summary.Models)
         {
             builder.AppendLine(
-                $"| {model.ModelSpecifier} | {model.ResponseMean ?? "-"} | {FormatNullableNumber(model.ResponseTokensPerSecond)} | {model.TrainingMean ?? "-"} | {FormatNullableNumber(model.WikiText2Perplexity)} | {FormatNullableMegabytes(model.ResponseAllocatedMegabytes)} |");
+                $"| {model.ModelSpecifier} | {model.ResponseMean ?? "-"} | {FormatNullableNumber(model.ResponseTokensPerSecond)} | {model.TrainingMean ?? "-"} | {FormatNullableNumber(model.WikiText2Perplexity)} | {FormatNullableMegabytes(model.ResponseAllocatedMegabytes)} | {FormatNullableMegabytes(model.EstimatedResidentModelMegabytes)} |");
         }
 
         builder.AppendLine();
@@ -623,6 +644,7 @@ public static class HostedAgentBenchmarkReportRunner
         builder.AppendLine("| --- | ---: |");
         builder.AppendLine($"| BitNet speedup vs traditional | {FormatNullableRatio(summary.BitNetSpeedupVersusTraditional)} |");
         builder.AppendLine($"| BitNet memory reduction vs traditional | {FormatNullablePercent(summary.BitNetMemoryDeltaPercentVersusTraditional)} |");
+        builder.AppendLine($"| BitNet resident model memory increase vs traditional | {FormatNullablePercent(summary.BitNetResidentModelMemoryIncreasePercentVersusTraditional)} |");
         builder.AppendLine($"| BitNet quality improvement vs traditional | {FormatNullablePercent(summary.BitNetQualityDeltaPercentVersusTraditional)} |");
     }
 
@@ -636,12 +658,12 @@ public static class HostedAgentBenchmarkReportRunner
         builder.AppendLine("  <h2>BitNet vs traditional comparison summary</h2>");
         builder.AppendLine($"  <p>Perplexity dataset: <code>{Encode(summary.PerplexityDataset)}</code></p>");
         builder.AppendLine("  <table>");
-        builder.AppendLine("    <thead><tr><th>Model</th><th>Response mean</th><th>Response tokens/sec</th><th>Training mean</th><th>Perplexity</th><th>Response allocated</th></tr></thead>");
+        builder.AppendLine("    <thead><tr><th>Model</th><th>Response mean</th><th>Response tokens/sec</th><th>Training mean</th><th>Perplexity</th><th>Response allocated</th><th>Estimated resident model memory</th></tr></thead>");
         builder.AppendLine("    <tbody>");
         foreach (var model in summary.Models)
         {
             builder.AppendLine(
-                $"      <tr><td>{Encode(model.ModelSpecifier)}</td><td>{Encode(model.ResponseMean ?? "-")}</td><td>{Encode(FormatNullableNumber(model.ResponseTokensPerSecond))}</td><td>{Encode(model.TrainingMean ?? "-")}</td><td>{Encode(FormatNullableNumber(model.WikiText2Perplexity))}</td><td>{Encode(FormatNullableMegabytes(model.ResponseAllocatedMegabytes))}</td></tr>");
+                $"      <tr><td>{Encode(model.ModelSpecifier)}</td><td>{Encode(model.ResponseMean ?? "-")}</td><td>{Encode(FormatNullableNumber(model.ResponseTokensPerSecond))}</td><td>{Encode(model.TrainingMean ?? "-")}</td><td>{Encode(FormatNullableNumber(model.WikiText2Perplexity))}</td><td>{Encode(FormatNullableMegabytes(model.ResponseAllocatedMegabytes))}</td><td>{Encode(FormatNullableMegabytes(model.EstimatedResidentModelMegabytes))}</td></tr>");
         }
 
         builder.AppendLine("    </tbody>");
@@ -651,6 +673,7 @@ public static class HostedAgentBenchmarkReportRunner
         builder.AppendLine("    <tbody>");
         builder.AppendLine($"      <tr><td>BitNet speedup vs traditional</td><td>{Encode(FormatNullableRatio(summary.BitNetSpeedupVersusTraditional))}</td></tr>");
         builder.AppendLine($"      <tr><td>BitNet memory reduction vs traditional</td><td>{Encode(FormatNullablePercent(summary.BitNetMemoryDeltaPercentVersusTraditional))}</td></tr>");
+        builder.AppendLine($"      <tr><td>BitNet resident model memory increase vs traditional</td><td>{Encode(FormatNullablePercent(summary.BitNetResidentModelMemoryIncreasePercentVersusTraditional))}</td></tr>");
         builder.AppendLine($"      <tr><td>BitNet quality improvement vs traditional</td><td>{Encode(FormatNullablePercent(summary.BitNetQualityDeltaPercentVersusTraditional))}</td></tr>");
         builder.AppendLine("    </tbody>");
         builder.AppendLine("  </table>");
@@ -671,6 +694,7 @@ public static class HostedAgentBenchmarkReportRunner
         builder.AppendLine("  <h3>Comparison charts</h3>");
         AppendBarChart(builder, "Response tokens/sec", summary.Models, throughputMax, 0d, static model => model.ResponseTokensPerSecond, FormatNullableNumber);
         AppendBarChart(builder, "Response allocated (MB)", summary.Models, memoryMax, 0d, static model => model.ResponseAllocatedMegabytes, FormatNullableMegabytes);
+        AppendBarChart(builder, "Estimated resident model memory (MB)", summary.Models, summary.Models.Max(static model => model.EstimatedResidentModelMegabytes ?? 0d), 0d, static model => model.EstimatedResidentModelMegabytes, FormatNullableMegabytes);
         AppendBarChart(builder, "Perplexity", summary.Models, perplexityMax, perplexityMin, static model => model.WikiText2Perplexity, FormatNullableNumber, lowerIsBetter: true);
     }
 

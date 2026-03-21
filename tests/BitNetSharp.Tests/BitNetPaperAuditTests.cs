@@ -23,6 +23,22 @@ public sealed class BitNetPaperAuditTests
     }
 
     [Fact]
+    public void PaperAuditExplainsResidentMemoryDeltaVersusTraditionalModel()
+    {
+        var model = BitNetBootstrap.CreatePaperModel(VerbosityLevel.Normal);
+
+        var report = BitNetPaperAuditor.CreateReport(model);
+
+        Assert.Contains(
+            report.Checks,
+            check => check.Area == "Memory"
+                && check.Status == BitNetPaperAuditStatus.Passed
+                && check.Details.Contains("traditional-local", StringComparison.Ordinal)
+                && check.Details.Contains("float32 training storage plus ternary sbyte inference storage", StringComparison.Ordinal)
+                && check.Details.Contains("BitLinear projections", StringComparison.Ordinal));
+    }
+
+    [Fact]
     public void PaperAuditCommandFormatterIncludesStatusSummary()
     {
         var model = BitNetBootstrap.CreatePaperModel(VerbosityLevel.Normal);

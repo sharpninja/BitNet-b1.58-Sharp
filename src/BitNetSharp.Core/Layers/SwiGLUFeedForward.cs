@@ -27,6 +27,11 @@ public sealed class SwiGLUFeedForward : Module
 
     public bool UsesSwiGLUActivation => true;
 
+    public long EstimateResidentParameterBytes() =>
+        GateProjection.EstimateResidentParameterBytes()
+        + UpProjection.EstimateResidentParameterBytes()
+        + DownProjection.EstimateResidentParameterBytes();
+
     public override float[,] Forward(float[,] input)
     {
         ArgumentNullException.ThrowIfNull(input);

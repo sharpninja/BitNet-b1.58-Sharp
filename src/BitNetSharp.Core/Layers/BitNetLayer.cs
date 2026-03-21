@@ -27,6 +27,12 @@ public sealed class BitNetLayer : Module
 
     public SwiGLUFeedForward FeedForward { get; }
 
+    public long EstimateResidentParameterBytes() =>
+        PreAttentionNorm.EstimateResidentParameterBytes()
+        + Attention.EstimateResidentParameterBytes()
+        + PreFeedForwardNorm.EstimateResidentParameterBytes()
+        + FeedForward.EstimateResidentParameterBytes();
+
     public override float[,] Forward(float[,] input)
     {
         ArgumentNullException.ThrowIfNull(input);

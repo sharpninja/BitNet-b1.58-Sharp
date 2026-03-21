@@ -80,6 +80,8 @@ public sealed class BitNetPaperModel
 
     public BitNetTokenizer Tokenizer => _tokenizer;
 
+    public long EstimateResidentParameterBytes() => Transformer.EstimateResidentParameterBytes();
+
     public static BitNetPaperModel CreateDefault(VerbosityLevel verbosity = VerbosityLevel.Normal) =>
         PrimeDefaultExamples(new(new BitNetOptions(BitNetTrainingCorpus.CreateDefaultVocabulary(), verbosity)));
 
