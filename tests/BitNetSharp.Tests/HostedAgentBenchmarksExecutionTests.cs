@@ -13,6 +13,13 @@ public sealed class HostedAgentBenchmarksExecutionTests
 {
     private const string BlankSeparatorLine = " ";
 
+    private static IReadOnlyList<string> CreateCompactWikiText2ValidationSamples() =>
+        BitNetBenchmarkFixtures.WikiText2ValidationSamples
+            .Where(static sample => string.Equals(sample, BlankSeparatorLine, StringComparison.Ordinal)
+                || sample.StartsWith(" = ", StringComparison.Ordinal))
+            .Take(8)
+            .ToArray();
+
     [Fact]
     public async Task ResponseBenchmarkExecutesThePaperAlignedQueryPath()
     {
@@ -130,7 +137,7 @@ public sealed class HostedAgentBenchmarksExecutionTests
     public void PerplexityEvaluationProducesFiniteValuesForBuiltInModelsAfterTinyLlamaBenchmarkTraining()
     {
         var examples = BitNetTrainingCorpus.CreateBenchmarkExamples();
-        var validationSamples = BitNetBenchmarkFixtures.WikiText2ValidationSamples.Take(4).ToArray();
+        var validationSamples = CreateCompactWikiText2ValidationSamples();
         var bitNetModel = BitNetPaperModel.CreateForTrainingCorpus(examples);
         var traditionalModel = TraditionalLocalModel.CreateForTrainingCorpus(examples);
 

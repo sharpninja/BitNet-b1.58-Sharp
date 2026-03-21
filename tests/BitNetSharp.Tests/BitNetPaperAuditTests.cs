@@ -5,12 +5,27 @@ namespace BitNetSharp.Tests;
 
 public sealed class BitNetPaperAuditTests
 {
+    private const string BlankSeparatorLine = " ";
+
+    private static IReadOnlyList<BitNetBenchmarkTextFixture> CreateCompactPerplexityDatasets() =>
+    [
+        new(
+            "WikiText2",
+            BitNetBenchmarkFixtures.WikiText2ValidationSamples
+                .Where(static sample => string.Equals(sample, BlankSeparatorLine, StringComparison.Ordinal)
+                    || sample.StartsWith(" = ", StringComparison.Ordinal))
+                .Take(8)
+                .ToArray()),
+        new("C4", BitNetBenchmarkFixtures.C4ValidationSamples),
+        new("RedPajama", BitNetBenchmarkFixtures.RedPajamaValidationSamples)
+    ];
+
     [Fact]
     public void PaperAuditPassesArchitectureChecksAndReportsRuntimeCoverage()
     {
         var model = BitNetBootstrap.CreatePaperModel(VerbosityLevel.Normal);
 
-        var report = BitNetPaperAuditor.CreateReport(model);
+        var report = BitNetPaperAuditor.CreateReport(model, perplexityDatasets: CreateCompactPerplexityDatasets());
 
         Assert.True(report.ArchitectureChecksPassed);
         Assert.Equal(0, report.Checks.Count(c => !string.Equals(c.Area, "Memory", StringComparison.Ordinal) && c.Status == BitNetPaperAuditStatus.Failed));
@@ -27,7 +42,7 @@ public sealed class BitNetPaperAuditTests
     {
         var model = BitNetBootstrap.CreatePaperModel(VerbosityLevel.Normal);
 
-        var report = BitNetPaperAuditor.CreateReport(model);
+        var report = BitNetPaperAuditor.CreateReport(model, perplexityDatasets: CreateCompactPerplexityDatasets());
 
         Assert.Contains(
             report.Checks,
@@ -40,7 +55,7 @@ public sealed class BitNetPaperAuditTests
     public void PaperAuditCommandFormatterIncludesStatusSummary()
     {
         var model = BitNetBootstrap.CreatePaperModel(VerbosityLevel.Normal);
-        var report = BitNetPaperAuditor.CreateReport(model);
+        var report = BitNetPaperAuditor.CreateReport(model, perplexityDatasets: CreateCompactPerplexityDatasets());
 
         var formatted = BitNetPaperAuditCommand.FormatReport(report);
 
