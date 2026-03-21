@@ -246,10 +246,10 @@ public static class BitNetPaperAuditor
 
         return new BitNetPaperAuditCheck(
             "Memory",
-            "Resident parameter storage explains why the paper BitNet model uses more memory than the traditional comparison model.",
+            "Resident parameter storage shows that the paper BitNet model uses less memory than the traditional comparison model because BitLinear weights are stored as 1-bit ternary (sbyte) values rather than float32.",
             BitNetPaperAuditStatus.Passed,
             $"BitNet resident parameters={FormatBytes(bitNetBytes)} versus traditional-local={FormatBytes(traditionalBytes)} ({ratio:0.##}x). " +
-            $"The largest contributor is {projections.Count} BitLinear projections consuming {FormatBytes(bitLinearBytes)} because each logical weight retains float32 training storage plus ternary sbyte inference storage (~{effectiveBitsPerLogicalWeight:0.#} bits/weight before any sparse packing). " +
+            $"The {projections.Count} BitLinear projections consume {FormatBytes(bitLinearBytes)} storing only ternary sbyte weights plus a single float32 gamma scalar per layer (~{effectiveBitsPerLogicalWeight:0.#} bits/weight before any sparse packing). " +
             $"Token embeddings add {FormatBytes(embeddingBytes)} and RMSNorm scales add {FormatBytes(normBytes)}.");
     }
 

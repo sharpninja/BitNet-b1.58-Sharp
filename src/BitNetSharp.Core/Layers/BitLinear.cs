@@ -7,7 +7,6 @@ public sealed class BitLinear : Module
     private const int ActivationQuantizationMaxMagnitude = 127;
     private const float WeightQuantizationEpsilon = 1e-6f;
 
-    private readonly float[,] _fullPrecisionWeights;
     private readonly sbyte[,] _ternaryWeights;
 
     public BitLinear(BitLinearConfig config)
@@ -15,7 +14,6 @@ public sealed class BitLinear : Module
         ArgumentNullException.ThrowIfNull(config);
 
         Config = config;
-        _fullPrecisionWeights = new float[config.OutputDimension, config.InputDimension];
         _ternaryWeights = new sbyte[config.OutputDimension, config.InputDimension];
     }
 
@@ -30,7 +28,7 @@ public sealed class BitLinear : Module
     public int ActivationQuantizationBitWidth => 8;
 
     public long EstimateResidentParameterBytes() =>
-        ((long)_fullPrecisionWeights.Length * sizeof(float)) + ((long)_ternaryWeights.Length * sizeof(sbyte));
+        ((long)_ternaryWeights.Length * sizeof(sbyte)) + sizeof(float);
 
     public override float[,] Forward(float[,] input)
     {
@@ -72,7 +70,6 @@ public sealed class BitLinear : Module
                 nameof(fullPrecisionWeights));
         }
 
-        Buffer.BlockCopy(fullPrecisionWeights, 0, _fullPrecisionWeights, 0, sizeof(float) * fullPrecisionWeights.Length);
         Gamma = ComputeAbsMean(fullPrecisionWeights);
 
         if (Gamma <= 0f)
