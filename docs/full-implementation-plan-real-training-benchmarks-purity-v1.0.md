@@ -6,6 +6,8 @@
 **Date:** March 20, 2026  
 **Status:** Ready-to-execute
 
+> **Dependency note:** WikiText-2 validation download and tokenization are being added in PR #27. This plan assumes that dependency merges first and then consumes those repository-local artifacts.
+
 ---
 
 ## Table of Contents
@@ -41,7 +43,7 @@ This plan replaces the stub training, expands benchmarks to include TinyLlama-1.
 
 - Existing `BitNetModel`, `BitLinear`, tokenizer, and SpecFlow tests
 - BenchmarkDotNet already added to the test project
-- WikiText-2 validation set downloaded and pre-tokenized
+- WikiText-2 validation set downloaded and pre-tokenized by PR #27
 
 ---
 

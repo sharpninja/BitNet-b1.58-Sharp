@@ -6,6 +6,8 @@
 **Date:** March 20, 2026  
 **Status:** Ready-to-execute blueprint
 
+> **Dependency note:** WikiText-2 validation download and tokenization are being added in PR #27. This plan assumes that dependency merges first and then reuses those repository-local artifacts.
+
 ---
 
 ## Table of Contents
@@ -42,7 +44,7 @@ Goal: Replace the current stub training with a **real, measurable training loop*
 ## 2. Prerequisites & Current State
 
 - Existing `BitNetModel` and `BitLinear` with STE forward pass already implemented
-- WikiText-2 raw validation set downloaded and tokenized (one-time step)
+- WikiText-2 raw validation set downloaded and tokenized by PR #27 (one-time dependency)
 - BenchmarkDotNet already added to the test project (from prior benchmark patches)
 
 ---
@@ -67,10 +69,10 @@ flowchart TD
 
 ## 4. Phase 1: WikiText-2 Data Loader & Tokenization (2–3 days)
 
-1. Download `wikitext-2-raw-v1.zip` from the official source.
-2. Add a tokenizer helper to convert raw text to token IDs by reusing the existing tokenizer.
+1. Consume the repository-local WikiText-2 artifacts added by PR #27.
+2. Add a tokenizer helper to convert raw text to token IDs by reusing the existing tokenizer where needed.
 3. Create a `WikiTextDataLoader` class that yields batches of shape `(batchSize, seqLen)`.
-4. Cache the tokenized validation set in the test project for fast loading.
+4. Cache or reuse the tokenized validation set in the test project for fast loading.
 
 ---
 
