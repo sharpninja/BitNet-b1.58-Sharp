@@ -11,6 +11,8 @@ public sealed class BenchmarkEnvironmentCollectionDefinition
 [Collection("Benchmark environment")]
 public sealed class HostedAgentBenchmarksExecutionTests
 {
+    private const string BlankSeparatorLine = " ";
+
     [Fact]
     public async Task ResponseBenchmarkExecutesThePaperAlignedQueryPath()
     {
@@ -155,17 +157,17 @@ public sealed class HostedAgentBenchmarksExecutionTests
         Assert.Equal(3760, validationSamples.Count);
         Assert.Equal(4358, testSamples.Count);
 
-        Assert.Equal(" ", trainingSamples[0]);
+        Assert.Equal(BlankSeparatorLine, trainingSamples[0]);
         Assert.Equal(" = Valkyria Chronicles III = ", trainingSamples[1]);
-        Assert.Equal(" ", trainingSamples[2]);
+        Assert.Equal(BlankSeparatorLine, trainingSamples[2]);
 
-        Assert.Equal(" ", validationSamples[0]);
+        Assert.Equal(BlankSeparatorLine, validationSamples[0]);
         Assert.Equal(" = Homarus gammarus = ", validationSamples[1]);
-        Assert.Equal(" ", validationSamples[2]);
+        Assert.Equal(BlankSeparatorLine, validationSamples[2]);
 
-        Assert.Equal(" ", testSamples[0]);
+        Assert.Equal(BlankSeparatorLine, testSamples[0]);
         Assert.Equal(" = Robert <unk> = ", testSamples[1]);
-        Assert.Equal(" ", testSamples[2]);
+        Assert.Equal(BlankSeparatorLine, testSamples[2]);
 
         Assert.Contains(validationSamples, static sample => sample.Contains("first New Zealand side to perform a <unk>", StringComparison.Ordinal));
         Assert.StartsWith(" Common starlings are trapped for food in some Mediterranean countries .", trainingSamples[^2], StringComparison.Ordinal);
@@ -173,11 +175,11 @@ public sealed class HostedAgentBenchmarksExecutionTests
         Assert.StartsWith(" The <unk> is credited with sparking a resurgence in the popularity of pool in the United States", testSamples[^2], StringComparison.Ordinal);
         Assert.Contains("Minnesota <unk>", testSamples[^2], StringComparison.Ordinal);
 
-        Assert.Equal(" ", trainingSamples[^1]);
+        Assert.Equal(BlankSeparatorLine, trainingSamples[^1]);
         Assert.Equal(" = = = Television roles = = = ", validationSamples[^3]);
-        Assert.Equal(" ", validationSamples[^2]);
-        Assert.Equal(" ", validationSamples[^1]);
-        Assert.Equal(" ", testSamples[^1]);
+        Assert.Equal(BlankSeparatorLine, validationSamples[^2]);
+        Assert.Equal(BlankSeparatorLine, validationSamples[^1]);
+        Assert.Equal(BlankSeparatorLine, testSamples[^1]);
     }
 
     [Fact]

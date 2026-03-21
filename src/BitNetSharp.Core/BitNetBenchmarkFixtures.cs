@@ -6,6 +6,7 @@ public sealed record BitNetBenchmarkTextFixture(
 
 public static class BitNetBenchmarkFixtures
 {
+    private const string BlankSeparatorLine = " ";
     private static readonly Lazy<IReadOnlyList<string>> WikiText2TrainingSamplesLazy = new(() => LoadWikiText2Split("wiki.train.tokens"));
     private static readonly Lazy<IReadOnlyList<string>> WikiText2ValidationSamplesLazy = new(() => LoadWikiText2Split("wiki.valid.tokens"));
     private static readonly Lazy<IReadOnlyList<string>> WikiText2TestSamplesLazy = new(() => LoadWikiText2Split("wiki.test.tokens"));
@@ -46,6 +47,6 @@ public static class BitNetBenchmarkFixtures
             lines.Add(line);
         }
 
-        return lines;
+        return lines.AsReadOnly();
     }
 }
