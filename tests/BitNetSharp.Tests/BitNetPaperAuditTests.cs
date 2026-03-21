@@ -10,7 +10,7 @@ public sealed class BitNetPaperAuditTests
     {
         var model = BitNetBootstrap.CreatePaperModel(VerbosityLevel.Normal);
 
-        var report = BitNetPaperAuditor.CreateReport(model);
+        var report = BitNetPaperAuditor.CreateReport(model, perplexityDatasets: BenchmarkFixtureTestData.CreateCompactPerplexityDatasets());
 
         Assert.True(report.ArchitectureChecksPassed);
         Assert.Equal(0, report.Checks.Count(c => !string.Equals(c.Area, "Memory", StringComparison.Ordinal) && c.Status == BitNetPaperAuditStatus.Failed));
@@ -27,7 +27,7 @@ public sealed class BitNetPaperAuditTests
     {
         var model = BitNetBootstrap.CreatePaperModel(VerbosityLevel.Normal);
 
-        var report = BitNetPaperAuditor.CreateReport(model);
+        var report = BitNetPaperAuditor.CreateReport(model, perplexityDatasets: BenchmarkFixtureTestData.CreateCompactPerplexityDatasets());
 
         Assert.Contains(
             report.Checks,
@@ -40,7 +40,7 @@ public sealed class BitNetPaperAuditTests
     public void PaperAuditCommandFormatterIncludesStatusSummary()
     {
         var model = BitNetBootstrap.CreatePaperModel(VerbosityLevel.Normal);
-        var report = BitNetPaperAuditor.CreateReport(model);
+        var report = BitNetPaperAuditor.CreateReport(model, perplexityDatasets: BenchmarkFixtureTestData.CreateCompactPerplexityDatasets());
 
         var formatted = BitNetPaperAuditCommand.FormatReport(report);
 

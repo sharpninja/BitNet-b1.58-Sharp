@@ -9,6 +9,7 @@ BitNet b1.58 Sharp is a .NET 10 C# reference implementation of the paper-aligned
 - Microsoft Agent Framework-oriented hosting in `/src/BitNetSharp.App`
 - BenchmarkDotNet-based local model comparison in `/src/BitNetSharp.App`
 - DataGen synthetic dataset generation from JSON seed examples
+- Chain-Bucket Speculative Decoding and Training-Time Sequence Compression via the bucketing subsystem
 - Default American English interaction behavior
 - Seeded transformer inspection and ternary weight summaries
 - GitBook-formatted project documentation in `/docs`
@@ -27,6 +28,8 @@ dotnet test BitNet-b1.58-Sharp.slnx
 
 - [Architecture](architecture.md)
 - [Benchmarking and model comparison](benchmarking.md)
+- [Bucketing guide](bucketing-guide.md)
+- [Bucketing implementation plan v1.0](bucketing-implementation-plan-v1.0.md)
 - [DataGen guide](datagen-guide.md)
 - [Implementation plan](implementation-plan-v3.md)
 - [Full implementation plan: real training + benchmarks + purity v1.0](full-implementation-plan-real-training-benchmarks-purity-v1.0.md)

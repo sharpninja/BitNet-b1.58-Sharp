@@ -68,6 +68,18 @@ dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- datagen --dom
 
 This command reads optional seed examples, merges the built-in pattern prompts with the repository template, and writes JSONL output for downstream local fine-tuning or evaluation. Optional flags include `--task-type`, `--constraint`, `--constraints`, `--output-schema`, `--template`, `--candidate-count`, `--min-quality`, `--max-tokens`, and `--lora`. The emitted JSONL includes both the core generator fields (`seedInstruction`, `variation`, `generatorModel`, `tags`) and the merged prompt metadata (`prompt`, `taskType`, `qualityScore`, `generationTimestamp`, `groundingContext`). See the [DataGen guide](datagen-guide.md) for accepted seed aliases and the merged output schema.
 
+## Refresh full TinyLlama and WikiText-2 corpora
+
+```bash
+python scripts/process_full_corpora.py \
+  --tinyllama-source /absolute/path/to/tinyllama.jsonl \
+  --wikitext-source-dir /absolute/path/to/wikitext-2 \
+  --commit \
+  --commit-message "Vendor full TinyLlama and WikiText-2 corpora"
+```
+
+The script writes normalized TinyLlama train/validation/test JSONL files under `src/BitNetSharp.Core/Data/TinyLlama/`, refreshes the vendored WikiText-2 token files under `src/BitNetSharp.Core/Data/WikiText2/`, preserves the blank separator rows from the tokenized WikiText-2 corpus, and can optionally stage and commit the updated data files from your local clone. If you do not already have local WikiText-2 files, pass `--download-wikitext` to pull the tokenized `wiki.train.tokens`, `wiki.valid.tokens`, and `wiki.test.tokens` files from the default public source before writing them into the repository.
+
 ## Train the traditional comparison model
 
 ```bash

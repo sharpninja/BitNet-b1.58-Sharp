@@ -1,3 +1,4 @@
+using BitNetSharp.Core.Bucketing;
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Quantization;
 
@@ -26,6 +27,24 @@ public sealed class BitNetPaperModel
     public BitNetPaperModel(IEnumerable<TrainingExample> trainingExamples, VerbosityLevel verbosity = VerbosityLevel.Normal, BitNetConfig? config = null, int seed = 42)
         : this(
             new BitNetOptions(BitNetTrainingCorpus.CreateVocabulary(trainingExamples), verbosity),
+            config,
+            seed)
+    {
+    }
+
+    public BitNetPaperModel(
+        IEnumerable<TrainingExample> trainingExamples,
+        VerbosityLevel verbosity,
+        bool enableChainBuckets,
+        bool enableSequenceCompression,
+        BitNetConfig? config = null,
+        int seed = 42)
+        : this(
+            new BitNetOptions(
+                BitNetTrainingCorpus.CreateVocabulary(trainingExamples),
+                verbosity,
+                EnableChainBuckets: enableChainBuckets,
+                EnableSequenceCompression: enableSequenceCompression),
             config,
             seed)
     {
@@ -76,19 +95,69 @@ public sealed class BitNetPaperModel
 
     public BitNetTransformer Transformer { get; }
 
+    /// <summary>
+    /// Optional chain-bucket table used for inference-time speculative decoding and
+    /// training-time sequence compression. Populated via <see cref="LoadBucketTable"/>.
+    /// </summary>
+    public ChainBucketTable? BucketTable { get; private set; }
+
     public string ModelId => "bitnet-b1.58-sharp";
 
     public BitNetTokenizer Tokenizer => _tokenizer;
 
     public long EstimateResidentParameterBytes() => Transformer.EstimateResidentParameterBytes();
 
-    public static BitNetPaperModel CreateDefault(VerbosityLevel verbosity = VerbosityLevel.Normal) =>
-        PrimeDefaultExamples(new(new BitNetOptions(BitNetTrainingCorpus.CreateDefaultVocabulary(), verbosity)));
+    /// <summary>
+    /// Mines chain buckets from the provided training examples using the model's tokenizer,
+    /// builds a <see cref="ChainBucketTable"/>, attaches it to this model, and returns it.
+    /// Call this after model construction to enable chain-bucket speculative decoding and
+    /// training-time sequence compression.
+    /// </summary>
+    public ChainBucketTable MineAndLoadBuckets(IEnumerable<TrainingExample> examples)
+    {
+        ArgumentNullException.ThrowIfNull(examples);
+
+        var sequences = examples
+            .SelectMany(ex => new[]
+            {
+                EncodeTokenIds(ex.Prompt),
+                EncodeTokenIds(ex.Response, prependBeginToken: false)
+            })
+            .Cast<IReadOnlyList<int>>();
+
+        var table = BucketMiner.Mine(sequences);
+        LoadBucketTable(table);
+        return table;
+    }
+
+    /// <summary>
+    /// Attaches a chain-bucket table mined from a tokenized corpus so that
+    /// inference-time speculative decoding and training-time compression are available
+    /// when <see cref="BitNetOptions.EnableChainBuckets"/> or
+    /// <see cref="BitNetOptions.EnableSequenceCompression"/> is set.
+    /// </summary>
+    public void LoadBucketTable(ChainBucketTable table)
+    {
+        ArgumentNullException.ThrowIfNull(table);
+        BucketTable = table;
+    }
+
+    public static BitNetPaperModel CreateDefault(
+        VerbosityLevel verbosity = VerbosityLevel.Normal,
+        bool enableChainBuckets = false,
+        bool enableSequenceCompression = false) =>
+        PrimeDefaultExamples(new(new BitNetOptions(
+            BitNetTrainingCorpus.CreateDefaultVocabulary(),
+            verbosity,
+            EnableChainBuckets: enableChainBuckets,
+            EnableSequenceCompression: enableSequenceCompression)));
 
     public static BitNetPaperModel CreateForTrainingCorpus(
         IEnumerable<TrainingExample> trainingExamples,
-        VerbosityLevel verbosity = VerbosityLevel.Normal) =>
-        new(trainingExamples, verbosity);
+        VerbosityLevel verbosity = VerbosityLevel.Normal,
+        bool enableChainBuckets = false,
+        bool enableSequenceCompression = false) =>
+        new(trainingExamples, verbosity, enableChainBuckets, enableSequenceCompression);
 
     public TrainingReport Train(IEnumerable<TrainingExample> examples, int epochs = 3, float learningRate = 0.05f)
     {
@@ -123,7 +192,15 @@ public sealed class BitNetPaperModel
 
                     _memorizedResponses[NormalizePromptKey(example.Prompt)] = [.. targetIds];
                     var targetId = targetIds[0];
-                    var hiddenStates = ForwardHiddenStates(promptIds);
+
+                    // Training-time sequence compression: replace chain n-grams in the
+                    // prompt context with their first token to shorten the sequence before
+                    // the forward pass, reducing effective sequence length per step.
+                    var contextIds = Options.EnableSequenceCompression && BucketTable is not null
+                        ? CompressSequence(promptIds)
+                        : promptIds;
+
+                    var hiddenStates = ForwardHiddenStates(contextIds);
                     var features = GetLastRow(hiddenStates);
                     var probabilities = ComputeProbabilities(weights, features);
 
@@ -217,6 +294,73 @@ public sealed class BitNetPaperModel
                     if (Options.Verbosity == VerbosityLevel.Verbose)
                     {
                         diagnostics.Add($"Prediction: token={_idToToken[nextToken.TokenId]}, logit={nextToken.Logit:0.###}");
+                    }
+
+                    // Chain-bucket speculative decoding: after each normally generated token,
+                    // check if the current context tail matches a known chain prefix.
+                    // If so, speculatively accept chain tokens that the model also predicts,
+                    // updating the KV context once per accepted chain rather than per token.
+                    if (Options.EnableChainBuckets && BucketTable is not null
+                        && BucketTable.TryLookupPrefix(contextTokenIds, out var chain)
+                        && chain is not null)
+                    {
+                        // Determine how many tokens at the end of the current context
+                        // actually match the beginning of this chain (up to 3 tokens).
+                        var maxPrefix = Math.Min(3, Math.Min(contextTokenIds.Count, chain.TokenIds.Length));
+                        var matchedPrefixLen = 0;
+                        for (var k = maxPrefix; k >= 1; k--)
+                        {
+                            var match = true;
+                            var contextStart = contextTokenIds.Count - k;
+                            for (var i = 0; i < k; i++)
+                            {
+                                if (contextTokenIds[contextStart + i] != chain.TokenIds[i])
+                                {
+                                    match = false;
+                                    break;
+                                }
+                            }
+
+                            if (match)
+                            {
+                                matchedPrefixLen = k;
+                                break;
+                            }
+                        }
+
+                        // If nothing actually matches, skip speculative decoding for this step.
+                        if (matchedPrefixLen > 0)
+                        {
+                            for (var ci = matchedPrefixLen; ci < chain.TokenIds.Length && step < maxGeneratedTokens - 1; ci++)
+                            {
+                                var speculativeId = chain.TokenIds[ci];
+                                if (speculativeId == _endTokenId || speculativeId == _tokenToId[BitNetTokenizer.UnknownToken])
+                                {
+                                    break;
+                                }
+
+                                // Verification: confirm the model also predicts this token from current context.
+                                var verifyToken = SelectNextToken(Transformer.Forward(contextTokenIds));
+                                if (verifyToken.TokenId != speculativeId)
+                                {
+                                    break;
+                                }
+
+                                generatedTokenIds.Add(speculativeId);
+                                contextTokenIds.Add(speculativeId);
+                                if (contextTokenIds.Count > Config.MaxSequenceLength)
+                                {
+                                    contextTokenIds.RemoveAt(0);
+                                }
+
+                                step++;
+
+                                if (Options.Verbosity == VerbosityLevel.Verbose)
+                                {
+                                    diagnostics.Add($"Speculation accepted: token={_idToToken[speculativeId]}, chain={chain.ChainId}");
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -465,6 +609,40 @@ public sealed class BitNetPaperModel
     }
 
     private string NormalizePromptKey(string prompt) => string.Join(' ', _tokenizer.Tokenize(prompt));
+
+    /// <summary>
+    /// Compresses a token sequence by replacing n-gram chains (from <see cref="BucketTable"/>)
+    /// with just the first token of each chain. This reduces effective sequence length before
+    /// the forward pass during training-time sequence compression.
+    /// </summary>
+    private IReadOnlyList<int> CompressSequence(IReadOnlyList<int> tokenIds)
+    {
+        if (BucketTable is null || tokenIds.Count == 0)
+        {
+            return tokenIds;
+        }
+
+        var result = new List<int>(tokenIds.Count);
+        var i = 0;
+        while (i < tokenIds.Count)
+        {
+            // Use the prefix-indexed TryMatchAt for O(1) candidate lookup + O(chain_len) verification
+            // instead of a linear scan over all buckets.
+            if (BucketTable.TryMatchAt(tokenIds, i, out var bestMatch) && bestMatch is not null)
+            {
+                // Replace the matched n-gram with its first token only, shortening the sequence.
+                result.Add(bestMatch.TokenIds[0]);
+                i += bestMatch.TokenIds.Length;
+            }
+            else
+            {
+                result.Add(tokenIds[i]);
+                i++;
+            }
+        }
+
+        return result;
+    }
 
     private IEnumerable<Layers.BitLinear> EnumerateBitLinearLayers()
     {

@@ -67,7 +67,10 @@ public static class BitNetPaperAuditor
         ("StoryCloze", "show visualization choose visualize or chart", "visualize")
     ];
 
-    public static BitNetPaperAuditReport CreateReport(BitNetPaperModel model, string prompt = DefaultPrompt)
+    public static BitNetPaperAuditReport CreateReport(
+        BitNetPaperModel model,
+        string prompt = DefaultPrompt,
+        IReadOnlyList<BitNetBenchmarkTextFixture>? perplexityDatasets = null)
     {
         ArgumentNullException.ThrowIfNull(model);
 
@@ -80,7 +83,7 @@ public static class BitNetPaperAuditor
         var weightStats = model.GetTernaryWeightStats();
         var entropy = CalculateTernaryEntropy(weightStats);
         var trainingProbe = RunTrainingProbe(model);
-        var perplexityResults = EvaluatePerplexity(model);
+        var perplexityResults = EvaluatePerplexity(model, perplexityDatasets ?? BitNetBenchmarkFixtures.PerplexityDatasets);
         var zeroShotResults = EvaluateZeroShot(model);
         var checkpointValidation = BitNetPaperCheckpoint.ValidateRoundTrip(model, prompt);
         var comparableTraditionalModel = new TraditionalLocalModel(model.Options);
@@ -318,8 +321,10 @@ public static class BitNetPaperAuditor
         return new BitNetPaperTrainingProbeResult(examples.Count, report.Epochs, report.AverageLoss);
     }
 
-    private static IReadOnlyList<BitNetPaperPerplexityDatasetResult> EvaluatePerplexity(BitNetPaperModel model) =>
-        BitNetBenchmarkFixtures.PerplexityDatasets
+    private static IReadOnlyList<BitNetPaperPerplexityDatasetResult> EvaluatePerplexity(
+        BitNetPaperModel model,
+        IReadOnlyList<BitNetBenchmarkTextFixture> datasets) =>
+        datasets
             .Select(fixture =>
             {
                 var totalLoss = 0d;

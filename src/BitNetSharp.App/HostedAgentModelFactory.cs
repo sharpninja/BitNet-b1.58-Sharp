@@ -10,7 +10,9 @@ public static class HostedAgentModelFactory
     public static IHostedAgentModel Create(
         string? specifier,
         VerbosityLevel verbosity = VerbosityLevel.Normal,
-        IEnumerable<TrainingExample>? trainingExamples = null)
+        IEnumerable<TrainingExample>? trainingExamples = null,
+        bool enableChainBuckets = false,
+        bool enableSequenceCompression = false)
     {
         var value = string.IsNullOrWhiteSpace(specifier)
             ? DefaultModelId
@@ -25,8 +27,8 @@ public static class HostedAgentModelFactory
         {
             DefaultModelId => new BitNetHostedAgentModel(
                 trainingExamples is null
-                    ? BitNetBootstrap.CreatePaperModel(verbosity)
-                    : BitNetBootstrap.CreatePaperModel(trainingExamples, verbosity)),
+                    ? BitNetBootstrap.CreatePaperModel(verbosity, enableChainBuckets, enableSequenceCompression)
+                    : BitNetBootstrap.CreatePaperModel(trainingExamples, verbosity, enableChainBuckets, enableSequenceCompression)),
             TraditionalLocalModelId => new TraditionalLocalHostedAgentModel(verbosity, trainingExamples),
             _ => throw new ArgumentException(
                 $"Unknown model specifier '{value}'. Use '{DefaultModelId}', '{TraditionalLocalModelId}', or an absolute path to a local command model JSON file.",
