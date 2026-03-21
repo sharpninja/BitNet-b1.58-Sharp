@@ -1,8 +1,9 @@
 using BitNetSharp.Core;
+using BitNetSharp.Core.Quantization;
 
 namespace BitNetSharp.App;
 
-public sealed class TraditionalLocalHostedAgentModel : IHostedAgentModel, ITrainableHostedAgentModel
+public sealed class TraditionalLocalHostedAgentModel : IHostedAgentModel, IInspectableHostedAgentModel, ITrainableHostedAgentModel
 {
     private readonly string _trainingCorpusDescription;
 
@@ -50,6 +51,8 @@ public sealed class TraditionalLocalHostedAgentModel : IHostedAgentModel, ITrain
         var result = Model.GenerateResponse(prompt, maxOutputTokens);
         return Task.FromResult(new HostedAgentModelResponse(result.ResponseText, result.Diagnostics));
     }
+
+    public TernaryWeightStats GetTernaryWeightStats() => Model.GetTernaryWeightStats();
 
     public void Train(IEnumerable<TrainingExample> examples, int epochs = 1)
     {

@@ -37,7 +37,7 @@ public sealed class BitNetVisualizer
             Environment.NewLine,
             new[]
             {
-                "Ternary weight distribution",
+                "Weight sign distribution",
                 FormatBar("-1", trainingReport.NegativeWeights, max),
                 FormatBar(" 0", trainingReport.ZeroWeights, max),
                 FormatBar("+1", trainingReport.PositiveWeights, max)

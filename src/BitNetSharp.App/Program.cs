@@ -66,7 +66,7 @@ switch (command)
         }
         else
         {
-            Console.WriteLine($"Model '{model.ModelId}' does not expose BitNet ternary weight inspection.");
+            Console.WriteLine($"Model '{model.ModelId}' does not expose repository weight-sign inspection.");
         }
         break;
 
@@ -119,7 +119,7 @@ static string FormatWeightHistogram(TernaryWeightStats stats)
     return string.Join(
         Environment.NewLine,
         [
-            "Ternary weight distribution",
+            "Weight sign distribution",
             FormatBar("-1", stats.NegativeCount, max, scale),
             FormatBar(" 0", stats.ZeroCount, max, scale),
             FormatBar("+1", stats.PositiveCount, max, scale)

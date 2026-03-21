@@ -11,7 +11,7 @@ dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- visualize
 dotnet run --project src/BitNetSharp.App/BitNetSharp.App.csproj -- paper-audit
 ```
 
-This command prints the current paper-model configuration and an aggregated ternary weight histogram across every `BitLinear` projection in the seeded transformer.
+This command prints the current model configuration and an aggregated signed-weight histogram for the selected built-in model, so the seeded transformer and `traditional-local` expose the same comparison-friendly inspection surface.
 The `paper-audit` command adds a structured checklist on top of that inspection output so the repository can report which paper-aligned architecture requirements are currently implemented and which end-to-end reproduction items are still pending.
 
 ## Inspect next-token predictions

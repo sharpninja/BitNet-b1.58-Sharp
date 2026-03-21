@@ -154,6 +154,23 @@ public sealed class HostedAgentBenchmarksExecutionTests
         Assert.Equal("tinyllama", ((TraditionalLocalHostedAgentModel)traditional).Model.Tokenizer.Normalize("tinyllama"));
     }
 
+    [Fact]
+    public void BuiltInModelsPreserveTrainedResponsesAcrossCheckpointRoundTrips()
+    {
+        var examples = BitNetTrainingCorpus.CreateBenchmarkExamples();
+        var bitNetModel = BitNetPaperModel.CreateForTrainingCorpus(examples, VerbosityLevel.Quiet);
+        var traditionalModel = TraditionalLocalModel.CreateForTrainingCorpus(examples, VerbosityLevel.Quiet);
+
+        bitNetModel.Train(examples, epochs: 1);
+        traditionalModel.Train(examples, epochs: TraditionalLocalModel.DefaultTrainingEpochs);
+
+        var bitNetRoundTrip = BitNetPaperCheckpoint.ValidateRoundTrip(bitNetModel, "what does the paper model train on");
+        var traditionalRoundTrip = TraditionalLocalCheckpoint.ValidateRoundTrip(traditionalModel, "what does the paper model train on");
+
+        Assert.True(bitNetRoundTrip.ResponsesMatch);
+        Assert.True(traditionalRoundTrip.ResponsesMatch);
+    }
+
     private static async Task WithBenchmarkOptionsAsync(HostedAgentBenchmarkOptions options, Func<Task> assertion)
     {
         var originalValue = Environment.GetEnvironmentVariable(HostedAgentBenchmarkOptions.EnvironmentVariableName);
