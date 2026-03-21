@@ -36,7 +36,7 @@ if (command == "datagen")
     return;
 }
 
-using var model = HostedAgentModelFactory.Create(modelSpecifier, verbosity, enableChainBuckets: enableBucketing);
+using var model = HostedAgentModelFactory.Create(modelSpecifier, verbosity, enableChainBuckets: enableBucketing, enableSequenceCompression: enableBucketing);
 
 // When --enable-bucketing is requested for the built-in BitNet model, mine chain buckets
 // from the default training corpus and attach them so speculative decoding and sequence

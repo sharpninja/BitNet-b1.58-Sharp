@@ -203,4 +203,27 @@ public sealed class BucketMinerTests
         Assert.False(found);
         Assert.Null(result);
     }
+
+    [Fact]
+    public void ChainBucketTable_TryMatchAt_ThrowsWhenStartIndexOutOfRange()
+    {
+        var bucket = new ChainBucket(0, [10, 20, 30], 1f);
+        var table = new ChainBucketTable([bucket]);
+
+        Assert.Throws<ArgumentOutOfRangeException>(() => table.TryMatchAt([10, 20, 30], -1, out _));
+        Assert.Throws<ArgumentOutOfRangeException>(() => table.TryMatchAt([10, 20, 30], 3, out _));
+    }
+
+    [Fact]
+    public void ChainBucket_TokenIdsIsCopiedOnConstruction()
+    {
+        var source = new int[] { 10, 20, 30 };
+        var bucket = new ChainBucket(0, source, 1f);
+
+        // Mutating the original array should not affect the bucket.
+        source[0] = 99;
+
+        Assert.Equal(10, bucket.TokenIds[0]);
+    }
+
 }

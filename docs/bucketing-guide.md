@@ -76,7 +76,6 @@ The following properties are added to `BitNetOptions`:
 | Property | Default | Description |
 |----------|---------|-------------|
 | `EnableChainBuckets` | `false` | Activates chain-bucket speculative decoding during inference. |
-| `MaxChainLength` | `8` | Maximum n-gram length considered during bucket mining and speculative expansion. |
 | `EnableSequenceCompression` | `false` | Activates training-time prompt compression using chain buckets. |
 
 ---
@@ -105,6 +104,6 @@ Key source files:
 | `src/BitNetSharp.Core/Bucketing/ChainBucket.cs` | Record for a single n-gram chain bucket. |
 | `src/BitNetSharp.Core/Bucketing/ChainBucketTable.cs` | 256-entry lookup table with prefix matching. |
 | `src/BitNetSharp.Core/Bucketing/BucketMiner.cs` | N-gram mining and scoring service. |
-| `src/BitNetSharp.Core/BitNetOptions.cs` | `EnableChainBuckets`, `MaxChainLength`, `EnableSequenceCompression`. |
+| `src/BitNetSharp.Core/BitNetOptions.cs` | `EnableChainBuckets`, `EnableSequenceCompression`. |
 | `src/BitNetSharp.Core/BitNetPaperModel.cs` | Integrated speculative decoding and compression. |
 | `src/BitNetSharp.App/Program.cs` | `--enable-bucketing` CLI flag. |

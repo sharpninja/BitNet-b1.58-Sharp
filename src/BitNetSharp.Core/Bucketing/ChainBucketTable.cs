@@ -102,6 +102,11 @@ public sealed class ChainBucketTable
     {
         ArgumentNullException.ThrowIfNull(sequence);
 
+        if ((uint)startIndex >= (uint)sequence.Count)
+        {
+            throw new ArgumentOutOfRangeException(nameof(startIndex));
+        }
+
         chain = null;
         var remaining = sequence.Count - startIndex;
         if (remaining < 2)

@@ -6,5 +6,4 @@ public sealed record BitNetOptions(
     int MaxResponseTokens = 24,
     string PrimaryLanguage = "en-US",
     bool EnableChainBuckets = false,
-    int MaxChainLength = 8,
     bool EnableSequenceCompression = false);

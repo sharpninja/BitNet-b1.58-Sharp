@@ -304,34 +304,61 @@ public sealed class BitNetPaperModel
                         && BucketTable.TryLookupPrefix(contextTokenIds, out var chain)
                         && chain is not null)
                     {
-                        var prefixLen = Math.Min(3, contextTokenIds.Count);
-                        for (var ci = prefixLen; ci < chain.TokenIds.Length && step < maxGeneratedTokens - 1; ci++)
+                        // Determine how many tokens at the end of the current context
+                        // actually match the beginning of this chain (up to 3 tokens).
+                        var maxPrefix = Math.Min(3, Math.Min(contextTokenIds.Count, chain.TokenIds.Length));
+                        var matchedPrefixLen = 0;
+                        for (var k = maxPrefix; k >= 1; k--)
                         {
-                            var speculativeId = chain.TokenIds[ci];
-                            if (speculativeId == _endTokenId || speculativeId == _tokenToId[BitNetTokenizer.UnknownToken])
+                            var match = true;
+                            var contextStart = contextTokenIds.Count - k;
+                            for (var i = 0; i < k; i++)
                             {
+                                if (contextTokenIds[contextStart + i] != chain.TokenIds[i])
+                                {
+                                    match = false;
+                                    break;
+                                }
+                            }
+
+                            if (match)
+                            {
+                                matchedPrefixLen = k;
                                 break;
                             }
+                        }
 
-                            // Verification: confirm the model also predicts this token from current context.
-                            var verifyToken = SelectNextToken(Transformer.Forward(contextTokenIds));
-                            if (verifyToken.TokenId != speculativeId)
+                        // If nothing actually matches, skip speculative decoding for this step.
+                        if (matchedPrefixLen > 0)
+                        {
+                            for (var ci = matchedPrefixLen; ci < chain.TokenIds.Length && step < maxGeneratedTokens - 1; ci++)
                             {
-                                break;
-                            }
+                                var speculativeId = chain.TokenIds[ci];
+                                if (speculativeId == _endTokenId || speculativeId == _tokenToId[BitNetTokenizer.UnknownToken])
+                                {
+                                    break;
+                                }
 
-                            generatedTokenIds.Add(speculativeId);
-                            contextTokenIds.Add(speculativeId);
-                            if (contextTokenIds.Count > Config.MaxSequenceLength)
-                            {
-                                contextTokenIds.RemoveAt(0);
-                            }
+                                // Verification: confirm the model also predicts this token from current context.
+                                var verifyToken = SelectNextToken(Transformer.Forward(contextTokenIds));
+                                if (verifyToken.TokenId != speculativeId)
+                                {
+                                    break;
+                                }
 
-                            step++;
+                                generatedTokenIds.Add(speculativeId);
+                                contextTokenIds.Add(speculativeId);
+                                if (contextTokenIds.Count > Config.MaxSequenceLength)
+                                {
+                                    contextTokenIds.RemoveAt(0);
+                                }
 
-                            if (Options.Verbosity == VerbosityLevel.Verbose)
-                            {
-                                diagnostics.Add($"Speculation accepted: token={_idToToken[speculativeId]}, chain={chain.ChainId}");
+                                step++;
+
+                                if (Options.Verbosity == VerbosityLevel.Verbose)
+                                {
+                                    diagnostics.Add($"Speculation accepted: token={_idToToken[speculativeId]}, chain={chain.ChainId}");
+                                }
                             }
                         }
                     }

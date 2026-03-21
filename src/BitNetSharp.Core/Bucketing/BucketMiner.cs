@@ -69,7 +69,7 @@ public static class BucketMiner
             double conditionalProb;
             if (key.Length > 1)
             {
-                var prefix = new NGramKey(key.Tokens, 0, key.Length - 1);
+                var prefix = new NGramKey(key.Tokens, key.Start, key.Length - 1);
                 conditionalProb = prefixCounts.TryGetValue(prefix, out var prefixFreq) && prefixFreq > 0
                     ? freq / (double)prefixFreq
                     : 1d;
