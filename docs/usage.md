@@ -71,7 +71,7 @@ This command reads optional seed examples, merges the built-in pattern prompts w
 ## Refresh full TinyLlama and WikiText-2 corpora
 
 ```bash
-python /home/runner/work/BitNet-b1.58-Sharp/BitNet-b1.58-Sharp/scripts/process_full_corpora.py \
+python scripts/process_full_corpora.py \
   --tinyllama-source /absolute/path/to/tinyllama.jsonl \
   --wikitext-source-dir /absolute/path/to/wikitext-2 \
   --commit \
