@@ -30,6 +30,7 @@ stages:
         displayName: Restore, build, test, and pack
         pool:
           name: Default
+        timeoutInMinutes: 0
         steps:
           - checkout: self
             fetchDepth: 0
@@ -103,6 +104,7 @@ stages:
         displayName: Push tagged packages to NuGet feed
         pool:
           name: Default
+        timeoutInMinutes: 0
         steps:
           - checkout: self
 
