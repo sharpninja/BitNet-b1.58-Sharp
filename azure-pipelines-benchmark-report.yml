@@ -34,6 +34,12 @@ stages:
               packageType: sdk
               useGlobalJson: true
 
+          - task: UseDotNet@2
+            displayName: Install .NET 9 runtime for multi-target tests
+            inputs:
+              packageType: runtime
+              version: 9.0.x
+
           - script: dotnet restore "$(SolutionFile)"
             displayName: Restore
 

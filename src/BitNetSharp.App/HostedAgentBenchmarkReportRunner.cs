@@ -1,6 +1,7 @@
 using System.Net;
 using System.Text;
 using System.Text.Json;
+using System.Globalization;
 using BitNetSharp.Core;
 
 namespace BitNetSharp.App;
@@ -883,15 +884,20 @@ public static class HostedAgentBenchmarkReportRunner
     private static string EscapeMarkdownInline(string value) =>
         value.Replace("|", "\\|", StringComparison.Ordinal).Replace(Environment.NewLine, "<br />", StringComparison.Ordinal);
 
-    private static string FormatNullableNumber(double? value) => value is null ? "-" : value.Value.ToString("0.##");
+    private static string FormatNullableNumber(double? value) =>
+        value is null ? "-" : value.Value.ToString("0.##", CultureInfo.InvariantCulture);
 
-    private static string FormatNullableMegabytes(double? value) => value is null ? "-" : $"{value.Value:0.##} MB";
+    private static string FormatNullableMegabytes(double? value) =>
+        value is null ? "-" : $"{value.Value.ToString("0.##", CultureInfo.InvariantCulture)} MB";
 
-    private static string FormatNullablePercent(double? value) => value is null ? "-" : $"{value.Value:0.##}%";
+    private static string FormatNullablePercent(double? value) =>
+        value is null ? "-" : $"{value.Value.ToString("0.##", CultureInfo.InvariantCulture)}%";
 
-    private static string FormatNullableRate(double? value) => value is null ? "-" : value.Value.ToString("P1");
+    private static string FormatNullableRate(double? value) =>
+        value is null ? "-" : $"{(value.Value * 100d).ToString("0.0", CultureInfo.InvariantCulture)}%";
 
-    private static string FormatNullableRatio(double? value) => value is null ? "-" : $"{value.Value:0.##}x";
+    private static string FormatNullableRatio(double? value) =>
+        value is null ? "-" : $"{value.Value.ToString("0.##", CultureInfo.InvariantCulture)}x";
 
     private static string Encode(string value) => WebUtility.HtmlEncode(value);
 }
