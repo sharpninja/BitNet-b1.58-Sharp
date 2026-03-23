@@ -6,17 +6,28 @@ Saves pre-tokenized data directly into the repository under data/.
 """
 
 import argparse
+import json
 import shutil
 import struct
 import sys
+import time
 from pathlib import Path
 from typing import Any, Callable
-from urllib.request import urlretrieve
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
+from urllib.request import Request, urlopen
 
 DEFAULT_REPO_ROOT = Path(__file__).resolve().parent.parent
-WIKITEXT_VALID_URL = "https://s3.amazonaws.com/research.metamind.io/wikitext/wikitext-2-raw-v1.zip"
 TINYLLAMA_MODEL_ID = "TinyLlama/TinyLlama-1.1B-Chat-v1.0"
+WIKITEXT_DATASET_ID = "Salesforce/wikitext"
+WIKITEXT_DATASET_CONFIG = "wikitext-2-raw-v1"
+WIKITEXT_VALID_SPLIT = "validation"
+WIKITEXT_DATASET_ROWS_URL = "https://datasets-server.huggingface.co/rows"
+WIKITEXT_ROWS_PAGE_SIZE = 100
 TOKEN_WRITE_CHUNK_SIZE = 4096
+HTTP_TIMEOUT_SECONDS = 60
+HTTP_RETRY_COUNT = 5
+HTTP_RETRY_DELAY_SECONDS = 2
 
 
 def parse_args() -> argparse.Namespace:
@@ -68,8 +79,8 @@ def import_tokenizer_class() -> type[Any]:
 def find_wikitext_validation_file(target_dir: Path) -> Path | None:
     extract_dir = target_dir / "raw"
     candidates = (
-        extract_dir / "wikitext-2-raw-v1" / "wiki.valid.raw",
-        extract_dir / "wikitext-2-raw-v1" / "wiki.valid.tokens",
+        extract_dir / WIKITEXT_DATASET_CONFIG / "wiki.valid.raw",
+        extract_dir / WIKITEXT_DATASET_CONFIG / "wiki.valid.tokens",
         extract_dir / "wiki.valid.raw",
         extract_dir / "wiki.valid.tokens",
     )
@@ -99,6 +110,73 @@ def download_tinyllama_tokenizer(target_dir: Path, force: bool = False) -> None:
     print("TinyLlama tokenizer downloaded.")
 
 
+def fetch_json(url: str) -> dict[str, Any]:
+    request = Request(url, headers={"User-Agent": "BitNet-b1.58-Sharp/process_full_corpora"})
+
+    for attempt in range(1, HTTP_RETRY_COUNT + 1):
+        try:
+            with urlopen(request, timeout=HTTP_TIMEOUT_SECONDS) as response:
+                payload = json.load(response)
+            break
+        except HTTPError as exc:
+            is_retryable = exc.code in {429, 500, 502, 503, 504}
+            if is_retryable and attempt < HTTP_RETRY_COUNT:
+                retry_after = exc.headers.get("Retry-After") if exc.headers is not None else None
+                delay_seconds = int(retry_after) if retry_after and retry_after.isdigit() else (
+                    HTTP_RETRY_DELAY_SECONDS * attempt)
+                print(
+                    f"Request for WikiText-2 returned HTTP {exc.code}; "
+                    f"retrying in {delay_seconds} seconds..."
+                )
+                time.sleep(delay_seconds)
+                continue
+
+            raise RuntimeError(
+                f"Unable to download WikiText-2 metadata from '{url}': HTTP {exc.code}"
+            ) from exc
+        except (URLError, json.JSONDecodeError) as exc:
+            raise RuntimeError(f"Unable to download WikiText-2 metadata from '{url}': {exc}") from exc
+
+    if not isinstance(payload, dict):
+        raise RuntimeError(f"Unexpected response format returned from '{url}'.")
+
+    return payload
+
+
+def fetch_wikitext_rows(offset: int, length: int) -> dict[str, Any]:
+    params = urlencode({
+        "dataset": WIKITEXT_DATASET_ID,
+        "config": WIKITEXT_DATASET_CONFIG,
+        "split": WIKITEXT_VALID_SPLIT,
+        "offset": offset,
+        "length": length,
+    })
+    return fetch_json(f"{WIKITEXT_DATASET_ROWS_URL}?{params}")
+
+
+def extract_wikitext_row_text(rows_payload: dict[str, Any]) -> list[str]:
+    rows = rows_payload.get("rows")
+    if not isinstance(rows, list) or not rows:
+        raise RuntimeError("WikiText-2 download returned no rows.")
+
+    texts: list[str] = []
+    for row in rows:
+        if not isinstance(row, dict):
+            raise RuntimeError("WikiText-2 download returned an unexpected row format.")
+
+        row_data = row.get("row")
+        if not isinstance(row_data, dict):
+            raise RuntimeError("WikiText-2 download returned an unexpected row payload.")
+
+        text = row_data.get("text")
+        if not isinstance(text, str):
+            raise RuntimeError("WikiText-2 download returned a row without text content.")
+
+        texts.append(text)
+
+    return texts
+
+
 def download_wikitext(target_dir: Path, force: bool = False) -> Path:
     ensure_dir(target_dir)
 
@@ -107,24 +185,50 @@ def download_wikitext(target_dir: Path, force: bool = False) -> Path:
         print("WikiText-2 already exists - skipping download.")
         return existing_validation_file
 
-    zip_path = target_dir / "wikitext-2-raw-v1.zip"
     extract_dir = target_dir / "raw"
+    validation_file = extract_dir / WIKITEXT_DATASET_CONFIG / "wiki.valid.raw"
+    temp_validation_file = validation_file.with_name(f"{validation_file.name}.tmp")
 
     if force and extract_dir.exists():
         shutil.rmtree(extract_dir)
 
-    print("Downloading WikiText-2 raw dataset...")
-    urlretrieve(WIKITEXT_VALID_URL, str(zip_path))
+    ensure_dir(validation_file.parent)
 
-    print("Extracting WikiText-2...")
-    shutil.unpack_archive(str(zip_path), str(extract_dir))
+    print(f"Downloading WikiText-2 raw validation split from {WIKITEXT_DATASET_ID}...")
 
-    validation_file = find_wikitext_validation_file(target_dir)
-    if validation_file is None:
-        raise FileNotFoundError(
-            f"Unable to locate the extracted WikiText-2 validation file under '{extract_dir}'.")
+    downloaded_rows = 0
+    total_rows: int | None = None
 
-    print("WikiText-2 downloaded and extracted.")
+    try:
+        with temp_validation_file.open("w", encoding="utf-8", newline="\n") as handle:
+            while total_rows is None or downloaded_rows < total_rows:
+                rows_payload = fetch_wikitext_rows(downloaded_rows, WIKITEXT_ROWS_PAGE_SIZE)
+                if total_rows is None:
+                    total_rows_value = rows_payload.get("num_rows_total")
+                    if not isinstance(total_rows_value, int) or total_rows_value <= 0:
+                        raise RuntimeError("Unable to determine the WikiText-2 validation row count.")
+                    total_rows = total_rows_value
+
+                texts = extract_wikitext_row_text(rows_payload)
+                for text in texts:
+                    handle.write(text if text.endswith("\n") else f"{text}\n")
+
+                downloaded_rows += len(texts)
+
+                if total_rows is not None and downloaded_rows > total_rows:
+                    raise RuntimeError("Downloaded more WikiText-2 rows than expected.")
+    except Exception:
+        temp_validation_file.unlink(missing_ok=True)
+        raise
+
+    if total_rows is None or downloaded_rows != total_rows:
+        temp_validation_file.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Unable to download the full WikiText-2 validation file under '{extract_dir}'.")
+
+    temp_validation_file.replace(validation_file)
+
+    print(f"WikiText-2 downloaded ({downloaded_rows} rows).")
     return validation_file
 
 
