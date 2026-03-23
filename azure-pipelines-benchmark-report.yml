@@ -64,29 +64,25 @@ stages:
     dependsOn: benchmark
     condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['AzureStaticWebAppsApiToken'], ''))
     jobs:
-      - deployment: deploy_benchmark_report
+      - job: deploy_benchmark_report
         displayName: Deploy static benchmark site
-        environment: benchmark-report
         pool:
           vmImage: ubuntu-latest
-        strategy:
-          runOnce:
-            deploy:
-              steps:
-                - checkout: none
+        steps:
+          - checkout: none
 
-                - task: DownloadPipelineArtifact@2
-                  displayName: Download benchmark report artifact
-                  inputs:
-                    artifactName: "$(BenchmarkArtifactName)"
-                    targetPath: "$(Pipeline.Workspace)/benchmark-report"
+          - task: DownloadPipelineArtifact@2
+            displayName: Download benchmark report artifact
+            inputs:
+              artifactName: "$(BenchmarkArtifactName)"
+              targetPath: "$(Pipeline.Workspace)/benchmark-report"
 
-                - task: AzureStaticWebApp@0
-                  displayName: Deploy benchmark report to Azure Static Web Apps
-                  inputs:
-                    cwd: "$(Pipeline.Workspace)"
-                    app_location: "benchmark-report"
-                    output_location: ""
-                    skip_app_build: true
-                    skip_api_build: true
-                    azure_static_web_apps_api_token: "$(AzureStaticWebAppsApiToken)"
+          - task: AzureStaticWebApp@0
+            displayName: Deploy benchmark report to Azure Static Web Apps
+            inputs:
+              cwd: "$(Pipeline.Workspace)"
+              app_location: "benchmark-report"
+              output_location: ""
+              skip_app_build: true
+              skip_api_build: true
+              azure_static_web_apps_api_token: "$(AzureStaticWebAppsApiToken)"
