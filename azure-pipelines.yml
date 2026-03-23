@@ -29,7 +29,7 @@ stages:
       - job: build
         displayName: Restore, build, test, and pack
         pool:
-          vmImage: ubuntu-latest
+          name: Default
         steps:
           - checkout: self
             fetchDepth: 0
@@ -49,12 +49,16 @@ stages:
           - script: dotnet tool restore
             displayName: Restore local tools
 
-          - script: |
-              set -euo pipefail
-              semVer=$(dotnet tool run dotnet-gitversion /output json /showvariable SemVer /nonormalize)
-              echo "Calculated SemVer: $semVer"
-              echo "##vso[task.setvariable variable=SemVer]$semVer"
-              echo "##vso[build.updatebuildnumber]$semVer"
+          - pwsh: |
+              $semVer = dotnet tool run dotnet-gitversion /output json /showvariable SemVer /nonormalize
+              if ([string]::IsNullOrWhiteSpace($semVer))
+              {
+                  throw "GitVersion did not return a semantic version."
+              }
+
+              Write-Host "Calculated SemVer: $semVer"
+              Write-Host "##vso[task.setvariable variable=SemVer]$semVer"
+              Write-Host "##vso[build.updatebuildnumber]$semVer"
             displayName: Calculate semantic version
 
           - script: dotnet restore "$(SolutionFile)"
@@ -66,14 +70,16 @@ stages:
           - script: dotnet test "$(SolutionFile)" --configuration "$(BuildConfiguration)" --no-build --no-restore --filter "Category!=SlowLane"
             displayName: Test
 
-          - script: |
-              mkdir -p "$(Build.ArtifactStagingDirectory)/packages/core"
-              dotnet pack "$(CoreProject)" --configuration "$(BuildConfiguration)" --no-build --no-restore -p:PackageVersion="$(SemVer)" --output "$(Build.ArtifactStagingDirectory)/packages/core"
+          - pwsh: |
+              $outputDirectory = "$(Build.ArtifactStagingDirectory)/packages/core"
+              New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
+              dotnet pack "$(CoreProject)" --configuration "$(BuildConfiguration)" --no-build --no-restore -p:PackageVersion="$(SemVer)" --output $outputDirectory
             displayName: Pack BitNetSharp.Core
 
-          - script: |
-              mkdir -p "$(Build.ArtifactStagingDirectory)/packages/tool"
-              dotnet pack "$(AppProject)" --configuration "$(BuildConfiguration)" --no-build --no-restore -p:PackageVersion="$(SemVer)" --output "$(Build.ArtifactStagingDirectory)/packages/tool"
+          - pwsh: |
+              $outputDirectory = "$(Build.ArtifactStagingDirectory)/packages/tool"
+              New-Item -ItemType Directory -Force -Path $outputDirectory | Out-Null
+              dotnet pack "$(AppProject)" --configuration "$(BuildConfiguration)" --no-build --no-restore -p:PackageVersion="$(SemVer)" --output $outputDirectory
             displayName: Pack BitNetSharp.App dotnet tool
 
           - task: PublishPipelineArtifact@1
@@ -96,7 +102,7 @@ stages:
       - job: publish
         displayName: Push tagged packages to NuGet feed
         pool:
-          vmImage: ubuntu-latest
+          name: Default
         steps:
           - checkout: self
 
@@ -121,32 +127,43 @@ stages:
           - task: NuGetAuthenticate@1
             displayName: Authenticate package publishing
 
-          - script: |
-              set -euo pipefail
+          - pwsh: |
+              if ([string]::IsNullOrWhiteSpace($env:NUGET_SOURCE))
+              {
+                  Write-Host "NuGetFeedUrl is not configured; skipping package publication."
+                  exit 0
+              }
 
-              if [ -z "${NUGET_SOURCE:-}" ]; then
-                echo "NuGetFeedUrl is not configured; skipping package publication."
-                exit 0
-              fi
-
-              shopt -s nullglob
-              packages=(
-                "$(Pipeline.Workspace)/packages/core"/*.nupkg
-                "$(Pipeline.Workspace)/packages/tool"/*.nupkg
+              $packageDirectories = @(
+                  "$(Pipeline.Workspace)/packages/core",
+                  "$(Pipeline.Workspace)/packages/tool"
               )
 
-              if [ ${#packages[@]} -eq 0 ]; then
-                echo "No packages were downloaded for publication."
-                exit 1
-              fi
+              $packages = foreach ($directory in $packageDirectories)
+              {
+                  if (Test-Path $directory)
+                  {
+                      Get-ChildItem -Path $directory -Filter *.nupkg -File
+                  }
+              }
 
-              for package in "${packages[@]}"; do
-                if [ -n "${NUGET_API_KEY:-}" ]; then
-                  dotnet nuget push "$package" --source "$NUGET_SOURCE" --api-key "$NUGET_API_KEY" --skip-duplicate
-                else
-                  dotnet nuget push "$package" --source "$NUGET_SOURCE" --api-key AzureArtifacts --skip-duplicate
-                fi
-              done
+              if (-not $packages)
+              {
+                  Write-Error "No packages were downloaded for publication."
+                  exit 1
+              }
+
+              foreach ($package in $packages)
+              {
+                  if ([string]::IsNullOrWhiteSpace($env:NUGET_API_KEY))
+                  {
+                      dotnet nuget push $package.FullName --source $env:NUGET_SOURCE --api-key AzureArtifacts --skip-duplicate
+                  }
+                  else
+                  {
+                      dotnet nuget push $package.FullName --source $env:NUGET_SOURCE --api-key $env:NUGET_API_KEY --skip-duplicate
+                  }
+              }
             displayName: Publish packages to NuGet feed
             env:
               NUGET_SOURCE: $(NuGetFeedUrl)
