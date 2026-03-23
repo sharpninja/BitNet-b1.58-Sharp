@@ -24,7 +24,7 @@ stages:
       - job: benchmark
         displayName: Run slow-lane validation and generate report
         pool:
-          vmImage: ubuntu-latest
+          name: Default
         steps:
           - checkout: self
 
@@ -73,7 +73,7 @@ stages:
       - job: deploy_benchmark_report
         displayName: Deploy static benchmark site
         pool:
-          vmImage: ubuntu-latest
+          name: Default
         steps:
           - checkout: none
 
