@@ -1,0 +1,45 @@
+planning:
+  high-priority:
+  - id: PLAN-ROADMAP-001
+    title: Execute post-alignment BitNet implementation roadmap
+    note: 'Recommended order: complete tasks 1 through 6 first to clear the Phase 3 bottleneck, then implement export and interoperability, then finish chain-bucket production work and CI/test-lane separation.'
+    done: true
+    completed: 2026-03-23
+    description:
+    - Carry the repository from architecture scaffolding into a production-capable training, evaluation, serialization, and speculative decoding workflow.
+    - 'The immediate bottleneck is Phase 3: a real training core and token-sequence data pipeline.'
+    - This item captures the concrete next work after the completed repo-alignment/docs phase and the recent teacher-forced continuation training fix.
+    done-summary: Completed all roadmap tasks. The final slice added a shared paper-model snapshot, repo-authored GGUF save/load, .gguf model loading, and a minimal export command, with targeted GGUF regressions plus a full dual-target test pass.
+    remaining: All roadmap tasks are complete. The latest completion added shared snapshot-backed JSON checkpoint and GGUF state capture, repo-authored .gguf import/export, app-level .gguf loading, and verified round-trip coverage.
+    technical-details:
+    - Phase 1 repo-alignment and documentation work is complete.
+    - BitLinear and the transformer skeleton are mostly present already.
+    - The training core now reaches beyond output-head-only updates by applying AdamW updates to the paper model's final RMSNorm scale alongside the output head.
+    - Repo-authored GGUF export/import now complements the repo-local JSON checkpoint through a shared paper-model snapshot layer and strict tensor/metadata validation.
+    - Default validation now stays fast while expensive training and benchmark checks run in a dedicated SlowLane category and benchmark-report CI lane.
+    technical-requirements:
+    - Preserve the teacher-forced rolling-context training fix already present in BitNetPaperModel.
+    - Avoid direct edits to docs/todo.yaml; keep the roadmap synced through the MCP todo API.
+    - Keep the first loader/token pipeline compatible with the existing BitNetTokenizer and vocabulary semantics.
+    - Prefer new Training/* files and narrow adapters over broad rewrites of dirty worktree files.
+    implementation-tasks:
+    - task: Create src/BitNetSharp.Core/Training/ with BitNetTrainingOptions, TrainingBatch, CrossEntropyLoss, AdamWOptimizer, and a trainer that owns the loop instead of BitNetPaperModel.
+      done: true
+    - task: Implement a real BitNetDataLoader for packed fixed-length token batches and held-out splits, and cover it with loader tests under tests/BitNetSharp.Tests/.
+      done: true
+    - task: Extend paper-model training beyond output-head-only updates to STE/AdamW-style updates across deeper transformer parameters.
+      done: true
+    - task: Add a small-corpus path first in scripts/ plus repo-local fixtures and tests, before attempting larger SlimPajama or RedPajama-scale ingestion.
+      done: true
+    - task: Extend TrainingReport to include validation metrics, checkpoint cadence, and evaluation summaries rather than loss history alone.
+      done: true
+    - task: Wire periodic evaluation through BitNetBenchmarkFixtures for WikiText2, C4, and RedPajama fixture slices during training.
+      done: true
+    - task: Add a dedicated training CLI surface in src/BitNetSharp.App/Program.cs so training configuration and execution are first-class.
+      done: true
+    - task: Implement model export and import beyond the repo-local JSON checkpoint, with GGUF or an intermediate bridge format as the next target.
+      done: true
+    - task: Finish chain-bucket productionization with chain-buckets.bin persistence, threshold-based acceptance metrics, and benchmark reporting for acceptance rate and tokens per second.
+      done: true
+    - task: Split expensive training and benchmark validations into a separate category or CI lane so the default suite stays fast.
+      done: true

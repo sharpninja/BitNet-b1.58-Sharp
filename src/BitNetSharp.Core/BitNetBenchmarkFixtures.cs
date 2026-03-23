@@ -34,6 +34,23 @@ public static class BitNetBenchmarkFixtures
         new("RedPajama", RedPajamaValidationSamples)
     ];
 
+    public static IReadOnlyList<string> CompactWikiText2ValidationSamples { get; } =
+        WikiText2ValidationSamples
+            .Where(static sample => string.Equals(sample, BlankSeparatorLine, StringComparison.Ordinal)
+                || sample.StartsWith(" = ", StringComparison.Ordinal))
+            .Take(8)
+            .ToArray();
+
+    public static IReadOnlyList<BitNetBenchmarkTextFixture> CompactPerplexityDatasets { get; } =
+    [
+        new("WikiText2", CompactWikiText2ValidationSamples),
+        new("C4", C4ValidationSamples),
+        new("RedPajama", RedPajamaValidationSamples)
+    ];
+
+    public static IReadOnlyList<BitNetBenchmarkTextFixture> GetPerplexityDatasets(bool compact = false) =>
+        compact ? CompactPerplexityDatasets : PerplexityDatasets;
+
     private static IReadOnlyList<string> LoadWikiText2Split(string resourceFileName)
     {
         var resourceName = $"BitNetSharp.Core.Data.WikiText2.{resourceFileName}";

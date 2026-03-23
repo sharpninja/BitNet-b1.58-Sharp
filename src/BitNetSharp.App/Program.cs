@@ -1,5 +1,6 @@
 using BitNetSharp.App;
 using BitNetSharp.Core;
+using BitNetSharp.Core.Training;
 using BitNetSharp.Core.Quantization;
 using Microsoft.Extensions.DependencyInjection;
 
@@ -8,7 +9,7 @@ const int DefaultHistogramWidth = 20;
 
 var command = args.FirstOrDefault()?.ToLowerInvariant() ?? "chat";
 var verbosity = ParseVerbosity(args);
-var modelSpecifier = ParseOption(args, "--model=") ?? HostedAgentModelFactory.DefaultModelId;
+var modelSpecifier = ParseOption(args, "--model=") ?? ParseOption(args, "--input=") ?? HostedAgentModelFactory.DefaultModelId;
 var enableBucketing = args.Any(a => string.Equals(a, "--enable-bucketing", StringComparison.OrdinalIgnoreCase));
 
 if (command == "benchmark")
@@ -36,6 +37,82 @@ if (command == "datagen")
     return;
 }
 
+if (command == "train")
+{
+    await TrainingCommand.RunAsync(
+        args.Skip(1).ToArray(),
+        async (options, cancellationToken) =>
+        {
+            var trainingDataset = TrainingDatasetLoader.Load(options.Dataset);
+            var validationDataset = string.IsNullOrWhiteSpace(options.EvaluationDataset)
+                ? null
+                : TrainingDatasetLoader.Load(options.EvaluationDataset);
+
+            using var trainingModel = HostedAgentModelFactory.Create(
+                modelSpecifier,
+                verbosity,
+                trainingDataset.Examples,
+                enableChainBuckets: enableBucketing,
+                enableSequenceCompression: enableBucketing);
+
+            if (enableBucketing && trainingModel is BitNetHostedAgentModel bucketedBitNetModel)
+            {
+                bucketedBitNetModel.Model.MineAndLoadBuckets(trainingDataset.Examples);
+            }
+
+            var report = TrainSelectedModel(trainingModel, trainingDataset, validationDataset, options);
+            var cadenceAlreadySavedFinalCheckpoint = options.CheckpointEvery is int checkpointEvery
+                && checkpointEvery > 0
+                && options.Epochs % checkpointEvery == 0
+                && report.Checkpoints?.Any(checkpoint => checkpoint.Epoch == report.Epochs) == true;
+            if (options.SaveCheckpoint && !cadenceAlreadySavedFinalCheckpoint)
+            {
+                var checkpointPath = SaveCheckpoint(trainingModel, options, report.Epochs);
+                report = report with
+                {
+                    Checkpoints =
+                    [
+                        .. report.Checkpoints ?? [],
+                        new TrainingCheckpointSummary(report.Epochs, report.SamplesSeen, checkpointPath)
+                    ]
+                };
+            }
+
+            cancellationToken.ThrowIfCancellationRequested();
+            return report;
+        });
+    return;
+}
+
+if (command == "export")
+{
+    var outputPath = ParseOption(args, "--output=");
+    if (string.IsNullOrWhiteSpace(outputPath))
+    {
+        throw new ArgumentException("The export command requires --output=<path.gguf>.");
+    }
+
+    using var exportModel = HostedAgentModelFactory.Create(
+        modelSpecifier,
+        verbosity,
+        enableChainBuckets: enableBucketing,
+        enableSequenceCompression: enableBucketing);
+
+    if (enableBucketing && exportModel is BitNetHostedAgentModel bucketedExportModel && bucketedExportModel.Model.BucketTable is null)
+    {
+        bucketedExportModel.Model.MineAndLoadBuckets(BitNetTrainingCorpus.CreateDefaultExamples());
+    }
+
+    if (exportModel is not BitNetHostedAgentModel bitNetExportModel)
+    {
+        throw new InvalidOperationException($"Model '{exportModel.ModelId}' does not expose BitNet GGUF export.");
+    }
+
+    BitNetPaperGguf.Save(bitNetExportModel.Model, outputPath);
+    Console.WriteLine($"Saved GGUF model to {Path.GetFullPath(outputPath)}");
+    return;
+}
+
 using var model = HostedAgentModelFactory.Create(modelSpecifier, verbosity, enableChainBuckets: enableBucketing, enableSequenceCompression: enableBucketing);
 
 // When --enable-bucketing is requested for the built-in BitNet model, mine chain buckets
@@ -57,22 +134,6 @@ var hostSummary = host.Services.GetRequiredService<BitNetHostSummary>();
 
 switch (command)
 {
-    case "train":
-        if (model is ITrainableHostedAgentModel trainableModel)
-        {
-            var examples = BitNetTrainingCorpus.CreateDefaultExamples();
-            var trainingEpochs = GetTrainingEpochs(model);
-            trainableModel.Train(examples, trainingEpochs);
-            Console.WriteLine($"Trained '{model.ModelId}' on {examples.Count} default examples for {trainingEpochs} epochs.");
-        }
-        else
-        {
-            Console.WriteLine($"Model '{model.ModelId}' does not expose repository-local training.");
-        }
-
-        Console.WriteLine(FormatModelSummary(model));
-        break;
-
     case "visualize":
         Console.WriteLine(FormatModelSummary(model));
         Console.WriteLine();
@@ -179,10 +240,110 @@ static int? ParseMaxTokens(string[] args)
     return int.TryParse(value, out var parsed) ? parsed : null;
 }
 
-static int GetTrainingEpochs(IHostedAgentModel model) =>
-    string.Equals(model.ModelId, HostedAgentModelFactory.TraditionalLocalModelId, StringComparison.Ordinal)
-        ? TraditionalLocalModel.DefaultTrainingEpochs
-        : 3;
+static TrainingReport TrainSelectedModel(
+    IHostedAgentModel model,
+    TrainingDataset trainingDataset,
+    TrainingDataset? validationDataset,
+    TrainingCommandOptions options)
+{
+    ArgumentNullException.ThrowIfNull(model);
+    ArgumentNullException.ThrowIfNull(trainingDataset);
+    ArgumentNullException.ThrowIfNull(options);
+
+    var report = model switch
+    {
+        BitNetHostedAgentModel bitNetModel => bitNetModel.Model.Train(
+            trainingDataset.Examples,
+            new BitNetTrainingOptions(
+                epochs: options.Epochs,
+                evaluationInterval: options.EvaluateEvery ?? 0,
+                checkpointInterval: options.CheckpointEvery ?? 0,
+                dataLoaderOptions: new BitNetDataLoaderOptions(
+                    sequenceLength: Math.Min(bitNetModel.Model.Config.MaxSequenceLength - 1, 64),
+                    batchSize: 4,
+                    validationFraction: validationDataset is null ? 0.1d : 0d,
+                    dropLast: false),
+                compactEvaluation: options.CompactEvaluation,
+                trainingDatasetName: trainingDataset.Name,
+                validationDatasetName: validationDataset?.Name,
+                checkpointDirectory: options.CheckpointDirectory,
+                checkpointPrefix: options.CheckpointPrefix,
+                externalEvaluation: validationDataset is null
+                    ? null
+                    : _ => CreateValidationSummary(bitNetModel, validationDataset))),
+        TraditionalLocalHostedAgentModel traditionalModel => traditionalModel.Train(
+            trainingDataset.Examples,
+            Math.Max(TraditionalLocalModel.DefaultTrainingEpochs, options.Epochs)),
+        ITrainableHostedAgentModel trainableModel => trainableModel.Train(trainingDataset.Examples, options.Epochs),
+        _ => throw new InvalidOperationException($"Model '{model.ModelId}' does not expose repository-local training.")
+    };
+
+    if (validationDataset is null)
+    {
+        return report with { TrainingDataset = trainingDataset.Name };
+    }
+
+    var shouldAppendFinalValidationSummary = options.EvaluateEvery is not int evaluateEvery
+        || evaluateEvery <= 0
+        || options.Epochs % evaluateEvery != 0;
+
+    return report with
+    {
+        TrainingDataset = trainingDataset.Name,
+        ValidationDataset = validationDataset.Name,
+        EvaluationSummaries = shouldAppendFinalValidationSummary
+            ? [.. report.EvaluationSummaries ?? [], CreateValidationSummary(model, validationDataset)]
+            : report.EvaluationSummaries
+    };
+}
+
+static TrainingEvaluationSummary CreateValidationSummary(IHostedAgentModel model, TrainingDataset validationDataset)
+{
+    var samples = validationDataset.Examples
+        .Select(static example => $"{example.Prompt} {example.Response}")
+        .ToArray();
+    var perplexity = model switch
+    {
+        BitNetHostedAgentModel bitNetModel => bitNetModel.Model.CalculatePerplexity(samples),
+        TraditionalLocalHostedAgentModel traditionalModel => traditionalModel.Model.CalculatePerplexity(samples),
+        _ => 0d
+    };
+
+    return new TrainingEvaluationSummary(
+        validationDataset.Name,
+        samples.Length,
+        perplexity <= 0d ? 0d : Math.Log(perplexity),
+        perplexity);
+}
+
+static string SaveCheckpoint(IHostedAgentModel model, TrainingCommandOptions options, int epoch)
+{
+    var directory = string.IsNullOrWhiteSpace(options.CheckpointDirectory)
+        ? Environment.CurrentDirectory
+        : options.CheckpointDirectory!;
+    Directory.CreateDirectory(directory);
+    var extension = model switch
+    {
+        BitNetHostedAgentModel => ".bitnet.json",
+        TraditionalLocalHostedAgentModel => ".traditional.json",
+        _ => ".checkpoint.json"
+    };
+    var checkpointPath = Path.Combine(directory, $"{options.CheckpointPrefix}-epoch{epoch}{extension}");
+
+    switch (model)
+    {
+        case BitNetHostedAgentModel bitNetModel:
+            BitNetPaperCheckpoint.Save(bitNetModel.Model, checkpointPath);
+            break;
+        case TraditionalLocalHostedAgentModel traditionalModel:
+            TraditionalLocalCheckpoint.Save(traditionalModel.Model, checkpointPath);
+            break;
+        default:
+            throw new InvalidOperationException($"Model '{model.ModelId}' does not expose checkpoint persistence.");
+    }
+
+    return checkpointPath;
+}
 
 static string? ParseOption(IEnumerable<string> args, string prefix) =>
     args.FirstOrDefault(argument => argument.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))

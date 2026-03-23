@@ -36,5 +36,5 @@ public interface IInspectableHostedAgentModel
 
 public interface ITrainableHostedAgentModel
 {
-    void Train(IEnumerable<TrainingExample> examples, int epochs = 1);
+    TrainingReport Train(IEnumerable<TrainingExample> examples, int epochs = 1);
 }

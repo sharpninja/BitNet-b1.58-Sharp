@@ -7,7 +7,8 @@ public sealed record HostedAgentBenchmarkOptions(
     IReadOnlyList<string> ModelSpecifiers,
     string Prompt,
     int? MaxOutputTokens,
-    VerbosityLevel Verbosity)
+    VerbosityLevel Verbosity,
+    bool EnableBucketing = false)
 {
     public const string EnvironmentVariableName = "BITNETSHARP_BENCHMARK_OPTIONS";
 
@@ -31,7 +32,8 @@ public sealed record HostedAgentBenchmarkOptions(
             models.Distinct(StringComparer.Ordinal).ToArray(),
             GetOption(args, "--prompt=") ?? "how are you hosted",
             ParseNullableInt(GetOption(args, "--max-tokens=")),
-            verbosity);
+            verbosity,
+            args.Any(argument => string.Equals(argument, "--enable-bucketing", StringComparison.OrdinalIgnoreCase)));
     }
 
     public void StoreInEnvironment() =>
@@ -46,7 +48,8 @@ public sealed record HostedAgentBenchmarkOptions(
                 [HostedAgentModelFactory.DefaultModelId],
                 "how are you hosted",
                 null,
-                VerbosityLevel.Normal);
+                VerbosityLevel.Normal,
+                false);
         }
 
         return JsonSerializer.Deserialize<HostedAgentBenchmarkOptions>(json)

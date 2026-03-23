@@ -1,4 +1,5 @@
 using System.Text.Json;
+using BitNetSharp.Core.Bucketing;
 using BitNetSharp.Core.Models;
 
 namespace BitNetSharp.Core;
@@ -16,14 +17,20 @@ internal sealed record BitNetPaperCheckpointDocument(
     BitNetConfig Config,
     IReadOnlyList<string> Vocabulary,
     float[][] OutputHeadWeights,
+    float[][]? TokenEmbeddings,
+    float[][][]? TransformerProjectionWeights,
+    float[][]? NormScales,
     Dictionary<string, int[]>? MemorizedResponses,
     int MaxResponseTokens,
-    string PrimaryLanguage);
+    string PrimaryLanguage,
+    bool EnableChainBuckets,
+    bool EnableSequenceCompression,
+    double ChainBucketAcceptanceThreshold);
 
 public static class BitNetPaperCheckpoint
 {
     private const string FormatName = "bitnet-b1.58-sharp.repository-checkpoint.v1";
-    private const int BootstrapSeed = 42;
+    private const string BucketSidecarFileName = "chain-buckets.bin";
 
     public static void Save(BitNetPaperModel model, string path)
     {
@@ -36,20 +43,25 @@ public static class BitNetPaperCheckpoint
             Directory.CreateDirectory(directory);
         }
 
+        var snapshot = BitNetPaperModelSnapshot.Capture(model);
         var document = new BitNetPaperCheckpointDocument(
             FormatName,
-            model.ModelId,
-            BootstrapSeed,
-            model.Config,
-            model.Options.Vocabulary.ToArray(),
-            ToJagged(model.ExportOutputHeadWeights()),
-            model.ExportMemorizedResponses().ToDictionary(
-                static pair => pair.Key,
-                static pair => pair.Value.ToArray(),
-                StringComparer.Ordinal),
-            model.Options.MaxResponseTokens,
-            model.Options.PrimaryLanguage);
+            snapshot.ModelId,
+            snapshot.BootstrapSeed,
+            snapshot.Config,
+            [.. snapshot.Vocabulary],
+            ToJagged(snapshot.OutputHeadWeights),
+            ToJagged(snapshot.TokenEmbeddings),
+            snapshot.TransformerProjectionWeights.Select(ToJagged).ToArray(),
+            snapshot.NormScales.Select(static scale => scale.ToArray()).ToArray(),
+            BitNetPaperModelSnapshot.CloneMemorizedResponses(snapshot.MemorizedResponses),
+            snapshot.MaxResponseTokens,
+            snapshot.PrimaryLanguage,
+            snapshot.EnableChainBuckets,
+            snapshot.EnableSequenceCompression,
+            snapshot.ChainBucketAcceptanceThreshold);
         File.WriteAllText(path, JsonSerializer.Serialize(document, new JsonSerializerOptions { WriteIndented = true }));
+        SaveBucketSidecar(model.BucketTable, GetBucketSidecarPath(path));
     }
 
     public static BitNetPaperModel Load(string path, VerbosityLevel verbosity = VerbosityLevel.Normal)
@@ -63,16 +75,50 @@ public static class BitNetPaperCheckpoint
             throw new InvalidOperationException($"Unsupported checkpoint format '{document.Format}'.");
         }
 
-        var model = new BitNetPaperModel(
+        var acceptanceThreshold = document.ChainBucketAcceptanceThreshold > 0d
+            ? document.ChainBucketAcceptanceThreshold
+            : 0.85d;
+        var baselineModel = new BitNetPaperModel(
             new BitNetOptions(
                 document.Vocabulary.ToArray(),
                 verbosity,
                 document.MaxResponseTokens,
-                document.PrimaryLanguage),
+                document.PrimaryLanguage,
+                document.EnableChainBuckets,
+                document.EnableSequenceCompression,
+                acceptanceThreshold),
             document.Config,
             document.BootstrapSeed);
-        model.ImportOutputHeadWeights(ToMatrix(document.OutputHeadWeights));
-        model.ImportMemorizedResponses(document.MemorizedResponses ?? new Dictionary<string, int[]>(StringComparer.Ordinal));
+        var baselineSnapshot = BitNetPaperModelSnapshot.Capture(baselineModel);
+        var snapshot = baselineSnapshot with
+        {
+            ModelId = document.ModelId,
+            BootstrapSeed = document.BootstrapSeed,
+            Config = document.Config,
+            Vocabulary = document.Vocabulary.ToArray(),
+            MaxResponseTokens = document.MaxResponseTokens,
+            PrimaryLanguage = document.PrimaryLanguage,
+            EnableChainBuckets = document.EnableChainBuckets,
+            EnableSequenceCompression = document.EnableSequenceCompression,
+            ChainBucketAcceptanceThreshold = acceptanceThreshold,
+            TokenEmbeddings = document.TokenEmbeddings is null ? baselineSnapshot.TokenEmbeddings : ToMatrix(document.TokenEmbeddings),
+            TransformerProjectionWeights = document.TransformerProjectionWeights is null
+                ? baselineSnapshot.TransformerProjectionWeights
+                : document.TransformerProjectionWeights.Select(ToMatrix).ToArray(),
+            NormScales = document.NormScales is null
+                ? baselineSnapshot.NormScales
+                : document.NormScales.Select(BitNetPaperModelSnapshot.CloneVector).ToArray(),
+            OutputHeadWeights = ToMatrix(document.OutputHeadWeights),
+            MemorizedResponses = document.MemorizedResponses ?? new Dictionary<string, int[]>(StringComparer.Ordinal)
+        };
+        var model = snapshot.Restore(verbosity);
+
+        var bucketSidecarPath = GetBucketSidecarPath(path);
+        if ((document.EnableChainBuckets || document.EnableSequenceCompression) && File.Exists(bucketSidecarPath))
+        {
+            model.LoadBucketTable(LoadBucketSidecar(bucketSidecarPath));
+        }
+
         return model;
     }
 
@@ -81,7 +127,8 @@ public static class BitNetPaperCheckpoint
         ArgumentNullException.ThrowIfNull(model);
         ArgumentException.ThrowIfNullOrWhiteSpace(prompt);
 
-        var checkpointPath = Path.Combine(Path.GetTempPath(), $"bitnet-paper-checkpoint-{Guid.NewGuid():N}.json");
+        var tempDirectory = Path.Combine(Path.GetTempPath(), $"bitnet-paper-checkpoint-{Guid.NewGuid():N}");
+        var checkpointPath = Path.Combine(tempDirectory, "model.bitnet.json");
         try
         {
             Save(model, checkpointPath);
@@ -96,12 +143,37 @@ public static class BitNetPaperCheckpoint
         }
         finally
         {
-            if (File.Exists(checkpointPath))
+            if (Directory.Exists(tempDirectory))
             {
-                File.Delete(checkpointPath);
+                Directory.Delete(tempDirectory, recursive: true);
             }
         }
     }
+
+    private static string GetBucketSidecarPath(string checkpointPath)
+    {
+        var directory = Path.GetDirectoryName(checkpointPath);
+        return string.IsNullOrWhiteSpace(directory)
+            ? BucketSidecarFileName
+            : Path.Combine(directory, BucketSidecarFileName);
+    }
+
+    private static void SaveBucketSidecar(ChainBucketTable? bucketTable, string path)
+    {
+        if (bucketTable is null || bucketTable.Count == 0)
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+
+            return;
+        }
+
+        ChainBucketTableBinarySerializer.Save(bucketTable, path);
+    }
+
+    private static ChainBucketTable LoadBucketSidecar(string path) => ChainBucketTableBinarySerializer.Load(path);
 
     private static float[][] ToJagged(float[,] matrix)
     {

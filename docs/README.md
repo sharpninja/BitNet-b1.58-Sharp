@@ -35,5 +35,6 @@ dotnet test BitNet-b1.58-Sharp.slnx
 - [Full implementation plan: real training + benchmarks + purity v1.0](full-implementation-plan-real-training-benchmarks-purity-v1.0.md)
 - [Real training implementation plan v1.0](real-training-implementation-plan-v1.0.md)
 - [Releases and packaging](releases-and-packaging.md)
+- [Repository alignment guidelines](repo-alignment-guidelines.md)
 - [Usage](usage.md)
 - [Training and visualization](training-and-visualization.md)

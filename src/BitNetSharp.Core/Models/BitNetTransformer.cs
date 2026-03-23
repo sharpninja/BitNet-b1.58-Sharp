@@ -52,6 +52,12 @@ public sealed class BitNetTransformer
 
     public float[,] ForwardHiddenStates(IReadOnlyList<int> tokenIds)
     {
+        var hidden = ForwardPreHeadStates(tokenIds);
+        return FinalNorm.Forward(hidden);
+    }
+
+    internal float[,] ForwardPreHeadStates(IReadOnlyList<int> tokenIds)
+    {
         ArgumentNullException.ThrowIfNull(tokenIds);
 
         if (tokenIds.Count == 0)
@@ -71,7 +77,29 @@ public sealed class BitNetTransformer
             hidden = layer.Forward(hidden);
         }
 
-        return FinalNorm.Forward(hidden);
+        return hidden;
+    }
+
+    internal float[,] ExportTokenEmbeddings()
+    {
+        var embeddings = new float[_tokenEmbeddings.GetLength(0), _tokenEmbeddings.GetLength(1)];
+        Array.Copy(_tokenEmbeddings, embeddings, _tokenEmbeddings.Length);
+        return embeddings;
+    }
+
+    internal void ImportTokenEmbeddings(float[,] tokenEmbeddings)
+    {
+        ArgumentNullException.ThrowIfNull(tokenEmbeddings);
+
+        if (tokenEmbeddings.GetLength(0) != _tokenEmbeddings.GetLength(0)
+            || tokenEmbeddings.GetLength(1) != _tokenEmbeddings.GetLength(1))
+        {
+            throw new ArgumentException(
+                $"Expected token embeddings with shape [{_tokenEmbeddings.GetLength(0)}, {_tokenEmbeddings.GetLength(1)}], but received [{tokenEmbeddings.GetLength(0)}, {tokenEmbeddings.GetLength(1)}].",
+                nameof(tokenEmbeddings));
+        }
+
+        Array.Copy(tokenEmbeddings, _tokenEmbeddings, _tokenEmbeddings.Length);
     }
 
     private float[,] Embed(IReadOnlyList<int> tokenIds)

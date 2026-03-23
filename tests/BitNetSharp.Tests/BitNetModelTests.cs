@@ -1,5 +1,7 @@
 using BitNetSharp.App;
 using BitNetSharp.Core;
+using BitNetSharp.Core.Training;
+using BitNetSharp.Core.Models;
 using Microsoft.Extensions.DependencyInjection;
 using System.Reflection;
 using System.Text.Json;
@@ -166,6 +168,95 @@ public sealed class BitNetPaperModelTests
         Assert.True(stats.TotalCount > 0);
         Assert.True(stats.NegativeCount > 0);
         Assert.True(stats.PositiveCount > 0);
+    }
+
+    [Fact]
+    public void PaperModelTrainingLearnsTeacherForcedContinuationBeyondFirstResponseToken()
+    {
+        var model = new BitNetPaperModel(
+            new BitNetOptions(["alpha", "beta", "gamma", "delta"], VerbosityLevel.Quiet, MaxResponseTokens: 2),
+            new BitNetConfig(vocabSize: 7, dimension: 16, hiddenDimension: 32, layerCount: 2, headCount: 4, maxSequenceLength: 16),
+            seed: 17);
+        var exportScale = typeof(BitNetPaperModel)
+            .GetMethod("ExportFinalNormScale", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        Assert.NotNull(exportScale);
+
+        var baselineScale = (float[])exportScale.Invoke(model, [])!;
+
+        var report = model.Train(
+            [
+                new TrainingExample("alpha beta", "gamma delta")
+            ],
+            new BitNetTrainingOptions(
+                epochs: 120,
+                learningRate: 0.2f,
+                weightDecay: 0f,
+                evaluationInterval: 0,
+                dataLoaderOptions: new BitNetDataLoaderOptions(sequenceLength: 16)));
+
+        var result = model.GenerateResponse("alpha beta gamma", maxTokens: 1);
+        var trainedScale = (float[])exportScale.Invoke(model, [])!;
+
+        Assert.Equal(["delta"], result.Tokens);
+        Assert.True(report.LossHistory[^1] < report.LossHistory[0]);
+        Assert.Contains(
+            trainedScale.Zip(baselineScale, static (after, before) => MathF.Abs(after - before)),
+            static delta => delta > 1e-4f);
+    }
+
+    [Fact]
+    public void PaperModelTrainingUpdatesFinalNormAndOutputHeadOnly()
+    {
+        var model = new BitNetPaperModel(
+            new BitNetOptions(["alpha", "beta", "gamma", "delta"], VerbosityLevel.Quiet, MaxResponseTokens: 2),
+            new BitNetConfig(vocabSize: 7, dimension: 16, hiddenDimension: 32, layerCount: 2, headCount: 4, maxSequenceLength: 16),
+            seed: 23);
+        var exportNormScales = typeof(BitNetPaperModel).GetMethod("ExportNormScales", BindingFlags.Instance | BindingFlags.NonPublic);
+        var exportTransformerProjectionWeights = typeof(BitNetPaperModel).GetMethod("ExportTransformerProjectionWeights", BindingFlags.Instance | BindingFlags.NonPublic);
+        var exportOutputHeadWeights = typeof(BitNetPaperModel).GetMethod("ExportOutputHeadWeights", BindingFlags.Instance | BindingFlags.NonPublic);
+
+        Assert.NotNull(exportNormScales);
+        Assert.NotNull(exportTransformerProjectionWeights);
+        Assert.NotNull(exportOutputHeadWeights);
+
+        var beforeNormScales = ((IReadOnlyList<float[]>)exportNormScales.Invoke(model, [])!)
+            .Select(static scale => scale.ToArray())
+            .ToArray();
+        var beforeProjectionWeights = ((IReadOnlyList<float[,]>)exportTransformerProjectionWeights.Invoke(model, [])!)
+            .Select(CloneMatrix)
+            .ToArray();
+        var beforeOutputHeadWeights = CloneMatrix((float[,])exportOutputHeadWeights.Invoke(model, [])!);
+
+        model.Train(
+            [
+                new TrainingExample("alpha beta", "gamma delta")
+            ],
+            new BitNetTrainingOptions(
+                epochs: 120,
+                learningRate: 0.2f,
+                weightDecay: 0f,
+                evaluationInterval: 0,
+                dataLoaderOptions: new BitNetDataLoaderOptions(sequenceLength: 16)));
+
+        var afterNormScales = ((IReadOnlyList<float[]>)exportNormScales.Invoke(model, [])!)
+            .Select(static scale => scale.ToArray())
+            .ToArray();
+        var afterProjectionWeights = ((IReadOnlyList<float[,]>)exportTransformerProjectionWeights.Invoke(model, [])!)
+            .Select(CloneMatrix)
+            .ToArray();
+        var afterOutputHeadWeights = CloneMatrix((float[,])exportOutputHeadWeights.Invoke(model, [])!);
+
+        Assert.True(VectorChanged(beforeNormScales[^1], afterNormScales[^1]));
+        Assert.All(
+            beforeNormScales
+                .Take(beforeNormScales.Length - 1)
+                .Zip(afterNormScales.Take(afterNormScales.Length - 1)),
+            pair => Assert.False(VectorChanged(pair.First, pair.Second)));
+        Assert.True(MatrixChanged(beforeOutputHeadWeights, afterOutputHeadWeights));
+        Assert.All(
+            beforeProjectionWeights.Zip(afterProjectionWeights),
+            pair => Assert.False(MatrixChanged(pair.First, pair.Second)));
     }
 
     [Fact]
@@ -353,5 +444,46 @@ public sealed class BitNetPaperModelTests
             File.Delete(outputPath);
             File.Delete(seedPath);
         }
+    }
+
+    private static float[,] CloneMatrix(float[,] matrix)
+    {
+        var clone = new float[matrix.GetLength(0), matrix.GetLength(1)];
+        Array.Copy(matrix, clone, matrix.Length);
+        return clone;
+    }
+
+    private static bool MatrixChanged(float[,] before, float[,] after, float tolerance = 1e-4f)
+    {
+        Assert.Equal(before.GetLength(0), after.GetLength(0));
+        Assert.Equal(before.GetLength(1), after.GetLength(1));
+
+        for (var row = 0; row < before.GetLength(0); row++)
+        {
+            for (var column = 0; column < before.GetLength(1); column++)
+            {
+                if (MathF.Abs(before[row, column] - after[row, column]) > tolerance)
+                {
+                    return true;
+                }
+            }
+        }
+
+        return false;
+    }
+
+    private static bool VectorChanged(IReadOnlyList<float> before, IReadOnlyList<float> after, float tolerance = 1e-4f)
+    {
+        Assert.Equal(before.Count, after.Count);
+
+        for (var index = 0; index < before.Count; index++)
+        {
+            if (MathF.Abs(before[index] - after[index]) > tolerance)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

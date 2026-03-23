@@ -52,4 +52,21 @@ public sealed class RmsNorm : Module
 
         return output;
     }
+
+    internal float[] ExportScale() => [.. _scale];
+
+    internal void ImportScale(IReadOnlyList<float> scale)
+    {
+        ArgumentNullException.ThrowIfNull(scale);
+
+        if (scale.Count != Dimension)
+        {
+            throw new ArgumentException($"Expected {Dimension} scale values, but received {scale.Count}.", nameof(scale));
+        }
+
+        for (var index = 0; index < Dimension; index++)
+        {
+            _scale[index] = scale[index];
+        }
+    }
 }

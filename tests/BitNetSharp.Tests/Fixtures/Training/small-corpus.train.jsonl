@@ -1,0 +1,3 @@
+{"prompt":"alpha beta","response":"gamma delta"}
+{"prompt":"pack fixed batches\n\nkeep sequence order","response":"preserve context"}
+{"prompt":"preserve order","response":"teacher forcing stays intact"}

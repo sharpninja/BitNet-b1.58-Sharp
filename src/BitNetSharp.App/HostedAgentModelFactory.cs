@@ -20,6 +20,16 @@ public static class HostedAgentModelFactory
 
         if (File.Exists(value))
         {
+            if (value.EndsWith(".gguf", StringComparison.OrdinalIgnoreCase))
+            {
+                return new BitNetHostedAgentModel(BitNetPaperGguf.Load(value, verbosity));
+            }
+
+            if (value.EndsWith(".bitnet.json", StringComparison.OrdinalIgnoreCase))
+            {
+                return new BitNetHostedAgentModel(BitNetPaperCheckpoint.Load(value, verbosity));
+            }
+
             return new LocalCommandHostedAgentModel(LocalCommandModelConfig.Load(value), verbosity);
         }
 
@@ -31,7 +41,7 @@ public static class HostedAgentModelFactory
                     : BitNetBootstrap.CreatePaperModel(trainingExamples, verbosity, enableChainBuckets, enableSequenceCompression)),
             TraditionalLocalModelId => new TraditionalLocalHostedAgentModel(verbosity, trainingExamples),
             _ => throw new ArgumentException(
-                $"Unknown model specifier '{value}'. Use '{DefaultModelId}', '{TraditionalLocalModelId}', or an absolute path to a local command model JSON file.",
+                $"Unknown model specifier '{value}'. Use '{DefaultModelId}', '{TraditionalLocalModelId}', or an absolute path to a repo-authored .bitnet.json/.gguf model or local command model JSON file.",
                 nameof(specifier))
         };
     }

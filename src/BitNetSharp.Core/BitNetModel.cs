@@ -68,6 +68,7 @@ public sealed class BitNetModel
         var counts = new long[_vocabularySize, _vocabularySize];
         var priors = new long[_vocabularySize];
         var history = new List<double>();
+        var epochMetrics = new List<TrainingEpochMetrics>(epochs);
 
         for (var epoch = 0; epoch < epochs; epoch++)
         {
@@ -103,7 +104,9 @@ public sealed class BitNetModel
             }
 
             Quantize(counts, priors);
-            history.Add(observations == 0 ? 0d : (double)mistakes / observations);
+            var averageLoss = observations == 0 ? 0d : (double)mistakes / observations;
+            history.Add(averageLoss);
+            epochMetrics.Add(new TrainingEpochMetrics(epoch + 1, averageLoss, trainingSet.Count * (epoch + 1), observations));
         }
 
         return new TrainingReport(
@@ -112,7 +115,12 @@ public sealed class BitNetModel
             epochs,
             CountWeights(-1),
             CountWeights(0),
-            CountWeights(1));
+            CountWeights(1),
+            epochMetrics,
+            [],
+            [],
+            "bitnet-legacy",
+            null);
     }
 
     public BitNetGenerationResult GenerateResponse(string prompt, int? maxTokens = null)

@@ -1,6 +1,7 @@
 using BitNetSharp.Core.Bucketing;
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Quantization;
+using BitNetSharp.Core.Training;
 
 namespace BitNetSharp.Core;
 
@@ -161,9 +162,19 @@ public sealed class BitNetPaperModel
 
     public TrainingReport Train(IEnumerable<TrainingExample> examples, int epochs = 3, float learningRate = 0.05f)
     {
+        return Train(
+            examples,
+            new BitNetTrainingOptions(
+                epochs: epochs,
+                learningRate: learningRate,
+                dataLoaderOptions: new BitNetDataLoaderOptions(sequenceLength: Math.Min(Config.MaxSequenceLength - 1, 64)),
+                compactEvaluation: true));
+    }
+
+    public TrainingReport Train(IEnumerable<TrainingExample> examples, BitNetTrainingOptions options)
+    {
         ArgumentNullException.ThrowIfNull(examples);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(epochs);
-        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(learningRate);
+        ArgumentNullException.ThrowIfNull(options);
 
         var trainingSet = examples.ToList();
         if (trainingSet.Count == 0)
@@ -173,63 +184,9 @@ public sealed class BitNetPaperModel
 
         lock (_gate)
         {
-            var weights = ExportOutputHeadWeights();
-            var lossHistory = new List<double>(epochs);
-
-            for (var epoch = 0; epoch < epochs; epoch++)
-            {
-                var totalLoss = 0d;
-                var observations = 0;
-
-                foreach (var example in trainingSet)
-                {
-                    var promptIds = EncodeTokenIds(example.Prompt);
-                    var targetIds = EncodeTokenIds(example.Response, prependBeginToken: false, appendEndToken: true);
-                    if (targetIds.Count == 0)
-                    {
-                        continue;
-                    }
-
-                    _memorizedResponses[NormalizePromptKey(example.Prompt)] = [.. targetIds];
-                    var targetId = targetIds[0];
-
-                    // Training-time sequence compression: replace chain n-grams in the
-                    // prompt context with their first token to shorten the sequence before
-                    // the forward pass, reducing effective sequence length per step.
-                    var contextIds = Options.EnableSequenceCompression && BucketTable is not null
-                        ? CompressSequence(promptIds)
-                        : promptIds;
-
-                    var hiddenStates = ForwardHiddenStates(contextIds);
-                    var features = GetLastRow(hiddenStates);
-                    var probabilities = ComputeProbabilities(weights, features);
-
-                    totalLoss -= Math.Log(Math.Max(probabilities[targetId], 1e-9d));
-                    observations++;
-
-                    for (var tokenId = 0; tokenId < probabilities.Length; tokenId++)
-                    {
-                        var gradient = probabilities[tokenId] - (tokenId == targetId ? 1d : 0d);
-                        for (var dimension = 0; dimension < features.Length; dimension++)
-                        {
-                            weights[tokenId, dimension] -= (float)(learningRate * gradient * features[dimension]);
-                        }
-                    }
-                }
-
-                ImportOutputHeadWeights(weights);
-                weights = ExportOutputHeadWeights();
-                lossHistory.Add(observations == 0 ? 0d : totalLoss / observations);
-            }
-
-            var stats = GetTernaryWeightStats();
-            return new TrainingReport(
-                lossHistory,
-                trainingSet.Count * epochs,
-                epochs,
-                stats.NegativeCount,
-                stats.ZeroCount,
-                stats.PositiveCount);
+            RememberExamples(trainingSet);
+            var trainer = new BitNetPaperTrainer(this, options);
+            return trainer.Train(trainingSet);
         }
     }
 
@@ -240,6 +197,10 @@ public sealed class BitNetPaperModel
             var diagnostics = new List<string>();
             var contextTokenIds = TokenizeToIds(prompt).ToList();
             var generatedTokenIds = new List<int>();
+            var attemptedChains = 0;
+            var acceptedChains = 0;
+            var attemptedChainTokens = 0;
+            var acceptedChainTokens = 0;
             var truncated = false;
             var promptKey = NormalizePromptKey(prompt);
 
@@ -331,6 +292,8 @@ public sealed class BitNetPaperModel
                         // If nothing actually matches, skip speculative decoding for this step.
                         if (matchedPrefixLen > 0)
                         {
+                            attemptedChains++;
+                            var acceptedTokensForChain = 0;
                             for (var ci = matchedPrefixLen; ci < chain.TokenIds.Length && step < maxGeneratedTokens - 1; ci++)
                             {
                                 var speculativeId = chain.TokenIds[ci];
@@ -340,8 +303,11 @@ public sealed class BitNetPaperModel
                                 }
 
                                 // Verification: confirm the model also predicts this token from current context.
-                                var verifyToken = SelectNextToken(Transformer.Forward(contextTokenIds));
-                                if (verifyToken.TokenId != speculativeId)
+                                var verificationLogits = Transformer.Forward(contextTokenIds);
+                                attemptedChainTokens++;
+                                var verifyToken = SelectNextToken(verificationLogits);
+                                var verifyProbability = GetTargetProbability(verificationLogits, speculativeId);
+                                if (verifyToken.TokenId != speculativeId || verifyProbability < Options.ChainBucketAcceptanceThreshold)
                                 {
                                     break;
                                 }
@@ -354,15 +320,35 @@ public sealed class BitNetPaperModel
                                 }
 
                                 step++;
+                                acceptedTokensForChain++;
+                                acceptedChainTokens++;
 
                                 if (Options.Verbosity == VerbosityLevel.Verbose)
                                 {
-                                    diagnostics.Add($"Speculation accepted: token={_idToToken[speculativeId]}, chain={chain.ChainId}");
+                                    diagnostics.Add(
+                                        $"Speculation accepted: token={_idToToken[speculativeId]}, chain={chain.ChainId}, probability={verifyProbability:0.###}");
                                 }
+                            }
+
+                            if (acceptedTokensForChain > 0)
+                            {
+                                acceptedChains++;
                             }
                         }
                     }
                 }
+            }
+
+            if (Options.EnableChainBuckets && BucketTable is not null)
+            {
+                var acceptedTokenRate = attemptedChainTokens == 0
+                    ? 0d
+                    : acceptedChainTokens / (double)attemptedChainTokens;
+                var averageAcceptedTokensPerChain = acceptedChains == 0
+                    ? 0d
+                    : acceptedChainTokens / (double)acceptedChains;
+                diagnostics.Add(
+                    $"Chain speculation: attempted chains={attemptedChains}, accepted chains={acceptedChains}, attempted tokens={attemptedChainTokens}, accepted tokens={acceptedChainTokens}, accepted token rate={acceptedTokenRate:P1}, threshold={Options.ChainBucketAcceptanceThreshold:0.##}, avg accepted tokens/accepted chain={averageAcceptedTokensPerChain:0.##}");
             }
 
             if (Options.Verbosity == VerbosityLevel.Quiet)
@@ -374,8 +360,26 @@ public sealed class BitNetPaperModel
             var responseText = generatedTokens.Length == 0
                 ? "BitNet paper model is ready."
                 : _tokenizer.Detokenize(generatedTokens);
+            ChainBucketGenerationMetrics? chainBucketMetrics = null;
+            if (Options.EnableChainBuckets && BucketTable is not null)
+            {
+                var acceptedTokenRate = attemptedChainTokens == 0
+                    ? 0d
+                    : acceptedChainTokens / (double)attemptedChainTokens;
+                var averageAcceptedTokensPerChain = acceptedChains == 0
+                    ? 0d
+                    : acceptedChainTokens / (double)acceptedChains;
+                chainBucketMetrics = new ChainBucketGenerationMetrics(
+                    attemptedChains,
+                    acceptedChains,
+                    attemptedChainTokens,
+                    acceptedChainTokens,
+                    acceptedTokenRate,
+                    averageAcceptedTokensPerChain,
+                    Options.ChainBucketAcceptanceThreshold);
+            }
 
-            return new BitNetGenerationResult(responseText, generatedTokens, diagnostics);
+            return new BitNetGenerationResult(responseText, generatedTokens, diagnostics, chainBucketMetrics);
         }
     }
 
@@ -438,6 +442,8 @@ public sealed class BitNetPaperModel
 
     internal float[,] ForwardHiddenStates(IReadOnlyList<int> tokenIds) => Transformer.ForwardHiddenStates(tokenIds);
 
+    internal float[,] ForwardPreHeadStates(IReadOnlyList<int> tokenIds) => Transformer.ForwardPreHeadStates(tokenIds);
+
     internal IReadOnlyDictionary<string, IReadOnlyList<int>> ExportMemorizedResponses()
     {
         lock (_gate)
@@ -449,7 +455,21 @@ public sealed class BitNetPaperModel
         }
     }
 
+    internal float[,] ExportTokenEmbeddings() => Transformer.ExportTokenEmbeddings();
+
     internal float[,] ExportOutputHeadWeights() => Transformer.OutputHead.ToFullPrecision();
+
+    internal float[] ExportFinalNormScale() => Transformer.FinalNorm.ExportScale();
+
+    internal IReadOnlyList<float[,]> ExportTransformerProjectionWeights() =>
+        EnumerateTransformerBitLinearLayers()
+            .Select(static layer => layer.ToFullPrecision())
+            .ToArray();
+
+    internal IReadOnlyList<float[]> ExportNormScales() =>
+        EnumerateNormLayers()
+            .Select(static norm => norm.ExportScale())
+            .ToArray();
 
     internal void ImportMemorizedResponses(IReadOnlyDictionary<string, int[]> memorizedResponses)
     {
@@ -466,6 +486,55 @@ public sealed class BitNetPaperModel
     }
 
     internal void ImportOutputHeadWeights(float[,] weights) => Transformer.OutputHead.QuantizeFromFullPrecision(weights);
+
+    internal void ImportFinalNormScale(IReadOnlyList<float> scale) => Transformer.FinalNorm.ImportScale(scale);
+
+    internal void ImportTokenEmbeddings(float[,] tokenEmbeddings) => Transformer.ImportTokenEmbeddings(tokenEmbeddings);
+
+    internal void ImportTransformerProjectionWeights(IReadOnlyList<float[,]> weights)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+
+        var layers = EnumerateTransformerBitLinearLayers().ToArray();
+        if (weights.Count != layers.Length)
+        {
+            throw new ArgumentException($"Expected {layers.Length} transformer projection tensors, but received {weights.Count}.", nameof(weights));
+        }
+
+        for (var index = 0; index < layers.Length; index++)
+        {
+            layers[index].QuantizeFromFullPrecision(weights[index]);
+        }
+    }
+
+    internal void ImportNormScales(IReadOnlyList<float[]> scales)
+    {
+        ArgumentNullException.ThrowIfNull(scales);
+
+        var norms = EnumerateNormLayers().ToArray();
+        if (scales.Count != norms.Length)
+        {
+            throw new ArgumentException($"Expected {norms.Length} norm scale tensors, but received {scales.Count}.", nameof(scales));
+        }
+
+        for (var index = 0; index < norms.Length; index++)
+        {
+            norms[index].ImportScale(scales[index]);
+        }
+    }
+
+    internal void RememberExamples(IEnumerable<TrainingExample> examples)
+    {
+        ArgumentNullException.ThrowIfNull(examples);
+
+        foreach (var example in examples)
+        {
+            _memorizedResponses[NormalizePromptKey(example.Prompt)] =
+            [
+                .. EncodeTokenIds(example.Response, prependBeginToken: false, appendEndToken: true)
+            ];
+        }
+    }
 
     private static double GetTargetProbability(float[,] logits, int targetId)
     {
@@ -522,6 +591,17 @@ public sealed class BitNetPaperModel
         }
 
         return result;
+    }
+
+    private IReadOnlyList<int> PrepareTrainingContext(IReadOnlyList<int> tokenIds)
+    {
+        var prepared = Options.EnableSequenceCompression && BucketTable is not null
+            ? CompressSequence(tokenIds)
+            : tokenIds;
+
+        return prepared.Count <= Config.MaxSequenceLength
+            ? prepared
+            : [.. prepared.Skip(prepared.Count - Config.MaxSequenceLength)];
     }
 
     private static double[] ComputeProbabilities(float[,] weights, float[] features)
@@ -646,6 +726,16 @@ public sealed class BitNetPaperModel
 
     private IEnumerable<Layers.BitLinear> EnumerateBitLinearLayers()
     {
+        foreach (var layer in EnumerateTransformerBitLinearLayers())
+        {
+            yield return layer;
+        }
+
+        yield return Transformer.OutputHead;
+    }
+
+    private IEnumerable<Layers.BitLinear> EnumerateTransformerBitLinearLayers()
+    {
         foreach (var layer in Transformer.Layers)
         {
             yield return layer.Attention.QueryProjection;
@@ -656,8 +746,17 @@ public sealed class BitNetPaperModel
             yield return layer.FeedForward.UpProjection;
             yield return layer.FeedForward.DownProjection;
         }
+    }
 
-        yield return Transformer.OutputHead;
+    private IEnumerable<Layers.RmsNorm> EnumerateNormLayers()
+    {
+        foreach (var layer in Transformer.Layers)
+        {
+            yield return layer.PreAttentionNorm;
+            yield return layer.PreFeedForwardNorm;
+        }
+
+        yield return Transformer.FinalNorm;
     }
 
     private int GetId(string token) => _tokenToId.TryGetValue(token, out var id) ? id : _tokenToId[BitNetTokenizer.UnknownToken];

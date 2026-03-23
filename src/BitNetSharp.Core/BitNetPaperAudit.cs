@@ -390,14 +390,16 @@ public static class BitNetPaperAuditor
         return Math.Max(targetProbability / partition, ProbabilityFloor);
     }
 
-    private static BitNetPaperModel CreateClone(BitNetPaperModel model) =>
-        new(
-            new BitNetOptions(
-                model.Options.Vocabulary.ToArray(),
-                model.Options.Verbosity,
-                model.Options.MaxResponseTokens,
-                model.Options.PrimaryLanguage),
-            model.Config);
+    private static BitNetPaperModel CreateClone(BitNetPaperModel model)
+    {
+        var clone = BitNetPaperModelSnapshot.Capture(model).Restore(model.Options.Verbosity);
+        if (model.BucketTable is not null)
+        {
+            clone.LoadBucketTable(model.BucketTable);
+        }
+
+        return clone;
+    }
 
     private static string FormatBytes(long bytes)
     {
