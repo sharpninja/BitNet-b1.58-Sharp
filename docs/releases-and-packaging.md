@@ -15,12 +15,14 @@ That command returns the semantic version used for `BitNetSharp.Core` and the `B
 
 ## Release publishing
 
-The build workflow continues to restore, build, test, and pack on `main` and pull requests.
+The Azure DevOps main pipeline at [`/azure-pipelines.yml`](../azure-pipelines.yml) restores, builds, tests, and packs on `main` and pull requests.
 
-When you push a tag that matches `v*`, the same workflow also:
+When you push a tag that matches `v*` or `V*`, the same pipeline also:
 
 - Packs both NuGet artifacts with the GitVersion-generated semantic version
-- Uploads the generated `.nupkg` files into the matching GitHub release
-- Pushes the packages to the repository GitHub Packages feed at `https://nuget.pkg.github.com/<owner>/index.json`, where `<owner>` is the GitHub repository owner (user or organization)
+- Publishes the generated `.nupkg` files as Azure Pipeline artifacts
+- Pushes the packages to the NuGet feed configured by the `NuGetFeedUrl` pipeline variable
 
-This keeps prerelease CI artifacts available for inspection while reserving release publication for explicit version tags.
+If the target feed requires an API key, store it as the secret pipeline variable `NuGetApiKey`. For same-organization Azure Artifacts feeds, the pipeline can authenticate with `NuGetAuthenticate@1` and the build identity without an extra key.
+
+This keeps prerelease CI artifacts available for inspection while reserving feed publication for explicit version tags. See [Azure DevOps pipelines](azure-devops-pipelines.md) for the exact variables and cutover notes.

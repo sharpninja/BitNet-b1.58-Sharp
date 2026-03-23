@@ -1,0 +1,92 @@
+trigger:
+  branches:
+    include:
+      - main
+  paths:
+    include:
+      - azure-pipelines-benchmark-report.yml
+      - src/BitNetSharp.App/**
+      - src/BitNetSharp.Core/**
+      - tests/BitNetSharp.Tests/**
+
+pr: none
+
+variables:
+  BuildConfiguration: Release
+  SolutionFile: BitNet-b1.58-Sharp.slnx
+  BenchmarkArtifactName: benchmark-report
+  AzureStaticWebAppsApiToken: ""
+
+stages:
+  - stage: benchmark
+    displayName: Build benchmark report
+    jobs:
+      - job: benchmark
+        displayName: Run slow-lane validation and generate report
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+
+          - task: UseDotNet@2
+            displayName: Setup .NET SDK
+            inputs:
+              packageType: sdk
+              useGlobalJson: true
+
+          - script: dotnet restore "$(SolutionFile)"
+            displayName: Restore
+
+          - script: dotnet build "$(SolutionFile)" --configuration "$(BuildConfiguration)" --no-restore
+            displayName: Build
+
+          - script: dotnet test "$(SolutionFile)" --configuration "$(BuildConfiguration)" --no-build --no-restore --filter "Category=SlowLane"
+            displayName: Test
+
+          - script: >
+              dotnet run --framework net10.0 --configuration "$(BuildConfiguration)"
+              --project "$(Build.SourcesDirectory)/src/BitNetSharp.App/BitNetSharp.App.csproj" --
+              benchmark-report
+              --model=bitnet-b1.58-sharp
+              --compare-model=traditional-local
+              --commit=$(Build.SourceVersion)
+              --output="$(Build.ArtifactStagingDirectory)/benchmark-report"
+            displayName: Generate benchmark comparison report
+
+          - task: PublishPipelineArtifact@1
+            displayName: Publish benchmark report artifact
+            inputs:
+              targetPath: "$(Build.ArtifactStagingDirectory)/benchmark-report"
+              artifact: "$(BenchmarkArtifactName)"
+
+  - stage: deploy
+    displayName: Deploy benchmark report
+    dependsOn: benchmark
+    condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'), ne(variables['AzureStaticWebAppsApiToken'], ''))
+    jobs:
+      - deployment: deploy_benchmark_report
+        displayName: Deploy static benchmark site
+        environment: benchmark-report
+        pool:
+          vmImage: ubuntu-latest
+        strategy:
+          runOnce:
+            deploy:
+              steps:
+                - checkout: none
+
+                - task: DownloadPipelineArtifact@2
+                  displayName: Download benchmark report artifact
+                  inputs:
+                    artifactName: "$(BenchmarkArtifactName)"
+                    targetPath: "$(Pipeline.Workspace)/benchmark-report"
+
+                - task: AzureStaticWebApp@0
+                  displayName: Deploy benchmark report to Azure Static Web Apps
+                  inputs:
+                    cwd: "$(Pipeline.Workspace)"
+                    app_location: "benchmark-report"
+                    output_location: ""
+                    skip_app_build: true
+                    skip_api_build: true
+                    azure_static_web_apps_api_token: "$(AzureStaticWebAppsApiToken)"

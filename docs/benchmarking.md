@@ -15,7 +15,7 @@ The benchmark command uses BenchmarkDotNet to measure the same hosted-model oper
 - streaming a response for a prompt
 - building the agent host
 
-The manual GitHub Actions benchmark report workflow runs the same benchmark suite for both built-in models, then publishes a static comparison site through GitHub Pages. That report combines:
+The Azure DevOps benchmark report pipeline runs the same benchmark suite for both built-in models, then can publish a static comparison site through Azure Static Web Apps. That report combines:
 
 - efficacy, measured as non-empty responses across the shared default query script
 - accuracy, measured as exact-match and expected-token recall against the default corpus responses
@@ -43,14 +43,14 @@ dotnet run --framework net10.0 --configuration Release --project src/BitNetSharp
 
 This command writes a static report site with:
 
-- `index.html` for GitHub Pages publishing
+- `index.html` for static-site publishing
 - `comparison-report.md` and `comparison-report.json` summaries
 - the shared TinyLlama-1.1B training dataset called out in the integration-input summary
 - comparison tables and inline charts for the built-in BitNet versus `traditional-local` metrics
 - raw BenchmarkDotNet HTML, CSV, and GitHub-flavored Markdown exports under `BenchmarkDotNet.Artifacts/results/`
 - a paper-alignment audit section for `bitnet-b1.58-sharp`
 
-The repository also includes a GitHub Actions workflow at `.github/workflows/benchmark-report.yml` that runs on pushes to `main` for benchmark/runtime changes and can also be started manually. It builds, tests, generates the same report, uploads it as an artifact, and deploys it with GitHub Pages.
+The repository also includes an Azure DevOps pipeline at [`/azure-pipelines-benchmark-report.yml`](../azure-pipelines-benchmark-report.yml) that runs on pushes to `main` for benchmark/runtime changes. It builds, tests, generates the same report, publishes it as a pipeline artifact, and can deploy it to Azure Static Web Apps when the `AzureStaticWebAppsApiToken` secret variable is configured.
 
 ## Train the traditional local model
 

@@ -27,6 +27,7 @@ dotnet test BitNet-b1.58-Sharp.slnx
 ## Documentation map
 
 - [Architecture](architecture.md)
+- [Azure DevOps pipelines](azure-devops-pipelines.md)
 - [Benchmarking and model comparison](benchmarking.md)
 - [Bucketing guide](bucketing-guide.md)
 - [Bucketing implementation plan v1.0](bucketing-implementation-plan-v1.0.md)

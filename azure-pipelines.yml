@@ -1,0 +1,147 @@
+trigger:
+  branches:
+    include:
+      - main
+  tags:
+    include:
+      - v*
+      - V*
+
+pr:
+  branches:
+    include:
+      - "*"
+
+variables:
+  BuildConfiguration: Release
+  SolutionFile: BitNet-b1.58-Sharp.slnx
+  CoreProject: src/BitNetSharp.Core/BitNetSharp.Core.csproj
+  AppProject: src/BitNetSharp.App/BitNetSharp.App.csproj
+  CoreArtifactName: BitNetSharp.Core-nuget
+  ToolArtifactName: BitNetSharp.App-dotnet-tool
+  NuGetFeedUrl: ""
+  NuGetApiKey: ""
+
+stages:
+  - stage: build
+    displayName: Build, test, and pack
+    jobs:
+      - job: build
+        displayName: Restore, build, test, and pack
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - task: UseDotNet@2
+            displayName: Setup .NET SDK
+            inputs:
+              packageType: sdk
+              useGlobalJson: true
+
+          - script: dotnet tool restore
+            displayName: Restore local tools
+
+          - script: |
+              set -euo pipefail
+              semVer=$(dotnet tool run dotnet-gitversion /output json /showvariable SemVer /nonormalize)
+              echo "Calculated SemVer: $semVer"
+              echo "##vso[task.setvariable variable=SemVer]$semVer"
+              echo "##vso[build.updatebuildnumber]$semVer"
+            displayName: Calculate semantic version
+
+          - script: dotnet restore "$(SolutionFile)"
+            displayName: Restore
+
+          - script: dotnet build "$(SolutionFile)" --configuration "$(BuildConfiguration)" --no-restore
+            displayName: Build
+
+          - script: dotnet test "$(SolutionFile)" --configuration "$(BuildConfiguration)" --no-build --no-restore --filter "Category!=SlowLane"
+            displayName: Test
+
+          - script: |
+              mkdir -p "$(Build.ArtifactStagingDirectory)/packages/core"
+              dotnet pack "$(CoreProject)" --configuration "$(BuildConfiguration)" --no-build --no-restore -p:PackageVersion="$(SemVer)" --output "$(Build.ArtifactStagingDirectory)/packages/core"
+            displayName: Pack BitNetSharp.Core
+
+          - script: |
+              mkdir -p "$(Build.ArtifactStagingDirectory)/packages/tool"
+              dotnet pack "$(AppProject)" --configuration "$(BuildConfiguration)" --no-build --no-restore -p:PackageVersion="$(SemVer)" --output "$(Build.ArtifactStagingDirectory)/packages/tool"
+            displayName: Pack BitNetSharp.App dotnet tool
+
+          - task: PublishPipelineArtifact@1
+            displayName: Publish BitNetSharp.Core package
+            inputs:
+              targetPath: "$(Build.ArtifactStagingDirectory)/packages/core"
+              artifact: "$(CoreArtifactName)"
+
+          - task: PublishPipelineArtifact@1
+            displayName: Publish BitNetSharp.App tool package
+            inputs:
+              targetPath: "$(Build.ArtifactStagingDirectory)/packages/tool"
+              artifact: "$(ToolArtifactName)"
+
+  - stage: release
+    displayName: Publish packages
+    dependsOn: build
+    condition: and(succeeded(), or(startsWith(variables['Build.SourceBranch'], 'refs/tags/v'), startsWith(variables['Build.SourceBranch'], 'refs/tags/V')))
+    jobs:
+      - job: publish
+        displayName: Push tagged packages to NuGet feed
+        pool:
+          vmImage: ubuntu-latest
+        steps:
+          - checkout: self
+
+          - task: DownloadPipelineArtifact@2
+            displayName: Download BitNetSharp.Core package
+            inputs:
+              artifactName: "$(CoreArtifactName)"
+              targetPath: "$(Pipeline.Workspace)/packages/core"
+
+          - task: DownloadPipelineArtifact@2
+            displayName: Download BitNetSharp.App tool package
+            inputs:
+              artifactName: "$(ToolArtifactName)"
+              targetPath: "$(Pipeline.Workspace)/packages/tool"
+
+          - task: UseDotNet@2
+            displayName: Setup .NET SDK
+            inputs:
+              packageType: sdk
+              useGlobalJson: true
+
+          - task: NuGetAuthenticate@1
+            displayName: Authenticate package publishing
+
+          - script: |
+              set -euo pipefail
+
+              if [ -z "${NUGET_SOURCE:-}" ]; then
+                echo "NuGetFeedUrl is not configured; skipping package publication."
+                exit 0
+              fi
+
+              shopt -s nullglob
+              packages=(
+                "$(Pipeline.Workspace)/packages/core"/*.nupkg
+                "$(Pipeline.Workspace)/packages/tool"/*.nupkg
+              )
+
+              if [ ${#packages[@]} -eq 0 ]; then
+                echo "No packages were downloaded for publication."
+                exit 1
+              fi
+
+              for package in "${packages[@]}"; do
+                if [ -n "${NUGET_API_KEY:-}" ]; then
+                  dotnet nuget push "$package" --source "$NUGET_SOURCE" --api-key "$NUGET_API_KEY" --skip-duplicate
+                else
+                  dotnet nuget push "$package" --source "$NUGET_SOURCE" --api-key AzureArtifacts --skip-duplicate
+                fi
+              done
+            displayName: Publish packages to NuGet feed
+            env:
+              NUGET_SOURCE: $(NuGetFeedUrl)
+              NUGET_API_KEY: $(NuGetApiKey)
