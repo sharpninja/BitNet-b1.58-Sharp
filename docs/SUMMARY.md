@@ -6,6 +6,8 @@
   - [Bucketing implementation plan v1.0](bucketing-implementation-plan-v1.0.md)
   - [DataGen guide](datagen-guide.md)
   - [Implementation plan v3 (active)](implementation-plan-v3.md)
+  - [Full implementation plan: real training + benchmarks + purity v1.0](full-implementation-plan-real-training-benchmarks-purity-v1.0.md)
+  - [Real training implementation plan v1.0](real-training-implementation-plan-v1.0.md)
   - [Implementation plan v2 (archived)](implementation-plan-v2.md)
   - [Implementation plan v1 (archived)](implementation-plan-v1.md)
   - [Benchmarking and model comparison](benchmarking.md)

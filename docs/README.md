@@ -32,6 +32,8 @@ dotnet test BitNet-b1.58-Sharp.slnx
 - [Bucketing implementation plan v1.0](bucketing-implementation-plan-v1.0.md)
 - [DataGen guide](datagen-guide.md)
 - [Implementation plan](implementation-plan-v3.md)
+- [Full implementation plan: real training + benchmarks + purity v1.0](full-implementation-plan-real-training-benchmarks-purity-v1.0.md)
+- [Real training implementation plan v1.0](real-training-implementation-plan-v1.0.md)
 - [Releases and packaging](releases-and-packaging.md)
 - [Repository alignment guidelines](repo-alignment-guidelines.md)
 - [Usage](usage.md)
