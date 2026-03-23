@@ -145,6 +145,7 @@ public sealed class TraditionalLocalModel
             ResetParameters();
 
             var history = new List<double>(epochs);
+            var epochMetrics = new List<TrainingEpochMetrics>(epochs);
             var totalSamples = 0;
             var hidden = new float[InputDimension];
             var logits = new float[_idToToken.Length];
@@ -178,7 +179,9 @@ public sealed class TraditionalLocalModel
                 }
 
                 totalSamples += epochSamples;
-                history.Add(epochSamples == 0 ? 0d : epochLoss / epochSamples);
+                var averageLoss = epochSamples == 0 ? 0d : epochLoss / epochSamples;
+                history.Add(averageLoss);
+                epochMetrics.Add(new TrainingEpochMetrics(epoch + 1, averageLoss, totalSamples, epochSamples));
             }
 
             _isTrained = true;
@@ -189,7 +192,12 @@ public sealed class TraditionalLocalModel
                 epochs,
                 stats.NegativeCount,
                 stats.ZeroCount,
-                stats.PositiveCount);
+                stats.PositiveCount,
+                epochMetrics,
+                [],
+                [],
+                "traditional-local",
+                null);
         }
     }
 

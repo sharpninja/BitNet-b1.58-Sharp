@@ -33,5 +33,6 @@ dotnet test BitNet-b1.58-Sharp.slnx
 - [DataGen guide](datagen-guide.md)
 - [Implementation plan](implementation-plan-v3.md)
 - [Releases and packaging](releases-and-packaging.md)
+- [Repository alignment guidelines](repo-alignment-guidelines.md)
 - [Usage](usage.md)
 - [Training and visualization](training-and-visualization.md)

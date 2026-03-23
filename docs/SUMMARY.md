@@ -10,5 +10,6 @@
   - [Implementation plan v1 (archived)](implementation-plan-v1.md)
   - [Benchmarking and model comparison](benchmarking.md)
   - [Releases and packaging](releases-and-packaging.md)
+  - [Repository alignment guidelines](repo-alignment-guidelines.md)
   - [Usage](usage.md)
   - [Training and visualization](training-and-visualization.md)

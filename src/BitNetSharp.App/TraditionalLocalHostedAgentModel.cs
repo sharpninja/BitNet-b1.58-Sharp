@@ -54,9 +54,9 @@ public sealed class TraditionalLocalHostedAgentModel : IHostedAgentModel, IInspe
 
     public TernaryWeightStats GetTernaryWeightStats() => Model.GetTernaryWeightStats();
 
-    public void Train(IEnumerable<TrainingExample> examples, int epochs = 1)
+    public TrainingReport Train(IEnumerable<TrainingExample> examples, int epochs = 1)
     {
-        Model.Train(examples, Math.Max(TraditionalLocalModel.DefaultTrainingEpochs, epochs));
+        return Model.Train(examples, Math.Max(TraditionalLocalModel.DefaultTrainingEpochs, epochs));
     }
 
     public void Dispose()

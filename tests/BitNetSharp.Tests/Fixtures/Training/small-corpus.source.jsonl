@@ -1,0 +1,4 @@
+{"split":"train","prompt":"alpha beta","response":"gamma delta"}
+{"split":"train","instruction":"pack fixed batches","input":"keep sequence order","output":"preserve context"}
+{"split":"valid","messages":[{"role":"user","content":"what stays held out?"},{"role":"assistant","content":"validation tokens stay held out."}]}
+{"split":"train","conversations":[{"from":"human","value":"preserve order"},{"from":"gpt","value":"teacher forcing stays intact"}]}

@@ -40,7 +40,7 @@ jobs:
         run: dotnet build BitNet-b1.58-Sharp.slnx --configuration Release --no-restore
 
       - name: Test
-        run: dotnet test BitNet-b1.58-Sharp.slnx --configuration Release --no-build --no-restore
+        run: dotnet test BitNet-b1.58-Sharp.slnx --configuration Release --no-build --no-restore --filter "Category=SlowLane"
 
       - name: Generate benchmark comparison report
         run: >

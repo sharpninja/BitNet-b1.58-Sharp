@@ -19,6 +19,29 @@ public static class HostedAgentBenchmarkRunner
     }
 }
 
+internal static class HostedAgentBenchmarkModelBootstrap
+{
+    public static IHostedAgentModel CreatePreparedModel(
+        string modelSpecifier,
+        HostedAgentBenchmarkOptions options,
+        IReadOnlyList<TrainingExample>? trainingExamples = null)
+    {
+        var model = HostedAgentModelFactory.Create(
+            modelSpecifier,
+            options.Verbosity,
+            trainingExamples,
+            enableChainBuckets: options.EnableBucketing,
+            enableSequenceCompression: options.EnableBucketing);
+
+        if (options.EnableBucketing && model is BitNetHostedAgentModel bitNetModel)
+        {
+            bitNetModel.Model.MineAndLoadBuckets(trainingExamples ?? BitNetTrainingCorpus.CreateDefaultExamples());
+        }
+
+        return model;
+    }
+}
+
 public abstract class HostedAgentBenchmarkBase
 {
     protected HostedAgentBenchmarkOptions Options => HostedAgentBenchmarkOptions.LoadFromEnvironment();
@@ -56,7 +79,7 @@ public class HostedAgentResponseBenchmarks : HostedAgentBenchmarkBase
     [Benchmark(Description = "SpecFlow: Generate a response for a prompt")]
     public async Task<string> GenerateResponseForPrompt()
     {
-        using var model = HostedAgentModelFactory.Create(ModelSpecifier, Options.Verbosity);
+        using var model = HostedAgentBenchmarkModelBootstrap.CreatePreparedModel(ModelSpecifier, Options);
         using var host = BitNetAgentHost.Build(model);
         var chatClient = host.Services.GetRequiredService<IChatClient>();
         var response = await chatClient.GetResponseAsync(
@@ -73,7 +96,7 @@ public class HostedAgentStreamingBenchmarks : HostedAgentBenchmarkBase
     [Benchmark(Description = "SpecFlow: Stream a response for a prompt")]
     public async Task<int> StreamResponseForPrompt()
     {
-        using var model = HostedAgentModelFactory.Create(ModelSpecifier, Options.Verbosity);
+        using var model = HostedAgentBenchmarkModelBootstrap.CreatePreparedModel(ModelSpecifier, Options);
         using var host = BitNetAgentHost.Build(model);
         var chatClient = host.Services.GetRequiredService<IChatClient>();
         var count = 0;
@@ -97,7 +120,7 @@ public class HostedAgentTrainingBenchmarks : TrainableHostedAgentBenchmarkBase
     public int TrainSelectedModel()
     {
         var examples = BitNetTrainingCorpus.CreateBenchmarkExamples();
-        using var model = HostedAgentModelFactory.Create(ModelSpecifier, Options.Verbosity, examples);
+        using var model = HostedAgentBenchmarkModelBootstrap.CreatePreparedModel(ModelSpecifier, Options, examples);
         if (model is not ITrainableHostedAgentModel trainableModel)
         {
             return 0;
@@ -117,7 +140,7 @@ public class HostedAgentHostBenchmarks : HostedAgentBenchmarkBase
     [Benchmark(Description = "SpecFlow: Build the agent host for the selected model")]
     public string BuildAgentHost()
     {
-        using var model = HostedAgentModelFactory.Create(ModelSpecifier, Options.Verbosity);
+        using var model = HostedAgentBenchmarkModelBootstrap.CreatePreparedModel(ModelSpecifier, Options);
         using var host = BitNetAgentHost.Build(model);
         var summary = host.Services.GetRequiredService<BitNetHostSummary>();
         return summary.ModelId;

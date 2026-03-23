@@ -43,7 +43,7 @@ jobs:
         run: dotnet build BitNet-b1.58-Sharp.slnx --configuration Release --no-restore
 
       - name: Test
-        run: dotnet test BitNet-b1.58-Sharp.slnx --configuration Release --no-build --no-restore
+        run: dotnet test BitNet-b1.58-Sharp.slnx --configuration Release --no-build --no-restore --filter "Category!=SlowLane"
 
       - name: Pack BitNetSharp.Core
         run: dotnet pack "${{ github.workspace }}/src/BitNetSharp.Core/BitNetSharp.Core.csproj" --configuration Release --no-build --no-restore -p:PackageVersion=${{ steps.gitversion.outputs.semVer }} --output "${{ github.workspace }}/artifacts/packages/core"

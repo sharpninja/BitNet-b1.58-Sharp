@@ -43,9 +43,9 @@ public sealed class BitNetHostedAgentModel(BitNetPaperModel model) : IHostedAgen
 
     public TernaryWeightStats GetTernaryWeightStats() => Model.GetTernaryWeightStats();
 
-    public void Train(IEnumerable<TrainingExample> examples, int epochs = 1)
+    public TrainingReport Train(IEnumerable<TrainingExample> examples, int epochs = 1)
     {
-        Model.Train(examples, epochs);
+        return Model.Train(examples, epochs);
     }
 
     public void Dispose()

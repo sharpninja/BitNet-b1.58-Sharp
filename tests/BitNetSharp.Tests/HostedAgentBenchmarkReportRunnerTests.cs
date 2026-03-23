@@ -159,6 +159,71 @@ public sealed class HostedAgentBenchmarkReportRunnerTests
     }
 
     [Fact]
+    public void WriteReportSiteIncludesChainBucketSpeculationSectionWhenAcceptanceRateIsPresent()
+    {
+        var outputDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(outputDirectory);
+
+        try
+        {
+            var report = new HostedAgentBenchmarkComparisonReport(
+                DateTimeOffset.Parse("2026-03-18T00:00:00Z"),
+                ["hello"],
+                [
+                    new HostedAgentBenchmarkModelReport(
+                        HostedAgentModelFactory.DefaultModelId,
+                        "Paper-aligned BitNet b1.58 transformer",
+                        TrainingSupported: false,
+                        TrainingCompleted: false,
+                        TrainingExamples: 0,
+                        TrainingEpochs: 0,
+                        SuccessfulQueries: 1,
+                        TotalQueries: 1,
+                        ExactMatches: 0,
+                        AverageExpectedTokenRecall: 0.5d,
+                        QueryResults:
+                        [
+                            new HostedAgentBenchmarkQueryResult("hello", "Hello!", "Hello!", true, true, 1.0d)
+                        ],
+                        ChainBucketAcceptanceRate: 0.72d)
+                ],
+                [],
+                new HostedAgentBenchmarkComparisonSummary(
+                    "WikiText2",
+                    [
+                        new HostedAgentBenchmarkComparisonMetric(
+                            HostedAgentModelFactory.DefaultModelId,
+                            "Paper-aligned BitNet b1.58 transformer",
+                            "10.0 ms",
+                            null,
+                            220.5d,
+                            2d,
+                            20.2d,
+                            12.3d,
+                            0.72d)
+                    ],
+                    null,
+                    null,
+                    null,
+                    null));
+
+            HostedAgentBenchmarkReportRunner.WriteReportSite(outputDirectory, report);
+
+            var markdown = File.ReadAllText(Path.Combine(outputDirectory, "comparison-report.md"));
+            var html = File.ReadAllText(Path.Combine(outputDirectory, "index.html"));
+
+            Assert.Contains("Chain-bucket speculation", markdown, StringComparison.Ordinal);
+            Assert.Contains("72.0%", markdown, StringComparison.Ordinal);
+            Assert.Contains("Chain-bucket speculation", html, StringComparison.Ordinal);
+            Assert.Contains("72.0%", html, StringComparison.Ordinal);
+        }
+        finally
+        {
+            Directory.Delete(outputDirectory, recursive: true);
+        }
+    }
+
+    [Fact]
     public void WriteReportSiteShowsCompletedTrainingWhenBitNetTrainingIsSupported()
     {
         var outputDirectory = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("N"));

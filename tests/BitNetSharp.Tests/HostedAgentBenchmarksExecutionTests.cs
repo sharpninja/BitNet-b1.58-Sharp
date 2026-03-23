@@ -9,6 +9,7 @@ public sealed class BenchmarkEnvironmentCollectionDefinition
 }
 
 [Collection("Benchmark environment")]
+[Trait(TestCategories.Category, TestCategories.SlowLane)]
 public sealed class HostedAgentBenchmarksExecutionTests
 {
     private const string BlankSeparatorLine = " ";

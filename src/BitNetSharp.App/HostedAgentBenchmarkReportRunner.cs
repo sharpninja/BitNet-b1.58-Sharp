@@ -28,7 +28,8 @@ public sealed record HostedAgentBenchmarkModelReport(
     BitNetPaperAuditReport? PaperAlignmentAudit = null,
     double? WikiText2Perplexity = null,
     int BenchmarkPromptTokenCount = 0,
-    double? EstimatedResidentModelMegabytes = null)
+    double? EstimatedResidentModelMegabytes = null,
+    double? ChainBucketAcceptanceRate = null)
 {
     public double EfficacyRate => TotalQueries == 0 ? 0d : SuccessfulQueries / (double)TotalQueries;
 
@@ -43,7 +44,8 @@ public sealed record HostedAgentBenchmarkComparisonMetric(
     double? ResponseTokensPerSecond,
     double? ResponseAllocatedMegabytes,
     double? EstimatedResidentModelMegabytes,
-    double? WikiText2Perplexity);
+    double? WikiText2Perplexity,
+    double? ChainBucketAcceptanceRate = null);
 
 public sealed record HostedAgentBenchmarkPerformanceRow(
     string Operation,
@@ -213,30 +215,63 @@ public static class HostedAgentBenchmarkReportRunner
         var reports = new List<HostedAgentBenchmarkModelReport>();
         foreach (var modelSpecifier in options.ModelSpecifiers)
         {
-            using var model = HostedAgentModelFactory.Create(modelSpecifier, options.Verbosity, trainingExamples);
+            using var model = HostedAgentBenchmarkModelBootstrap.CreatePreparedModel(modelSpecifier, options, trainingExamples);
             var trainingSupported = model is ITrainableHostedAgentModel;
             var trainingCompleted = false;
             var trainingEpochs = 0;
+            if (options.EnableBucketing && model is BitNetHostedAgentModel preTrainedBitNetModel)
+            {
+                preTrainedBitNetModel.Model.MineAndLoadBuckets(trainingExamples);
+            }
 
             if (trainingSupported)
             {
                 trainingEpochs = GetTrainingEpochs(model);
                 ((ITrainableHostedAgentModel)model).Train(trainingExamples, trainingEpochs);
                 trainingCompleted = true;
+
+                if (options.EnableBucketing && model is BitNetHostedAgentModel trainedBitNetModel)
+                {
+                    trainedBitNetModel.Model.MineAndLoadBuckets(trainingExamples);
+                }
             }
 
             var queryResults = new List<HostedAgentBenchmarkQueryResult>(trainingExamples.Count);
+            var attemptedChainTokens = 0;
+            var acceptedChainTokens = 0;
             foreach (var example in trainingExamples)
             {
-                var response = await model.GetResponseAsync(example.Prompt, options.MaxOutputTokens, cancellationToken);
-                var exactMatch = Normalize(response.Text) == Normalize(example.Response);
+                string responseText;
+                if (model is BitNetHostedAgentModel bitNetModel)
+                {
+                    var generationResult = bitNetModel.Model.GenerateResponse(example.Prompt, options.MaxOutputTokens);
+                    responseText = generationResult.ResponseText;
+                    if (generationResult.ChainBucketMetrics is not null)
+                    {
+                        attemptedChainTokens += generationResult.ChainBucketMetrics.AttemptedTokens;
+                        acceptedChainTokens += generationResult.ChainBucketMetrics.AcceptedTokens;
+                    }
+                }
+                else
+                {
+                    var response = await model.GetResponseAsync(example.Prompt, options.MaxOutputTokens, cancellationToken);
+                    responseText = response.Text;
+                }
+
+                var exactMatch = Normalize(responseText) == Normalize(example.Response);
                 queryResults.Add(new HostedAgentBenchmarkQueryResult(
                     example.Prompt,
                     example.Response,
-                    response.Text,
-                    !string.IsNullOrWhiteSpace(response.Text),
+                    responseText,
+                    !string.IsNullOrWhiteSpace(responseText),
                     exactMatch,
-                    CalculateExpectedTokenRecall(response.Text, example.Response)));
+                    CalculateExpectedTokenRecall(responseText, example.Response)));
+            }
+
+            double? chainBucketAcceptanceRate = null;
+            if (attemptedChainTokens > 0)
+            {
+                chainBucketAcceptanceRate = acceptedChainTokens / (double)attemptedChainTokens;
             }
 
             reports.Add(new HostedAgentBenchmarkModelReport(
@@ -251,10 +286,11 @@ public static class HostedAgentBenchmarkReportRunner
                 queryResults.Count(static result => result.ExactMatch),
                 queryResults.Count == 0 ? 0d : queryResults.Average(static result => result.ExpectedTokenRecall),
                 queryResults,
-                model is BitNetHostedAgentModel bitNetModel ? BitNetPaperAuditor.CreateReport(bitNetModel.Model) : null,
+                model is BitNetHostedAgentModel auditBitNetModel ? BitNetPaperAuditor.CreateReport(auditBitNetModel.Model) : null,
                 GetWikiText2Perplexity(model),
                 await GetBenchmarkPromptTokenCountAsync(model, options, cancellationToken),
-                GetEstimatedResidentModelMegabytes(model)));
+                GetEstimatedResidentModelMegabytes(model),
+                chainBucketAcceptanceRate));
         }
 
         return reports;
@@ -291,7 +327,8 @@ public static class HostedAgentBenchmarkReportRunner
                     responseTokensPerSecond,
                     TryParseAllocatedMegabytes(responseRow?.Allocated),
                     modelReport.EstimatedResidentModelMegabytes,
-                    modelReport.WikiText2Perplexity);
+                    modelReport.WikiText2Perplexity,
+                    modelReport.ChainBucketAcceptanceRate);
             })
             .ToArray();
 
@@ -646,6 +683,20 @@ public static class HostedAgentBenchmarkReportRunner
         builder.AppendLine($"| BitNet memory reduction vs traditional | {FormatNullablePercent(summary.BitNetMemoryDeltaPercentVersusTraditional)} |");
         builder.AppendLine($"| BitNet resident model memory increase vs traditional | {FormatNullablePercent(summary.BitNetResidentModelMemoryIncreasePercentVersusTraditional)} |");
         builder.AppendLine($"| BitNet quality improvement vs traditional | {FormatNullablePercent(summary.BitNetQualityDeltaPercentVersusTraditional)} |");
+
+        if (summary.Models.Any(static model => model.ChainBucketAcceptanceRate is not null))
+        {
+            builder.AppendLine();
+            builder.AppendLine("### Chain-bucket speculation");
+            builder.AppendLine();
+            builder.AppendLine("| Model | Chain acceptance rate | Response tokens/sec |");
+            builder.AppendLine("| --- | ---: | ---: |");
+            foreach (var model in summary.Models)
+            {
+                builder.AppendLine(
+                    $"| {model.ModelSpecifier} | {FormatNullableRate(model.ChainBucketAcceptanceRate)} | {FormatNullableNumber(model.ResponseTokensPerSecond)} |");
+            }
+        }
     }
 
     private static void AppendComparisonSummaryHtml(StringBuilder builder, HostedAgentBenchmarkComparisonSummary? summary)
@@ -677,6 +728,23 @@ public static class HostedAgentBenchmarkReportRunner
         builder.AppendLine($"      <tr><td>BitNet quality improvement vs traditional</td><td>{Encode(FormatNullablePercent(summary.BitNetQualityDeltaPercentVersusTraditional))}</td></tr>");
         builder.AppendLine("    </tbody>");
         builder.AppendLine("  </table>");
+
+        if (summary.Models.Any(static model => model.ChainBucketAcceptanceRate is not null))
+        {
+            builder.AppendLine("  <h3>Chain-bucket speculation</h3>");
+            builder.AppendLine("  <table>");
+            builder.AppendLine("    <thead><tr><th>Model</th><th>Chain acceptance rate</th><th>Response tokens/sec</th></tr></thead>");
+            builder.AppendLine("    <tbody>");
+            foreach (var model in summary.Models)
+            {
+                builder.AppendLine(
+                    $"      <tr><td>{Encode(model.ModelSpecifier)}</td><td>{Encode(FormatNullableRate(model.ChainBucketAcceptanceRate))}</td><td>{Encode(FormatNullableNumber(model.ResponseTokensPerSecond))}</td></tr>");
+            }
+
+            builder.AppendLine("    </tbody>");
+            builder.AppendLine("  </table>");
+        }
+
         AppendComparisonChartsHtml(builder, summary);
     }
 
@@ -820,6 +888,8 @@ public static class HostedAgentBenchmarkReportRunner
     private static string FormatNullableMegabytes(double? value) => value is null ? "-" : $"{value.Value:0.##} MB";
 
     private static string FormatNullablePercent(double? value) => value is null ? "-" : $"{value.Value:0.##}%";
+
+    private static string FormatNullableRate(double? value) => value is null ? "-" : value.Value.ToString("P1");
 
     private static string FormatNullableRatio(double? value) => value is null ? "-" : $"{value.Value:0.##}x";
 
