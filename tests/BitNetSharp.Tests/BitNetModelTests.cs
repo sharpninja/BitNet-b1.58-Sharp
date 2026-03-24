@@ -24,6 +24,21 @@ public sealed class BitNetPaperModelTests
     }
 
     [Fact]
+    public void CalculatePerplexityUsesSlidingWindowWhenSampleExceedsMaxSequenceLength()
+    {
+        var model = new BitNetPaperModel(
+            new BitNetOptions(["a"], VerbosityLevel.Quiet),
+            new BitNetConfig(vocabSize: 4, dimension: 8, hiddenDimension: 16, layerCount: 1, headCount: 2, maxSequenceLength: 4),
+            seed: 1);
+
+        var longSample = string.Join(' ', Enumerable.Repeat("a", 30));
+        var perplexity = model.CalculatePerplexity([longSample]);
+
+        Assert.True(double.IsFinite(perplexity));
+        Assert.True(perplexity > 0d);
+    }
+
+    [Fact]
     public void GeneratedResponseUsesTernaryPredictionsForUnmemorizedPrompt()
     {
         var model = new BitNetModel(new BitNetOptions(["alpha", "beta", "gamma"], VerbosityLevel.Quiet));

@@ -335,8 +335,7 @@ public static class BitNetPaperAuditor
                     var tokenIds = model.EncodeTokenIds(sample, appendEndToken: true);
                     for (var index = 0; index < tokenIds.Count - 1; index++)
                     {
-                        var context = tokenIds.Take(index + 1).ToArray();
-                        var logits = model.ForwardLogits(context);
+                        var logits = model.ForwardLogitsPerplexityStep(tokenIds, index);
                         totalLoss -= Math.Log(GetTargetProbability(logits, tokenIds[index + 1]));
                         totalTokens++;
                     }

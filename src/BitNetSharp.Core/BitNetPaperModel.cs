@@ -394,8 +394,7 @@ public sealed class BitNetPaperModel
             var tokenIds = EncodeTokenIds(sample, appendEndToken: true);
             for (var index = 0; index < tokenIds.Count - 1; index++)
             {
-                var context = tokenIds.Take(index + 1).ToArray();
-                var logits = ForwardLogits(context);
+                var logits = ForwardLogitsPerplexityStep(tokenIds, index);
                 totalLoss -= Math.Log(GetTargetProbability(logits, tokenIds[index + 1]));
                 totalTokens++;
             }
@@ -439,6 +438,34 @@ public sealed class BitNetPaperModel
     }
 
     internal float[,] ForwardLogits(IReadOnlyList<int> tokenIds) => Transformer.Forward(tokenIds);
+
+    /// <summary>
+    /// Teacher-forced one-step forward for perplexity: predicts the token after position
+    /// <paramref name="lastContextTokenIndex"/> using at most <see cref="BitNetConfig.MaxSequenceLength"/>
+    /// context tokens (sliding window when the full prefix is longer).
+    /// </summary>
+    internal float[,] ForwardLogitsPerplexityStep(IReadOnlyList<int> tokenIds, int lastContextTokenIndex)
+    {
+        ArgumentNullException.ThrowIfNull(tokenIds);
+        if (lastContextTokenIndex < 0 || lastContextTokenIndex >= tokenIds.Count)
+        {
+            throw new ArgumentOutOfRangeException(nameof(lastContextTokenIndex));
+        }
+
+        return ForwardLogits(SlicePerplexityContext(tokenIds, lastContextTokenIndex));
+    }
+
+    private IReadOnlyList<int> SlicePerplexityContext(IReadOnlyList<int> tokenIds, int lastIncludedIndex)
+    {
+        var length = lastIncludedIndex + 1;
+        if (length > Config.MaxSequenceLength)
+        {
+            var skip = length - Config.MaxSequenceLength;
+            return tokenIds.Skip(skip).Take(Config.MaxSequenceLength).ToArray();
+        }
+
+        return tokenIds.Take(length).ToArray();
+    }
 
     internal float[,] ForwardHiddenStates(IReadOnlyList<int> tokenIds) => Transformer.ForwardHiddenStates(tokenIds);
 
