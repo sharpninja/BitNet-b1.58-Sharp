@@ -17,4 +17,12 @@
     <PackageReference Include="System.Numerics.Tensors" Version="10.0.3" />
   </ItemGroup>
 
+  <ItemGroup Condition="Exists('Data/Models/bitnet-b1.58-default.gguf')">
+    <Content Include="Data/Models/bitnet-b1.58-default.gguf"
+             Pack="true"
+             PackagePath="contentFiles/any/any/Models/"
+             CopyToOutputDirectory="PreserveNewest"
+             PackageCopyToOutput="true" />
+  </ItemGroup>
+
 </Project>

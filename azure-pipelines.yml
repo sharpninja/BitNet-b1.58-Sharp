@@ -13,14 +13,21 @@ pr:
       - "*"
 
 variables:
-  BuildConfiguration: Release
-  SolutionFile: BitNet-b1.58-Sharp.slnx
-  CoreProject: src/BitNetSharp.Core/BitNetSharp.Core.csproj
-  AppProject: src/BitNetSharp.App/BitNetSharp.App.csproj
-  CoreArtifactName: BitNetSharp.Core-nuget
-  ToolArtifactName: BitNetSharp.App-dotnet-tool
-  NuGetFeedUrl: ""
-  NuGetApiKey: ""
+  - group: McpServer
+  - name: BuildConfiguration
+    value: Release
+  - name: SolutionFile
+    value: BitNet-b1.58-Sharp.slnx
+  - name: CoreProject
+    value: src/BitNetSharp.Core/BitNetSharp.Core.csproj
+  - name: AppProject
+    value: src/BitNetSharp.App/BitNetSharp.App.csproj
+  - name: CoreArtifactName
+    value: BitNetSharp.Core-nuget
+  - name: ToolArtifactName
+    value: BitNetSharp.App-dotnet-tool
+  - name: NuGetFeedUrl
+    value: "https://nuget.pkg.github.com/sharpninja/index.json"
 
 stages:
   - stage: build
@@ -69,6 +76,12 @@ stages:
 
           - script: dotnet test "$(SolutionFile)" --configuration "$(BuildConfiguration)" --no-build --no-restore --filter "Category!=SlowLane"
             displayName: Test
+
+          - pwsh: |
+              $modelsDirectory = "$(Build.SourcesDirectory)/src/BitNetSharp.Core/Data/Models"
+              New-Item -ItemType Directory -Force -Path $modelsDirectory | Out-Null
+              dotnet run --framework net9.0 --project "$(Build.SourcesDirectory)/$(AppProject)" --configuration "$(BuildConfiguration)" --no-build -- export --output="$modelsDirectory/bitnet-b1.58-default.gguf"
+            displayName: Generate default model weights
 
           - pwsh: |
               $outputDirectory = "$(Build.ArtifactStagingDirectory)/packages/core"
@@ -155,16 +168,9 @@ stages:
 
               foreach ($package in $packages)
               {
-                  if ([string]::IsNullOrWhiteSpace($env:NUGET_API_KEY))
-                  {
-                      dotnet nuget push $package.FullName --source $env:NUGET_SOURCE --api-key AzureArtifacts --skip-duplicate
-                  }
-                  else
-                  {
-                      dotnet nuget push $package.FullName --source $env:NUGET_SOURCE --api-key $env:NUGET_API_KEY --skip-duplicate
-                  }
+                  dotnet nuget push $package.FullName --source $env:NUGET_SOURCE --api-key $env:NUGET_API_KEY --skip-duplicate
               }
             displayName: Publish packages to NuGet feed
             env:
               NUGET_SOURCE: $(NuGetFeedUrl)
-              NUGET_API_KEY: $(NuGetApiKey)
+              NUGET_API_KEY: $(GH_TOKEN)
