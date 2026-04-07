@@ -420,3 +420,6 @@ FodyWeavers.xsd
 
 AGENTS-README-FIRST.yaml
 .mcpServer/
+
+# Generated model weights (produced during CI builds)
+*.gguf
