@@ -16,7 +16,8 @@ internal sealed record BitNetPaperModelSnapshot(
     IReadOnlyList<float[,]> TransformerProjectionWeights,
     IReadOnlyList<float[]> NormScales,
     float[,] OutputHeadWeights,
-    IReadOnlyDictionary<string, int[]> MemorizedResponses)
+    IReadOnlyDictionary<string, int[]> MemorizedResponses,
+    bool EnableRecallHeatMap = true)
 {
     internal const int DefaultBootstrapSeed = 42;
 
@@ -38,7 +39,8 @@ internal sealed record BitNetPaperModelSnapshot(
             model.ExportTransformerProjectionWeights().Select(CloneMatrix).ToArray(),
             model.ExportNormScales().Select(CloneVector).ToArray(),
             CloneMatrix(model.ExportOutputHeadWeights()),
-            CloneMemorizedResponses(model.ExportMemorizedResponses()));
+            CloneMemorizedResponses(model.ExportMemorizedResponses()),
+            model.Options.EnableRecallHeatMap);
     }
 
     public BitNetPaperModel Restore(VerbosityLevel verbosity = VerbosityLevel.Normal)
@@ -51,7 +53,8 @@ internal sealed record BitNetPaperModelSnapshot(
                 PrimaryLanguage,
                 EnableChainBuckets,
                 EnableSequenceCompression,
-                ChainBucketAcceptanceThreshold),
+                ChainBucketAcceptanceThreshold,
+                EnableRecallHeatMap),
             Config,
             BootstrapSeed);
 

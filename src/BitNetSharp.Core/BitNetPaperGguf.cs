@@ -25,6 +25,7 @@ public static class BitNetPaperGguf
 
         GgufWriter.Write(path, CreateMetadata(snapshot), CreateTensors(snapshot));
         SaveBucketSidecar(model.BucketTable, GetBucketSidecarPath(path));
+        SaveHeatMapSidecar(model.RecallHeatMap, GetHeatMapSidecarPath(path));
     }
 
     public static BitNetPaperModel Load(string path, VerbosityLevel verbosity = VerbosityLevel.Normal)
@@ -78,13 +79,20 @@ public static class BitNetPaperGguf
             transformerProjectionWeights,
             normScales,
             ReadMatrix(tensors[OutputTensorName], config.VocabSize, config.Dimension),
-            DeserializeMemorizedResponses(GetRequiredString(document.Metadata, MemorizedResponsesMetadataKey)));
+            DeserializeMemorizedResponses(GetRequiredString(document.Metadata, MemorizedResponsesMetadataKey)),
+            ReadOptionalBool(document.Metadata, "bitnetsharp.enable_recall_heat_map", defaultValue: true));
         var model = snapshot.Restore(verbosity);
 
         var bucketSidecarPath = GetBucketSidecarPath(path);
         if ((model.Options.EnableChainBuckets || model.Options.EnableSequenceCompression) && File.Exists(bucketSidecarPath))
         {
             model.LoadBucketTable(ChainBucketTableBinarySerializer.Load(bucketSidecarPath));
+        }
+
+        var heatMapSidecarPath = GetHeatMapSidecarPath(path);
+        if (model.RecallHeatMap is not null && File.Exists(heatMapSidecarPath))
+        {
+            model.RecallHeatMap.MergeFrom(BucketRecallHeatMapSerializer.Load(heatMapSidecarPath));
         }
 
         return model;
@@ -106,6 +114,7 @@ public static class BitNetPaperGguf
             ["bitnetsharp.primary_language"] = snapshot.PrimaryLanguage,
             ["bitnetsharp.enable_chain_buckets"] = snapshot.EnableChainBuckets,
             ["bitnetsharp.enable_sequence_compression"] = snapshot.EnableSequenceCompression,
+            ["bitnetsharp.enable_recall_heat_map"] = snapshot.EnableRecallHeatMap,
             ["bitnetsharp.chain_bucket_acceptance_threshold"] = snapshot.ChainBucketAcceptanceThreshold,
             ["bitnetsharp.config.vocab_size"] = snapshot.Config.VocabSize,
             ["bitnetsharp.config.dimension"] = snapshot.Config.Dimension,
@@ -310,6 +319,31 @@ public static class BitNetPaperGguf
 
     private static string GetFeedForwardProjectionTensorName(int layer, string suffix) => $"blk.{layer}.ffn_{suffix}.weight";
 
+    private static string GetHeatMapSidecarPath(string ggufPath)
+    {
+        var directory = Path.GetDirectoryName(ggufPath);
+        var baseName = Path.GetFileNameWithoutExtension(ggufPath);
+        var fileName = $"{baseName}.recall-heatmap.bin";
+        return string.IsNullOrWhiteSpace(directory)
+            ? fileName
+            : Path.Combine(directory, fileName);
+    }
+
+    private static void SaveHeatMapSidecar(BucketRecallHeatMap? heatMap, string path)
+    {
+        if (heatMap is null)
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+
+            return;
+        }
+
+        BucketRecallHeatMapSerializer.Save(heatMap, path);
+    }
+
     private static string GetBucketSidecarPath(string ggufPath)
     {
         var directory = Path.GetDirectoryName(ggufPath);
@@ -352,6 +386,16 @@ public static class BitNetPaperGguf
         }
 
         return text;
+    }
+
+    private static bool ReadOptionalBool(IReadOnlyDictionary<string, object> metadata, string key, bool defaultValue)
+    {
+        if (metadata.TryGetValue(key, out var value) && value is bool boolean)
+        {
+            return boolean;
+        }
+
+        return defaultValue;
     }
 
     private static bool GetRequiredBool(IReadOnlyDictionary<string, object> metadata, string key)

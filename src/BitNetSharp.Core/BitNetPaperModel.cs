@@ -24,6 +24,7 @@ public sealed class BitNetPaperModel
     private readonly string[] _idToToken;
     private readonly BitNetTokenizer _tokenizer;
     private readonly object _gate = new();
+    private BucketRecallHeatMap? _recallHeatMap;
 
     public BitNetPaperModel(IEnumerable<TrainingExample> trainingExamples, VerbosityLevel verbosity = VerbosityLevel.Normal, BitNetConfig? config = null, int seed = 42)
         : this(
@@ -102,11 +103,20 @@ public sealed class BitNetPaperModel
     /// </summary>
     public ChainBucketTable? BucketTable { get; private set; }
 
+    /// <summary>
+    /// Optional recall heat map that tracks per-token and per-chain accept/attempt counts
+    /// during speculative decoding. Populated when a bucket table is loaded and
+    /// <see cref="BitNetOptions.EnableRecallHeatMap"/> is set.
+    /// </summary>
+    public BucketRecallHeatMap? RecallHeatMap => _recallHeatMap;
+
     public string ModelId => "bitnet-b1.58-sharp";
 
     public BitNetTokenizer Tokenizer => _tokenizer;
 
     public long EstimateResidentParameterBytes() => Transformer.EstimateResidentParameterBytes();
+
+    public string GetTokenString(int tokenId) => _idToToken[tokenId];
 
     /// <summary>
     /// Mines chain buckets from the provided training examples using the model's tokenizer,
@@ -141,6 +151,11 @@ public sealed class BitNetPaperModel
     {
         ArgumentNullException.ThrowIfNull(table);
         BucketTable = table;
+
+        if (Options.EnableRecallHeatMap)
+        {
+            _recallHeatMap = new BucketRecallHeatMap(Config.VocabSize);
+        }
     }
 
     public static BitNetPaperModel CreateDefault(
@@ -194,6 +209,8 @@ public sealed class BitNetPaperModel
     {
         lock (_gate)
         {
+            _recallHeatMap?.ResetGenerationState();
+
             var diagnostics = new List<string>();
             var contextTokenIds = TokenizeToIds(prompt).ToList();
             var generatedTokenIds = new List<int>();
@@ -293,6 +310,7 @@ public sealed class BitNetPaperModel
                         if (matchedPrefixLen > 0)
                         {
                             attemptedChains++;
+                            _recallHeatMap?.RecordChainAttempt(chain.ChainId, chain.TokenIds, matchedPrefixLen);
                             var acceptedTokensForChain = 0;
                             for (var ci = matchedPrefixLen; ci < chain.TokenIds.Length && step < maxGeneratedTokens - 1; ci++)
                             {
@@ -322,6 +340,7 @@ public sealed class BitNetPaperModel
                                 step++;
                                 acceptedTokensForChain++;
                                 acceptedChainTokens++;
+                                _recallHeatMap?.RecordTokenAccepted(chain.ChainId, speculativeId);
 
                                 if (Options.Verbosity == VerbosityLevel.Verbose)
                                 {
@@ -333,6 +352,7 @@ public sealed class BitNetPaperModel
                             if (acceptedTokensForChain > 0)
                             {
                                 acceptedChains++;
+                                _recallHeatMap?.RecordChainAccepted(chain.ChainId);
                             }
                         }
                     }

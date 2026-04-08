@@ -25,12 +25,14 @@ internal sealed record BitNetPaperCheckpointDocument(
     string PrimaryLanguage,
     bool EnableChainBuckets,
     bool EnableSequenceCompression,
-    double ChainBucketAcceptanceThreshold);
+    double ChainBucketAcceptanceThreshold,
+    bool EnableRecallHeatMap = true);
 
 public static class BitNetPaperCheckpoint
 {
     private const string FormatName = "bitnet-b1.58-sharp.repository-checkpoint.v1";
     private const string BucketSidecarFileName = "chain-buckets.bin";
+    private const string HeatMapSidecarFileName = "recall-heatmap.bin";
 
     public static void Save(BitNetPaperModel model, string path)
     {
@@ -59,9 +61,11 @@ public static class BitNetPaperCheckpoint
             snapshot.PrimaryLanguage,
             snapshot.EnableChainBuckets,
             snapshot.EnableSequenceCompression,
-            snapshot.ChainBucketAcceptanceThreshold);
+            snapshot.ChainBucketAcceptanceThreshold,
+            model.Options.EnableRecallHeatMap);
         File.WriteAllText(path, JsonSerializer.Serialize(document, new JsonSerializerOptions { WriteIndented = true }));
         SaveBucketSidecar(model.BucketTable, GetBucketSidecarPath(path));
+        SaveHeatMapSidecar(model.RecallHeatMap, GetHeatMapSidecarPath(path));
     }
 
     public static BitNetPaperModel Load(string path, VerbosityLevel verbosity = VerbosityLevel.Normal)
@@ -86,7 +90,8 @@ public static class BitNetPaperCheckpoint
                 document.PrimaryLanguage,
                 document.EnableChainBuckets,
                 document.EnableSequenceCompression,
-                acceptanceThreshold),
+                acceptanceThreshold,
+                document.EnableRecallHeatMap),
             document.Config,
             document.BootstrapSeed);
         var baselineSnapshot = BitNetPaperModelSnapshot.Capture(baselineModel);
@@ -117,6 +122,12 @@ public static class BitNetPaperCheckpoint
         if ((document.EnableChainBuckets || document.EnableSequenceCompression) && File.Exists(bucketSidecarPath))
         {
             model.LoadBucketTable(LoadBucketSidecar(bucketSidecarPath));
+        }
+
+        var heatMapSidecarPath = GetHeatMapSidecarPath(path);
+        if (model.RecallHeatMap is not null && File.Exists(heatMapSidecarPath))
+        {
+            model.RecallHeatMap.MergeFrom(BucketRecallHeatMapSerializer.Load(heatMapSidecarPath));
         }
 
         return model;
@@ -174,6 +185,29 @@ public static class BitNetPaperCheckpoint
     }
 
     private static ChainBucketTable LoadBucketSidecar(string path) => ChainBucketTableBinarySerializer.Load(path);
+
+    private static string GetHeatMapSidecarPath(string checkpointPath)
+    {
+        var directory = Path.GetDirectoryName(checkpointPath);
+        return string.IsNullOrWhiteSpace(directory)
+            ? HeatMapSidecarFileName
+            : Path.Combine(directory, HeatMapSidecarFileName);
+    }
+
+    private static void SaveHeatMapSidecar(BucketRecallHeatMap? heatMap, string path)
+    {
+        if (heatMap is null)
+        {
+            if (File.Exists(path))
+            {
+                File.Delete(path);
+            }
+
+            return;
+        }
+
+        BucketRecallHeatMapSerializer.Save(heatMap, path);
+    }
 
     private static float[][] ToJagged(float[,] matrix)
     {
