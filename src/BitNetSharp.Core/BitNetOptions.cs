@@ -7,4 +7,5 @@ public sealed record BitNetOptions(
     string PrimaryLanguage = "en-US",
     bool EnableChainBuckets = false,
     bool EnableSequenceCompression = false,
-    double ChainBucketAcceptanceThreshold = 0.85d);
+    double ChainBucketAcceptanceThreshold = 0.85d,
+    bool EnableRecallHeatMap = true);

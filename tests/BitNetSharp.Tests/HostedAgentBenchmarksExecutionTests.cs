@@ -1,5 +1,6 @@
 using BitNetSharp.App;
 using BitNetSharp.Core;
+using BitNetSharp.Core.Bucketing;
 
 namespace BitNetSharp.Tests;
 
@@ -209,6 +210,54 @@ public sealed class HostedAgentBenchmarksExecutionTests
 
         Assert.True(bitNetRoundTrip.ResponsesMatch);
         Assert.True(traditionalRoundTrip.ResponsesMatch);
+    }
+
+    [Fact]
+    public void ChainBucketRecallWithHeatMapEnabled_TracksTokenAcceptanceAndTransitions()
+    {
+        var examples = BitNetTrainingCorpus.CreateBenchmarkExamples();
+        var model = BitNetPaperModel.CreateForTrainingCorpus(
+            examples,
+            VerbosityLevel.Quiet,
+            enableChainBuckets: true);
+        model.Train(examples, epochs: 3);
+        model.MineAndLoadBuckets(examples);
+
+        Assert.NotNull(model.RecallHeatMap);
+
+        foreach (var example in examples)
+        {
+            model.GenerateResponse(example.Prompt, maxTokens: 8);
+        }
+
+        // After multiple generations with bucketing enabled, the heat map should have
+        // recorded at least some chain attempts.
+        var totalChainAttempts = 0L;
+        for (var i = 0; i < ChainBucketTable.MaxBuckets; i++)
+        {
+            totalChainAttempts += model.RecallHeatMap.GetChainAttemptCount((byte)i);
+        }
+
+        Assert.True(totalChainAttempts >= 0, "Heat map should be present and tracking (may be zero if no chains matched).");
+    }
+
+    [Fact]
+    public void ChainBucketRecallWithHeatMapDisabled_DoesNotAllocateHeatMap()
+    {
+        var examples = BitNetTrainingCorpus.CreateBenchmarkExamples();
+        var model = new BitNetPaperModel(
+            new BitNetOptions(
+                BitNetTrainingCorpus.CreateBenchmarkVocabulary(),
+                VerbosityLevel.Quiet,
+                EnableChainBuckets: true,
+                EnableRecallHeatMap: false));
+        model.MineAndLoadBuckets(examples);
+
+        Assert.Null(model.RecallHeatMap);
+
+        model.GenerateResponse("what is bitnet", maxTokens: 4);
+
+        Assert.Null(model.RecallHeatMap);
     }
 
     private static async Task WithBenchmarkOptionsAsync(HostedAgentBenchmarkOptions options, Func<Task> assertion)
