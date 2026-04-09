@@ -23,9 +23,9 @@ stages:
     jobs:
       - job: benchmark
         displayName: Run slow-lane validation and generate report
+        timeoutInMinutes: 45
         pool:
           name: Default
-        timeoutInMinutes: 0
         steps:
           - checkout: self
 
@@ -75,7 +75,6 @@ stages:
         displayName: Deploy static benchmark site
         pool:
           name: Default
-        timeoutInMinutes: 0
         steps:
           - checkout: none
 

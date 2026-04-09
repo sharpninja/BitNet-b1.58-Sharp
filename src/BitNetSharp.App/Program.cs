@@ -27,6 +27,11 @@ if (command == "benchmark-report")
         reportDirectory,
         commitHash);
     Console.WriteLine($"Saved benchmark comparison report to {outputPath}");
+
+    // Force exit: BenchmarkDotNet and the Microsoft.Agents.AI hosting framework
+    // may leave non-daemon threads running that prevent the process from exiting
+    // cleanly, causing CI pipeline jobs to hang indefinitely on self-hosted agents.
+    Environment.Exit(0);
     return;
 }
 
