@@ -84,13 +84,23 @@ public static class HostedAgentBenchmarkReportRunner
     private const double MillisecondsPerSecond = 1_000d;
     private const double BytesPerMegabyte = 1024d * 1024d;
     private const double KilobytesPerMegabyte = 1024d;
+    public const double DefaultPerplexitySamplePercent = 10d;
+
     public static async Task<string> RunAsync(
         HostedAgentBenchmarkOptions options,
         string? outputDirectory,
         string? commitHash = null,
+        double perplexitySamplePercent = DefaultPerplexitySamplePercent,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(options);
+        if (perplexitySamplePercent <= 0d || perplexitySamplePercent > 100d)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(perplexitySamplePercent),
+                perplexitySamplePercent,
+                "perplexitySamplePercent must be in the range (0, 100].");
+        }
 
         var originalWorkingDirectory = Directory.GetCurrentDirectory();
         var reportDirectory = Path.GetFullPath(
@@ -98,15 +108,40 @@ public static class HostedAgentBenchmarkReportRunner
                 ? Path.Combine(originalWorkingDirectory, "artifacts", "benchmark-report")
                 : outputDirectory);
         Directory.CreateDirectory(reportDirectory);
+
+        var progressLogPath = Path.Combine(reportDirectory, "progress.log");
+        LogProgress(progressLogPath, $"RunAsync started (perplexitySamplePercent={perplexitySamplePercent:0.##}%)");
+
+        LogProgress(progressLogPath, "Phase 1: BenchmarkDotNet suite starting");
         HostedAgentBenchmarkRunner.Run(options);
+        LogProgress(progressLogPath, "Phase 1: BenchmarkDotNet suite complete");
+
+        LogProgress(progressLogPath, "Phase 2: Copying BDN artifacts");
         CopyArtifactsDirectory(
             Path.Combine(originalWorkingDirectory, "BenchmarkDotNet.Artifacts"),
             Path.Combine(reportDirectory, "BenchmarkDotNet.Artifacts"));
+        LogProgress(progressLogPath, "Phase 2: BDN artifacts copied");
 
+        LogProgress(progressLogPath, "Phase 3: Creating benchmark examples");
         var trainingExamples = BitNetTrainingCorpus.CreateBenchmarkExamples();
-        var modelReports = await CreateModelReportsAsync(options, trainingExamples, cancellationToken);
+        LogProgress(progressLogPath, $"Phase 3: Created {trainingExamples.Count} training examples");
+
+        LogProgress(progressLogPath, "Phase 4: CreateModelReportsAsync starting");
+        var modelReports = await CreateModelReportsAsync(options, trainingExamples, progressLogPath, perplexitySamplePercent, cancellationToken);
+        LogProgress(progressLogPath, $"Phase 4: CreateModelReportsAsync complete ({modelReports.Count} reports)");
+
+        // Save intermediate model reports in case the rest fails.
+        SaveIntermediate(reportDirectory, "model-reports.json", modelReports);
+
+        LogProgress(progressLogPath, "Phase 5: Parsing performance rows");
         var performanceRows = ParsePerformanceRows(reportDirectory);
+        LogProgress(progressLogPath, $"Phase 5: Parsed {performanceRows.Count} performance rows");
+        SaveIntermediate(reportDirectory, "performance-rows.json", performanceRows);
+
+        LogProgress(progressLogPath, "Phase 6: Creating comparison summary");
         var comparisonSummary = CreateComparisonSummary(modelReports, performanceRows);
+        LogProgress(progressLogPath, "Phase 6: Comparison summary complete");
+
         var report = new HostedAgentBenchmarkComparisonReport(
             DateTimeOffset.UtcNow,
             trainingExamples.Select(static example => example.Prompt).ToArray(),
@@ -115,8 +150,41 @@ public static class HostedAgentBenchmarkReportRunner
             comparisonSummary,
             BitNetTrainingCorpus.BenchmarkDatasetName);
 
+        LogProgress(progressLogPath, "Phase 7: Writing report site");
         WriteReportSite(reportDirectory, report, commitHash);
+        LogProgress(progressLogPath, "Phase 7: Report site written");
+
+        LogProgress(progressLogPath, "RunAsync complete");
         return reportDirectory;
+    }
+
+    private static void LogProgress(string path, string message)
+    {
+        var timestamp = DateTimeOffset.UtcNow.ToString("yyyy-MM-ddTHH:mm:ss.fffZ");
+        var line = $"{timestamp}  {message}";
+        try
+        {
+            File.AppendAllText(path, line + Environment.NewLine);
+        }
+        catch
+        {
+            // Ignore log failures.
+        }
+
+        Console.WriteLine($"[PROGRESS] {line}");
+    }
+
+    private static void SaveIntermediate<T>(string reportDirectory, string fileName, T data)
+    {
+        try
+        {
+            var path = Path.Combine(reportDirectory, fileName);
+            File.WriteAllText(path, JsonSerializer.Serialize(data, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch (Exception ex)
+        {
+            Console.WriteLine($"[PROGRESS] Failed to save intermediate {fileName}: {ex.Message}");
+        }
     }
 
     public static IReadOnlyList<HostedAgentBenchmarkPerformanceRow> ParsePerformanceRows(string reportDirectory)
@@ -211,37 +279,54 @@ public static class HostedAgentBenchmarkReportRunner
     private static async Task<IReadOnlyList<HostedAgentBenchmarkModelReport>> CreateModelReportsAsync(
         HostedAgentBenchmarkOptions options,
         IReadOnlyList<TrainingExample> trainingExamples,
+        string progressLogPath,
+        double perplexitySamplePercent,
         CancellationToken cancellationToken)
     {
         var reports = new List<HostedAgentBenchmarkModelReport>();
+        var reportDirectory = Path.GetDirectoryName(progressLogPath) ?? string.Empty;
+
         foreach (var modelSpecifier in options.ModelSpecifiers)
         {
+            LogProgress(progressLogPath, $"Model '{modelSpecifier}': creating prepared model");
             using var model = HostedAgentBenchmarkModelBootstrap.CreatePreparedModel(modelSpecifier, options, trainingExamples);
+            LogProgress(progressLogPath, $"Model '{modelSpecifier}': prepared model created");
+
             var trainingSupported = model is ITrainableHostedAgentModel;
             var trainingCompleted = false;
             var trainingEpochs = 0;
             if (options.EnableBucketing && model is BitNetHostedAgentModel preTrainedBitNetModel)
             {
+                LogProgress(progressLogPath, $"Model '{modelSpecifier}': mining pre-training buckets");
                 preTrainedBitNetModel.Model.MineAndLoadBuckets(trainingExamples);
+                LogProgress(progressLogPath, $"Model '{modelSpecifier}': pre-training buckets mined");
             }
 
             if (trainingSupported)
             {
                 trainingEpochs = GetTrainingEpochs(model);
+                LogProgress(progressLogPath, $"Model '{modelSpecifier}': training starting ({trainingEpochs} epochs)");
                 ((ITrainableHostedAgentModel)model).Train(trainingExamples, trainingEpochs);
                 trainingCompleted = true;
+                LogProgress(progressLogPath, $"Model '{modelSpecifier}': training complete");
 
                 if (options.EnableBucketing && model is BitNetHostedAgentModel trainedBitNetModel)
                 {
+                    LogProgress(progressLogPath, $"Model '{modelSpecifier}': mining post-training buckets");
                     trainedBitNetModel.Model.MineAndLoadBuckets(trainingExamples);
+                    LogProgress(progressLogPath, $"Model '{modelSpecifier}': post-training buckets mined");
                 }
             }
 
+            LogProgress(progressLogPath, $"Model '{modelSpecifier}': running query examples");
             var queryResults = new List<HostedAgentBenchmarkQueryResult>(trainingExamples.Count);
             var attemptedChainTokens = 0;
             var acceptedChainTokens = 0;
+            var queryIndex = 0;
             foreach (var example in trainingExamples)
             {
+                queryIndex++;
+                LogProgress(progressLogPath, $"Model '{modelSpecifier}': query {queryIndex}/{trainingExamples.Count}");
                 string responseText;
                 if (model is BitNetHostedAgentModel bitNetModel)
                 {
@@ -269,13 +354,34 @@ public static class HostedAgentBenchmarkReportRunner
                     CalculateExpectedTokenRecall(responseText, example.Response)));
             }
 
+            LogProgress(progressLogPath, $"Model '{modelSpecifier}': queries complete");
+
             double? chainBucketAcceptanceRate = null;
             if (attemptedChainTokens > 0)
             {
                 chainBucketAcceptanceRate = acceptedChainTokens / (double)attemptedChainTokens;
             }
 
-            reports.Add(new HostedAgentBenchmarkModelReport(
+            LogProgress(progressLogPath, $"Model '{modelSpecifier}': computing perplexity ({perplexitySamplePercent:0.##}% of WikiText2 validation)");
+            var perplexity = GetWikiText2Perplexity(model, perplexitySamplePercent);
+            LogProgress(progressLogPath, $"Model '{modelSpecifier}': perplexity = {perplexity}");
+
+            LogProgress(progressLogPath, $"Model '{modelSpecifier}': computing benchmark prompt token count");
+            var promptTokenCount = await GetBenchmarkPromptTokenCountAsync(model, options, cancellationToken);
+            LogProgress(progressLogPath, $"Model '{modelSpecifier}': prompt token count = {promptTokenCount}");
+
+            LogProgress(progressLogPath, $"Model '{modelSpecifier}': estimating resident model megabytes");
+            var residentMb = GetEstimatedResidentModelMegabytes(model);
+
+            BitNetPaperAuditReport? auditReport = null;
+            if (model is BitNetHostedAgentModel auditBitNetModel)
+            {
+                LogProgress(progressLogPath, $"Model '{modelSpecifier}': running paper alignment audit");
+                auditReport = BitNetPaperAuditor.CreateReport(auditBitNetModel.Model);
+                LogProgress(progressLogPath, $"Model '{modelSpecifier}': audit complete");
+            }
+
+            var modelReport = new HostedAgentBenchmarkModelReport(
                 model.ModelId,
                 model.DisplayName,
                 trainingSupported,
@@ -287,11 +393,20 @@ public static class HostedAgentBenchmarkReportRunner
                 queryResults.Count(static result => result.ExactMatch),
                 queryResults.Count == 0 ? 0d : queryResults.Average(static result => result.ExpectedTokenRecall),
                 queryResults,
-                model is BitNetHostedAgentModel auditBitNetModel ? BitNetPaperAuditor.CreateReport(auditBitNetModel.Model) : null,
-                GetWikiText2Perplexity(model),
-                await GetBenchmarkPromptTokenCountAsync(model, options, cancellationToken),
-                GetEstimatedResidentModelMegabytes(model),
-                chainBucketAcceptanceRate));
+                auditReport,
+                perplexity,
+                promptTokenCount,
+                residentMb,
+                chainBucketAcceptanceRate);
+
+            reports.Add(modelReport);
+            LogProgress(progressLogPath, $"Model '{modelSpecifier}': report added ({reports.Count}/{options.ModelSpecifiers.Count})");
+
+            // Persist incremental reports in case a subsequent model crashes.
+            if (!string.IsNullOrEmpty(reportDirectory))
+            {
+                SaveIntermediate(reportDirectory, $"model-report-{reports.Count:D2}-{modelSpecifier.Replace('/', '_').Replace('.', '_')}.json", modelReport);
+            }
         }
 
         return reports;
@@ -584,13 +699,35 @@ public static class HostedAgentBenchmarkReportRunner
         return CountResponseTokens(model, benchmarkResponse.Text);
     }
 
-    private static double? GetWikiText2Perplexity(IHostedAgentModel model) =>
-        model switch
+    // Use the configured percentage of the WikiText2 validation set for the benchmark-report
+    // perplexity calculation, stride-sampled evenly across the full validation set so coverage
+    // is representative of the entire corpus. The full 3,760-sample set takes hours to evaluate
+    // on a consumer CPU; 10% (376 entries) runs in a few minutes and is sufficient for relative
+    // comparison between models.
+    private static IReadOnlyList<string> GetBenchmarkWikiText2ValidationSamples(double samplePercent)
+    {
+        var all = BitNetBenchmarkFixtures.WikiText2ValidationSamples;
+        var targetCount = Math.Max(1, (int)Math.Ceiling(all.Count * (samplePercent / 100d)));
+        var stride = Math.Max(1, all.Count / targetCount);
+        var samples = new List<string>(targetCount);
+        for (var i = 0; i < all.Count && samples.Count < targetCount; i += stride)
         {
-            BitNetHostedAgentModel bitNetModel => bitNetModel.Model.CalculatePerplexity(BitNetBenchmarkFixtures.WikiText2ValidationSamples),
-            TraditionalLocalHostedAgentModel traditionalModel => traditionalModel.Model.CalculatePerplexity(BitNetBenchmarkFixtures.WikiText2ValidationSamples),
+            samples.Add(all[i]);
+        }
+
+        return samples;
+    }
+
+    private static double? GetWikiText2Perplexity(IHostedAgentModel model, double samplePercent)
+    {
+        var samples = GetBenchmarkWikiText2ValidationSamples(samplePercent);
+        return model switch
+        {
+            BitNetHostedAgentModel bitNetModel => bitNetModel.Model.CalculatePerplexity(samples),
+            TraditionalLocalHostedAgentModel traditionalModel => traditionalModel.Model.CalculatePerplexity(samples),
             _ => null
         };
+    }
 
     private static double? GetEstimatedResidentModelMegabytes(IHostedAgentModel model)
     {

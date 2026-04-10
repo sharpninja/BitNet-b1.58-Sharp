@@ -407,20 +407,106 @@ public sealed class BitNetPaperModel
     {
         ArgumentNullException.ThrowIfNull(validationSamples);
 
+        // Tokenize all samples up-front (parallel where possible — the tokenizer is stateless).
+        var samples = validationSamples as IReadOnlyList<string> ?? validationSamples.ToArray();
+        var tokenizedSamples = new IReadOnlyList<int>[samples.Count];
+        if (samples.Count >= 4)
+        {
+            System.Threading.Tasks.Parallel.For(
+                0,
+                samples.Count,
+                i => tokenizedSamples[i] = EncodeTokenIds(samples[i], appendEndToken: true));
+        }
+        else
+        {
+            for (var i = 0; i < samples.Count; i++)
+            {
+                tokenizedSamples[i] = EncodeTokenIds(samples[i], appendEndToken: true);
+            }
+        }
+
         var totalLoss = 0d;
         var totalTokens = 0;
-        foreach (var sample in validationSamples)
+        foreach (var tokenIds in tokenizedSamples)
         {
-            var tokenIds = EncodeTokenIds(sample, appendEndToken: true);
-            for (var index = 0; index < tokenIds.Count - 1; index++)
+            if (tokenIds.Count < 2)
             {
-                var logits = ForwardLogitsPerplexityStep(tokenIds, index);
-                totalLoss -= Math.Log(GetTargetProbability(logits, tokenIds[index + 1]));
-                totalTokens++;
+                continue;
+            }
+
+            // Single forward pass per chunk of at most MaxSequenceLength tokens. Because the
+            // attention is causal (position i only attends to positions 0..i), a single forward
+            // pass on tokens[start..end] produces logits for every position at once, and row i
+            // of the result predicts the token at position start + i + 1. This replaces the
+            // previous O(L^3) "one forward pass per target token" approach with an O(L^2) one.
+            var chunkStart = 0;
+            while (chunkStart < tokenIds.Count - 1)
+            {
+                var chunkLength = Math.Min(Config.MaxSequenceLength, tokenIds.Count - chunkStart);
+                var chunk = new int[chunkLength];
+                for (var i = 0; i < chunkLength; i++)
+                {
+                    chunk[i] = tokenIds[chunkStart + i];
+                }
+
+                var logits = Transformer.Forward(chunk);
+                var vocabSize = logits.GetLength(1);
+
+                // Row i of logits predicts the token at chunk position i + 1 (i.e. absolute
+                // position chunkStart + i + 1). We compute per-row negative log-likelihood for
+                // all predictable positions in this chunk.
+                for (var row = 0; row < chunkLength - 1; row++)
+                {
+                    var targetTokenId = tokenIds[chunkStart + row + 1];
+                    totalLoss -= Math.Log(GetTargetProbabilityAtRow(logits, row, targetTokenId, vocabSize));
+                    totalTokens++;
+                }
+
+                // Advance past the fully-predicted portion. If the chunk covered the final
+                // token, we're done. Otherwise advance by (chunkLength - 1) so the next chunk's
+                // first row predicts the next unseen target.
+                if (chunkStart + chunkLength >= tokenIds.Count)
+                {
+                    break;
+                }
+
+                chunkStart += chunkLength - 1;
             }
         }
 
         return totalTokens == 0 ? 0d : Math.Exp(totalLoss / totalTokens);
+    }
+
+    private static double GetTargetProbabilityAtRow(float[,] logits, int row, int targetId, int vocabSize)
+    {
+        var maxLogit = double.NegativeInfinity;
+        for (var column = 0; column < vocabSize; column++)
+        {
+            var value = logits[row, column];
+            if (value > maxLogit)
+            {
+                maxLogit = value;
+            }
+        }
+
+        var partition = 0d;
+        var targetProbability = 0d;
+        for (var column = 0; column < vocabSize; column++)
+        {
+            var probabilityMass = Math.Exp(logits[row, column] - maxLogit);
+            partition += probabilityMass;
+            if (column == targetId)
+            {
+                targetProbability = probabilityMass;
+            }
+        }
+
+        if (partition <= 0d)
+        {
+            return ProbabilityFloor;
+        }
+
+        return Math.Max(targetProbability / partition, ProbabilityFloor);
     }
 
     public TernaryWeightStats GetTernaryWeightStats()

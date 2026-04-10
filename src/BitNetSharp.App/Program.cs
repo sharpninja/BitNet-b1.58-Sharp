@@ -22,10 +22,21 @@ if (command == "benchmark-report")
 {
     var reportDirectory = ParseOption(args, "--output=");
     var commitHash = ParseOption(args, "--commit=");
+    var perplexitySamplePercentRaw = ParseOption(args, "--perplexity-sample-percent=");
+    var perplexitySamplePercent = 10d;
+    if (!string.IsNullOrWhiteSpace(perplexitySamplePercentRaw)
+        && double.TryParse(perplexitySamplePercentRaw, System.Globalization.NumberStyles.Float, System.Globalization.CultureInfo.InvariantCulture, out var parsedPercent)
+        && parsedPercent > 0d
+        && parsedPercent <= 100d)
+    {
+        perplexitySamplePercent = parsedPercent;
+    }
+
     var outputPath = await HostedAgentBenchmarkReportRunner.RunAsync(
         HostedAgentBenchmarkOptions.Parse(args, verbosity),
         reportDirectory,
-        commitHash);
+        commitHash,
+        perplexitySamplePercent);
     Console.WriteLine($"Saved benchmark comparison report to {outputPath}");
 
     // Force exit: BenchmarkDotNet and the Microsoft.Agents.AI hosting framework

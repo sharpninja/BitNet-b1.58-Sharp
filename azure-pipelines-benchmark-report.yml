@@ -16,6 +16,9 @@ variables:
   SolutionFile: BitNet-b1.58-Sharp.slnx
   BenchmarkArtifactName: benchmark-report
   AzureStaticWebAppsApiToken: ""
+  # Percentage (0, 100] of the WikiText2 validation set to evaluate for perplexity in the
+  # benchmark report. Stride-sampled evenly across the corpus. Default 100% (full coverage).
+  PerplexitySamplePercent: "100"
 
 stages:
   - stage: benchmark
@@ -23,7 +26,7 @@ stages:
     jobs:
       - job: benchmark
         displayName: Run slow-lane validation and generate report
-        timeoutInMinutes: 45
+        timeoutInMinutes: 0
         pool:
           name: Default
         steps:
@@ -58,6 +61,7 @@ stages:
               --compare-model=traditional-local
               --commit=$(Build.SourceVersion)
               --output="$(Build.ArtifactStagingDirectory)/benchmark-report"
+              --perplexity-sample-percent=$(PerplexitySamplePercent)
             displayName: Generate benchmark comparison report
 
           - task: PublishPipelineArtifact@1
