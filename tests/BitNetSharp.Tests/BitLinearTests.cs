@@ -253,7 +253,9 @@ public sealed class BitLinearTests
         const int outputDim = 3;
         var layer = new BitLinear(new BitLinearConfig(inputDimension: inputDim, outputDimension: outputDim));
 
-        var expected = (long)(inputDim * outputDim * sizeof(sbyte)) + sizeof(float);
+        // Per-row packed: outputDim * ceil(inputDim / 5) bytes + sizeof(float) for Gamma
+        var packedStride = (inputDim + 4) / 5;
+        var expected = (long)(outputDim * packedStride) + sizeof(float);
 
         Assert.Equal(expected, layer.EstimateResidentParameterBytes());
     }

@@ -1,3 +1,4 @@
+using System.Buffers;
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using BitNetSharp.Core.Quantization;
@@ -10,7 +11,9 @@ public sealed class BitLinear : Module
     private const float WeightQuantizationEpsilon = 1e-6f;
     private static readonly bool UseSimd = Vector.IsHardwareAccelerated && Vector<sbyte>.Count >= 16;
 
-    private readonly sbyte[] _ternaryWeights;
+    private readonly int _totalWeights;
+    private readonly int _packedStride; // packed bytes per output row
+    private byte[] _packedWeights;
 
     // Training state (null until InitializeMasterWeights is called)
     private float[]? _masterWeights;
@@ -22,7 +25,9 @@ public sealed class BitLinear : Module
         ArgumentNullException.ThrowIfNull(config);
 
         Config = config;
-        _ternaryWeights = new sbyte[config.OutputDimension * config.InputDimension];
+        _totalWeights = config.OutputDimension * config.InputDimension;
+        _packedStride = (config.InputDimension + 4) / 5;
+        _packedWeights = new byte[config.OutputDimension * _packedStride];
     }
 
     public BitLinearConfig Config { get; }
@@ -36,7 +41,7 @@ public sealed class BitLinear : Module
     public int ActivationQuantizationBitWidth => 8;
 
     public long EstimateResidentParameterBytes() =>
-        ((long)_ternaryWeights.Length * sizeof(sbyte)) + sizeof(float);
+        (long)_packedWeights.Length + sizeof(float);
 
     public override float[,] Forward(float[,] input)
     {
@@ -49,7 +54,6 @@ public sealed class BitLinear : Module
             throw new ArgumentException($"Expected input dimension {inputDim}, but received {input.GetLength(1)}.", nameof(input));
         }
 
-        // Cache input for BackwardSTE when training
         if (_masterWeights is not null)
         {
             _cachedInput = (float[,])input.Clone();
@@ -59,22 +63,32 @@ public sealed class BitLinear : Module
         var rows = input.GetLength(0);
         var output = new float[rows, Config.OutputDimension];
 
-        for (var row = 0; row < rows; row++)
+        var unpackBuffer = ArrayPool<sbyte>.Shared.Rent(inputDim);
+        try
         {
-            var dequantScale = Gamma * rowScales[row];
-            var activationOffset = row * inputDim;
-
-            for (var outputColumn = 0; outputColumn < Config.OutputDimension; outputColumn++)
+            for (var row = 0; row < rows; row++)
             {
-                var weightSpan = _ternaryWeights.AsSpan(outputColumn * inputDim, inputDim);
-                var activationSpan = quantizedInput.AsSpan(activationOffset, inputDim);
+                var dequantScale = Gamma * rowScales[row];
+                var activationOffset = row * inputDim;
 
-                var isum = UseSimd
-                    ? TernaryDotSimd(weightSpan, activationSpan)
-                    : TernaryDotScalar(weightSpan, activationSpan);
+                for (var outputColumn = 0; outputColumn < Config.OutputDimension; outputColumn++)
+                {
+                    TritPacking.UnpackRowInto(_packedWeights, outputColumn * _packedStride, _packedStride, unpackBuffer, inputDim);
 
-                output[row, outputColumn] = isum * dequantScale;
+                    var weightSpan = unpackBuffer.AsSpan(0, inputDim);
+                    var activationSpan = quantizedInput.AsSpan(activationOffset, inputDim);
+
+                    var isum = UseSimd
+                        ? TernaryDotSimd(weightSpan, activationSpan)
+                        : TernaryDotScalar(weightSpan, activationSpan);
+
+                    output[row, outputColumn] = isum * dequantScale;
+                }
             }
+        }
+        finally
+        {
+            ArrayPool<sbyte>.Shared.Return(unpackBuffer);
         }
 
         return output;
@@ -89,31 +103,37 @@ public sealed class BitLinear : Module
         var inDim = Config.InputDimension;
         var gradInput = new float[rows, inDim];
 
-        // dL/dInput[row, j] = sum_i(gradOutput[row, i] * ternaryWeight[i, j] * Gamma)
-        for (var row = 0; row < rows; row++)
+        var unpackBuffer = ArrayPool<sbyte>.Shared.Rent(inDim);
+        try
         {
-            for (var outCol = 0; outCol < outDim; outCol++)
+            for (var row = 0; row < rows; row++)
             {
-                var grad = gradientOutput[row, outCol] * Gamma;
-                if (grad == 0f)
+                for (var outCol = 0; outCol < outDim; outCol++)
                 {
-                    continue;
-                }
+                    var grad = gradientOutput[row, outCol] * Gamma;
+                    if (grad == 0f)
+                    {
+                        continue;
+                    }
 
-                var weightOffset = outCol * inDim;
-                for (var inCol = 0; inCol < inDim; inCol++)
-                {
-                    var w = _ternaryWeights[weightOffset + inCol];
-                    if (w > 0) gradInput[row, inCol] += grad;
-                    else if (w < 0) gradInput[row, inCol] -= grad;
+                    TritPacking.UnpackRowInto(_packedWeights, outCol * _packedStride, _packedStride, unpackBuffer, inDim);
+
+                    for (var inCol = 0; inCol < inDim; inCol++)
+                    {
+                        var w = unpackBuffer[inCol];
+                        if (w > 0) gradInput[row, inCol] += grad;
+                        else if (w < 0) gradInput[row, inCol] -= grad;
+                    }
                 }
             }
         }
+        finally
+        {
+            ArrayPool<sbyte>.Shared.Return(unpackBuffer);
+        }
 
-        // Accumulate weight gradients if in training mode
         if (_masterGradients is not null && _cachedInput is not null)
         {
-            // STE: dL/dW_master[outCol, inCol] = sum_row(gradOutput[row, outCol] * input[row, inCol])
             for (var row = 0; row < rows; row++)
             {
                 for (var outCol = 0; outCol < outDim; outCol++)
@@ -138,13 +158,19 @@ public sealed class BitLinear : Module
 
     public void InitializeMasterWeights()
     {
-        var totalWeights = Config.OutputDimension * Config.InputDimension;
-        _masterWeights = new float[totalWeights];
-        _masterGradients = new float[totalWeights];
+        _masterWeights = new float[_totalWeights];
+        _masterGradients = new float[_totalWeights];
 
-        for (var i = 0; i < totalWeights; i++)
+        var inputDim = Config.InputDimension;
+        var buffer = new sbyte[inputDim];
+        for (var row = 0; row < Config.OutputDimension; row++)
         {
-            _masterWeights[i] = _ternaryWeights[i] * Gamma;
+            TritPacking.UnpackRowInto(_packedWeights, row * _packedStride, _packedStride, buffer, inputDim);
+            var offset = row * inputDim;
+            for (var col = 0; col < inputDim; col++)
+            {
+                _masterWeights[offset + col] = buffer[col] * Gamma;
+            }
         }
     }
 
@@ -163,10 +189,6 @@ public sealed class BitLinear : Module
             return;
         }
 
-        var outDim = Config.OutputDimension;
-        var inDim = Config.InputDimension;
-
-        // Recompute Gamma from master weights
         var absSum = 0f;
         for (var i = 0; i < _masterWeights.Length; i++)
         {
@@ -177,16 +199,19 @@ public sealed class BitLinear : Module
 
         if (Gamma <= 0f)
         {
-            Array.Clear(_ternaryWeights, 0, _ternaryWeights.Length);
+            Array.Clear(_packedWeights);
             return;
         }
 
+        var ternary = new sbyte[_totalWeights];
         for (var i = 0; i < _masterWeights.Length; i++)
         {
             var normalized = _masterWeights[i] / Gamma + WeightQuantizationEpsilon;
-            _ternaryWeights[i] = (sbyte)Math.Clamp(
+            ternary[i] = (sbyte)Math.Clamp(
                 (int)MathF.Round(normalized, MidpointRounding.AwayFromZero), -1, 1);
         }
+
+        PackRowMajor(ternary);
     }
 
     public float[]? ExportMasterWeights() => _masterWeights is null ? null : [.. _masterWeights];
@@ -197,10 +222,10 @@ public sealed class BitLinear : Module
     {
         ArgumentNullException.ThrowIfNull(weights);
 
-        if (weights.Length != Config.OutputDimension * Config.InputDimension)
+        if (weights.Length != _totalWeights)
         {
             throw new ArgumentException(
-                $"Expected {Config.OutputDimension * Config.InputDimension} weights, got {weights.Length}.",
+                $"Expected {_totalWeights} weights, got {weights.Length}.",
                 nameof(weights));
         }
 
@@ -224,11 +249,12 @@ public sealed class BitLinear : Module
 
         if (Gamma <= 0f)
         {
-            Array.Clear(_ternaryWeights, 0, _ternaryWeights.Length);
+            Array.Clear(_packedWeights);
             return;
         }
 
         var inputDim = Config.InputDimension;
+        var ternary = new sbyte[_totalWeights];
         for (var row = 0; row < Config.OutputDimension; row++)
         {
             var offset = row * inputDim;
@@ -237,22 +263,25 @@ public sealed class BitLinear : Module
                 var normalized = fullPrecisionWeights[row, column] / Gamma;
                 normalized += WeightQuantizationEpsilon;
                 var quantized = Math.Clamp((int)MathF.Round(normalized, MidpointRounding.AwayFromZero), -1, 1);
-                _ternaryWeights[offset + column] = (sbyte)quantized;
+                ternary[offset + column] = (sbyte)quantized;
             }
         }
+
+        PackRowMajor(ternary);
     }
 
     public float[,] ToFullPrecision()
     {
         var result = new float[Config.OutputDimension, Config.InputDimension];
         var inputDim = Config.InputDimension;
+        var buffer = new sbyte[inputDim];
 
         for (var row = 0; row < Config.OutputDimension; row++)
         {
-            var offset = row * inputDim;
+            TritPacking.UnpackRowInto(_packedWeights, row * _packedStride, _packedStride, buffer, inputDim);
             for (var column = 0; column < inputDim; column++)
             {
-                result[row, column] = _ternaryWeights[offset + column] * Gamma;
+                result[row, column] = buffer[column] * Gamma;
             }
         }
 
@@ -264,24 +293,50 @@ public sealed class BitLinear : Module
         var negativeCount = 0;
         var zeroCount = 0;
         var positiveCount = 0;
+        var inputDim = Config.InputDimension;
+        var buffer = new sbyte[inputDim];
 
-        foreach (var value in _ternaryWeights)
+        for (var row = 0; row < Config.OutputDimension; row++)
         {
-            switch (value)
+            TritPacking.UnpackRowInto(_packedWeights, row * _packedStride, _packedStride, buffer, inputDim);
+            for (var col = 0; col < inputDim; col++)
             {
-                case < 0:
-                    negativeCount++;
-                    break;
-                case > 0:
-                    positiveCount++;
-                    break;
-                default:
-                    zeroCount++;
-                    break;
+                switch (buffer[col])
+                {
+                    case < 0:
+                        negativeCount++;
+                        break;
+                    case > 0:
+                        positiveCount++;
+                        break;
+                    default:
+                        zeroCount++;
+                        break;
+                }
             }
         }
 
         return new TernaryWeightStats(negativeCount, zeroCount, positiveCount);
+    }
+
+    private void PackRowMajor(sbyte[] ternary)
+    {
+        var inputDim = Config.InputDimension;
+        for (var row = 0; row < Config.OutputDimension; row++)
+        {
+            var srcOffset = row * inputDim;
+            var dstOffset = row * _packedStride;
+            for (var pi = 0; pi < _packedStride; pi++)
+            {
+                var baseIdx = srcOffset + pi * 5;
+                sbyte t0 = baseIdx < ternary.Length ? ternary[baseIdx] : (sbyte)0;
+                sbyte t1 = baseIdx + 1 < ternary.Length ? ternary[baseIdx + 1] : (sbyte)0;
+                sbyte t2 = baseIdx + 2 < ternary.Length ? ternary[baseIdx + 2] : (sbyte)0;
+                sbyte t3 = baseIdx + 3 < ternary.Length ? ternary[baseIdx + 3] : (sbyte)0;
+                sbyte t4 = baseIdx + 4 < ternary.Length ? ternary[baseIdx + 4] : (sbyte)0;
+                _packedWeights[dstOffset + pi] = TritPacking.PackFive(t0, t1, t2, t3, t4);
+            }
+        }
     }
 
     private static float ComputeAbsMean(float[,] weights)
@@ -334,7 +389,6 @@ public sealed class BitLinear : Module
             var posVals = Vector.ConditionalSelect(posMask, aVec, Vector<sbyte>.Zero);
             var negVals = Vector.ConditionalSelect(negMask, aVec, Vector<sbyte>.Zero);
 
-            // Widen sbyte to short for safe accumulation
             Vector.Widen(posVals, out var posLo, out var posHi);
             Vector.Widen(negVals, out var negLo, out var negHi);
 
@@ -342,14 +396,12 @@ public sealed class BitLinear : Module
             accumNeg += negLo + negHi;
         }
 
-        // Reduce short vectors to scalar via widening to int
         var result = 0;
         for (var j = 0; j < Vector<short>.Count; j++)
         {
             result += accumPos[j] - accumNeg[j];
         }
 
-        // Scalar tail
         for (; i < weights.Length; i++)
         {
             var w = weights[i];
