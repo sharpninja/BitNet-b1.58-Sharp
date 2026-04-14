@@ -39,20 +39,25 @@ public sealed class BitLinear : Module
             throw new ArgumentException($"Expected input dimension {Config.InputDimension}, but received {input.GetLength(1)}.", nameof(input));
         }
 
-        var quantizedInput = QuantizeActivations(input);
-        var output = new float[input.GetLength(0), Config.OutputDimension];
+        var (quantizedInput, rowScales) = QuantizeActivations(input);
+        var rows = input.GetLength(0);
+        var output = new float[rows, Config.OutputDimension];
 
-        for (var row = 0; row < quantizedInput.GetLength(0); row++)
+        for (var row = 0; row < rows; row++)
         {
+            var dequantScale = Gamma * rowScales[row];
+
             for (var outputColumn = 0; outputColumn < Config.OutputDimension; outputColumn++)
             {
-                var sum = 0f;
+                var isum = 0;
                 for (var inputColumn = 0; inputColumn < Config.InputDimension; inputColumn++)
                 {
-                    sum += quantizedInput[row, inputColumn] * _ternaryWeights[outputColumn, inputColumn];
+                    var w = _ternaryWeights[outputColumn, inputColumn];
+                    if (w > 0) isum += quantizedInput[row, inputColumn];
+                    else if (w < 0) isum -= quantizedInput[row, inputColumn];
                 }
 
-                output[row, outputColumn] = sum * Gamma;
+                output[row, outputColumn] = isum * dequantScale;
             }
         }
 
@@ -146,31 +151,37 @@ public sealed class BitLinear : Module
         return sum / weights.Length;
     }
 
-    private static float[,] QuantizeActivations(float[,] input)
+    private static (sbyte[,] quantized, float[] rowScales) QuantizeActivations(float[,] input)
     {
-        var result = new float[input.GetLength(0), input.GetLength(1)];
+        var rows = input.GetLength(0);
+        var cols = input.GetLength(1);
+        var quantized = new sbyte[rows, cols];
+        var rowScales = new float[rows];
 
-        for (var row = 0; row < input.GetLength(0); row++)
+        for (var row = 0; row < rows; row++)
         {
             var maxAbs = 0f;
-            for (var column = 0; column < input.GetLength(1); column++)
+            for (var column = 0; column < cols; column++)
             {
                 maxAbs = MathF.Max(maxAbs, MathF.Abs(input[row, column]));
             }
 
             if (maxAbs <= 0f)
             {
+                rowScales[row] = 1f;
                 continue;
             }
 
             var scale = maxAbs / ActivationQuantizationMaxMagnitude;
-            for (var column = 0; column < input.GetLength(1); column++)
+            rowScales[row] = scale;
+
+            for (var column = 0; column < cols; column++)
             {
-                var quantized = Math.Clamp((int)MathF.Round(input[row, column] / scale, MidpointRounding.AwayFromZero), -ActivationQuantizationMaxMagnitude, ActivationQuantizationMaxMagnitude);
-                result[row, column] = quantized * scale;
+                var q = (int)MathF.Round(input[row, column] / scale, MidpointRounding.AwayFromZero);
+                quantized[row, column] = (sbyte)Math.Clamp(q, -ActivationQuantizationMaxMagnitude, ActivationQuantizationMaxMagnitude);
             }
         }
 
-        return result;
+        return (quantized, rowScales);
     }
 }
