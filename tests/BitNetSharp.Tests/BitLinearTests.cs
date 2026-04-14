@@ -253,4 +253,32 @@ public sealed class BitLinearTests
 
         Assert.Equal(expected, layer.EstimateResidentParameterBytes());
     }
+
+    [Theory]
+    [InlineData(17)]
+    [InlineData(31)]
+    [InlineData(100)]
+    [InlineData(256)]
+    public void Forward_NonAlignedDimension_ProducesFiniteOutput(int inputDim)
+    {
+        var layer = new BitLinear(new BitLinearConfig(inputDimension: inputDim, outputDimension: 2));
+
+        var weights = new float[2, inputDim];
+        for (var i = 0; i < inputDim; i++)
+        {
+            weights[0, i] = (i % 3 == 0) ? 2.0f : (i % 3 == 1) ? -2.0f : 0.05f;
+            weights[1, i] = (i % 2 == 0) ? 2.0f : -2.0f;
+        }
+
+        layer.QuantizeFromFullPrecision(weights);
+
+        var input = new float[1, inputDim];
+        for (var i = 0; i < inputDim; i++)
+            input[0, i] = (i % 2 == 0) ? 0.5f : -0.3f;
+
+        var output = layer.Forward(input);
+
+        Assert.True(float.IsFinite(output[0, 0]));
+        Assert.True(float.IsFinite(output[0, 1]));
+    }
 }

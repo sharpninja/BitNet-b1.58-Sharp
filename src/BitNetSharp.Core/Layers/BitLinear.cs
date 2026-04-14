@@ -1,3 +1,5 @@
+using System.Numerics;
+using System.Runtime.CompilerServices;
 using BitNetSharp.Core.Quantization;
 
 namespace BitNetSharp.Core.Layers;
@@ -6,6 +8,7 @@ public sealed class BitLinear : Module
 {
     private const int ActivationQuantizationMaxMagnitude = 127;
     private const float WeightQuantizationEpsilon = 1e-6f;
+    private static readonly bool UseSimd = Vector.IsHardwareAccelerated && Vector<sbyte>.Count >= 16;
 
     private readonly sbyte[] _ternaryWeights;
 
@@ -52,14 +55,12 @@ public sealed class BitLinear : Module
 
             for (var outputColumn = 0; outputColumn < Config.OutputDimension; outputColumn++)
             {
-                var weightOffset = outputColumn * inputDim;
-                var isum = 0;
-                for (var inputColumn = 0; inputColumn < inputDim; inputColumn++)
-                {
-                    var w = _ternaryWeights[weightOffset + inputColumn];
-                    if (w > 0) isum += quantizedInput[activationOffset + inputColumn];
-                    else if (w < 0) isum -= quantizedInput[activationOffset + inputColumn];
-                }
+                var weightSpan = _ternaryWeights.AsSpan(outputColumn * inputDim, inputDim);
+                var activationSpan = quantizedInput.AsSpan(activationOffset, inputDim);
+
+                var isum = UseSimd
+                    ? TernaryDotSimd(weightSpan, activationSpan)
+                    : TernaryDotScalar(weightSpan, activationSpan);
 
                 output[row, outputColumn] = isum * dequantScale;
             }
@@ -157,6 +158,66 @@ public sealed class BitLinear : Module
         }
 
         return sum / weights.Length;
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static int TernaryDotScalar(ReadOnlySpan<sbyte> weights, ReadOnlySpan<sbyte> activations)
+    {
+        var sum = 0;
+        for (var i = 0; i < weights.Length; i++)
+        {
+            var w = weights[i];
+            if (w > 0) sum += activations[i];
+            else if (w < 0) sum -= activations[i];
+        }
+
+        return sum;
+    }
+
+    private static int TernaryDotSimd(ReadOnlySpan<sbyte> weights, ReadOnlySpan<sbyte> activations)
+    {
+        var vectorSize = Vector<sbyte>.Count;
+        var positiveOne = new Vector<sbyte>(1);
+        var negativeOne = new Vector<sbyte>(-1);
+        var accumPos = Vector<short>.Zero;
+        var accumNeg = Vector<short>.Zero;
+        var i = 0;
+
+        for (; i + vectorSize <= weights.Length; i += vectorSize)
+        {
+            var wVec = new Vector<sbyte>(weights.Slice(i));
+            var aVec = new Vector<sbyte>(activations.Slice(i));
+
+            var posMask = Vector.Equals(wVec, positiveOne);
+            var negMask = Vector.Equals(wVec, negativeOne);
+
+            var posVals = Vector.ConditionalSelect(posMask, aVec, Vector<sbyte>.Zero);
+            var negVals = Vector.ConditionalSelect(negMask, aVec, Vector<sbyte>.Zero);
+
+            // Widen sbyte to short for safe accumulation
+            Vector.Widen(posVals, out var posLo, out var posHi);
+            Vector.Widen(negVals, out var negLo, out var negHi);
+
+            accumPos += posLo + posHi;
+            accumNeg += negLo + negHi;
+        }
+
+        // Reduce short vectors to scalar via widening to int
+        var result = 0;
+        for (var j = 0; j < Vector<short>.Count; j++)
+        {
+            result += accumPos[j] - accumNeg[j];
+        }
+
+        // Scalar tail
+        for (; i < weights.Length; i++)
+        {
+            var w = weights[i];
+            if (w > 0) result += activations[i];
+            else if (w < 0) result -= activations[i];
+        }
+
+        return result;
     }
 
     private static (sbyte[] quantized, float[] rowScales) QuantizeActivations(float[,] input)
