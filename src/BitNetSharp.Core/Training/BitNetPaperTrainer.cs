@@ -395,45 +395,44 @@ public sealed class BitNetPaperTrainer
 
     private double CalculateAverageCrossEntropy(IReadOnlyList<string> samples)
     {
+        var outputWeights = _model.ExportOutputHeadWeights();
+        var probabilities = new float[outputWeights.GetLength(0)];
         var totalLoss = 0d;
         var totalTokens = 0;
-        foreach (var sample in samples)
+
+        for (var sampleIndex = 0; sampleIndex < samples.Count; sampleIndex++)
         {
-            var tokenIds = _model.EncodeTokenIds(sample, appendEndToken: true);
-            for (var index = 0; index < tokenIds.Count - 1; index++)
+            var tokenIds = _model.EncodeTokenIds(samples[sampleIndex], appendEndToken: true);
+            if (tokenIds.Count < 2)
             {
-                var context = tokenIds.Take(index + 1).ToArray();
-                var logits = _model.ForwardLogits(context);
-                totalLoss -= Math.Log(GetTargetProbability(logits, tokenIds[index + 1]));
+                continue;
+            }
+
+            var inputIds = tokenIds.Take(tokenIds.Count - 1).ToArray();
+            var targetIds = tokenIds.Skip(1).ToArray();
+            var hiddenStates = _model.ForwardHiddenStates(inputIds);
+
+            for (var position = 0; position < targetIds.Length; position++)
+            {
+                var features = GetRow(hiddenStates, position);
+                var logits = new float[outputWeights.GetLength(0)];
+                for (var row = 0; row < outputWeights.GetLength(0); row++)
+                {
+                    var sum = 0f;
+                    for (var column = 0; column < outputWeights.GetLength(1); column++)
+                    {
+                        sum += outputWeights[row, column] * features[column];
+                    }
+
+                    logits[row] = sum;
+                }
+
+                totalLoss += CrossEntropyLoss.FromLogits(logits, targetIds[position], probabilities);
                 totalTokens++;
             }
         }
 
         return totalTokens == 0 ? 0d : totalLoss / totalTokens;
-    }
-
-    private static double GetTargetProbability(float[,] logits, int targetId)
-    {
-        var lastRow = logits.GetLength(0) - 1;
-        var maxLogit = float.NegativeInfinity;
-        for (var column = 0; column < logits.GetLength(1); column++)
-        {
-            maxLogit = MathF.Max(maxLogit, logits[lastRow, column]);
-        }
-
-        var partition = 0d;
-        var targetProbability = 0d;
-        for (var column = 0; column < logits.GetLength(1); column++)
-        {
-            var probabilityMass = Math.Exp(logits[lastRow, column] - maxLogit);
-            partition += probabilityMass;
-            if (column == targetId)
-            {
-                targetProbability = probabilityMass;
-            }
-        }
-
-        return partition <= 0d ? 1e-9d : Math.Max(targetProbability / partition, 1e-9d);
     }
 
     private sealed record BatchResult(double TotalLoss, int Observations);

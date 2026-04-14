@@ -82,10 +82,21 @@ public static class BitNetPaperAuditor
         var feedForwardLayers = transformer.Layers.Select(static layer => layer.FeedForward).ToArray();
         var weightStats = model.GetTernaryWeightStats();
         var entropy = CalculateTernaryEntropy(weightStats);
+
+        Console.WriteLine("[Audit] Collecting weight statistics...");
+        Console.WriteLine("[Audit] Running training probe (3-epoch clone)...");
         var trainingProbe = RunTrainingProbe(model);
+
+        Console.WriteLine($"[Audit] Evaluating perplexity on {(perplexityDatasets ?? BitNetBenchmarkFixtures.PerplexityDatasets).Count} dataset(s)...");
         var perplexityResults = EvaluatePerplexity(model, perplexityDatasets ?? BitNetBenchmarkFixtures.PerplexityDatasets);
+
+        Console.WriteLine("[Audit] Running zero-shot task fixtures...");
         var zeroShotResults = EvaluateZeroShot(model);
+
+        Console.WriteLine("[Audit] Validating checkpoint round-trip...");
         var checkpointValidation = BitNetPaperCheckpoint.ValidateRoundTrip(model, prompt);
+
+        Console.WriteLine("[Audit] Running memory audit...");
         var comparableTraditionalModel = new TraditionalLocalModel(model.Options);
 
         var checks = new List<BitNetPaperAuditCheck>
@@ -323,32 +334,97 @@ public static class BitNetPaperAuditor
 
     private static IReadOnlyList<BitNetPaperPerplexityDatasetResult> EvaluatePerplexity(
         BitNetPaperModel model,
-        IReadOnlyList<BitNetBenchmarkTextFixture> datasets) =>
-        datasets
-            .Select(fixture =>
-            {
-                var totalLoss = 0d;
-                var totalTokens = 0;
+        IReadOnlyList<BitNetBenchmarkTextFixture> datasets)
+    {
+        var outputWeights = model.ExportOutputHeadWeights();
+        var probabilities = new float[outputWeights.GetLength(0)];
+        var results = new List<BitNetPaperPerplexityDatasetResult>(datasets.Count);
 
-                foreach (var sample in fixture.Samples)
+        for (var datasetIndex = 0; datasetIndex < datasets.Count; datasetIndex++)
+        {
+            var fixture = datasets[datasetIndex];
+            var totalLoss = 0d;
+            var totalTokens = 0;
+            var datasetStart = DateTime.UtcNow;
+
+            for (var sampleIndex = 0; sampleIndex < fixture.Samples.Count; sampleIndex++)
+            {
+                if (sampleIndex > 0 && fixture.Samples.Count > 5 && sampleIndex % Math.Max(1, fixture.Samples.Count / 5) == 0)
                 {
-                    var tokenIds = model.EncodeTokenIds(sample, appendEndToken: true);
-                    for (var index = 0; index < tokenIds.Count - 1; index++)
-                    {
-                        var logits = model.ForwardLogitsPerplexityStep(tokenIds, index);
-                        totalLoss -= Math.Log(GetTargetProbability(logits, tokenIds[index + 1]));
-                        totalTokens++;
-                    }
+                    var elapsed = (DateTime.UtcNow - datasetStart).TotalSeconds;
+                    var eta = datasetStart.AddSeconds(elapsed / sampleIndex * fixture.Samples.Count).ToLocalTime();
+                    var runPpl = totalTokens > 0 ? Math.Exp(totalLoss / totalTokens) : 0d;
+                    Console.WriteLine($"[Audit] {fixture.Name} {sampleIndex}/{fixture.Samples.Count} ({sampleIndex * 100 / fixture.Samples.Count}%) | Tokens: {totalTokens:N0} | Running ppl: {runPpl:F2} | ETA: {eta:HH:mm:ss}");
                 }
 
-                var averageCrossEntropy = totalTokens == 0 ? 0d : totalLoss / totalTokens;
-                return new BitNetPaperPerplexityDatasetResult(
-                    fixture.Name,
-                    fixture.Samples.Count,
-                    averageCrossEntropy,
-                    Math.Exp(averageCrossEntropy));
-            })
-            .ToArray();
+                var tokenIds = model.EncodeTokenIds(fixture.Samples[sampleIndex], appendEndToken: true);
+                if (tokenIds.Count < 2)
+                {
+                    continue;
+                }
+
+                // Truncate to max sequence length (model can only attend to this many tokens)
+                var maxLen = model.Config.MaxSequenceLength;
+                if (tokenIds.Count > maxLen)
+                {
+                    tokenIds = tokenIds.Take(maxLen).ToArray();
+                }
+
+                var inputIds = tokenIds.Take(tokenIds.Count - 1).ToArray();
+                var targetIds = tokenIds.Skip(1).ToArray();
+                var hiddenStates = model.ForwardHiddenStates(inputIds);
+
+                for (var position = 0; position < targetIds.Length; position++)
+                {
+                    var logits = new float[outputWeights.GetLength(0)];
+                    for (var row = 0; row < outputWeights.GetLength(0); row++)
+                    {
+                        var sum = 0f;
+                        for (var col = 0; col < outputWeights.GetLength(1); col++)
+                        {
+                            sum += outputWeights[row, col] * hiddenStates[position, col];
+                        }
+
+                        logits[row] = sum;
+                    }
+
+                    totalLoss -= Math.Log(Math.Max(GetSoftmaxProbability(logits, targetIds[position]), 1e-9d));
+                    totalTokens++;
+                }
+            }
+
+            var averageCrossEntropy = totalTokens == 0 ? 0d : totalLoss / totalTokens;
+            Console.WriteLine($"[Audit] {fixture.Name} complete: {Math.Exp(averageCrossEntropy):F2} ppl ({fixture.Samples.Count} samples, {totalTokens:N0} tokens)");
+
+            results.Add(new BitNetPaperPerplexityDatasetResult(
+                fixture.Name,
+                fixture.Samples.Count,
+                averageCrossEntropy,
+                Math.Exp(averageCrossEntropy)));
+        }
+
+        return results;
+    }
+
+    private static double GetSoftmaxProbability(float[] logits, int targetId)
+    {
+        var maxLogit = float.NegativeInfinity;
+        for (var i = 0; i < logits.Length; i++)
+        {
+            if (logits[i] > maxLogit) maxLogit = logits[i];
+        }
+
+        var partition = 0d;
+        var targetMass = 0d;
+        for (var i = 0; i < logits.Length; i++)
+        {
+            var mass = Math.Exp(logits[i] - maxLogit);
+            partition += mass;
+            if (i == targetId) targetMass = mass;
+        }
+
+        return partition <= 0d ? 1e-9d : targetMass / partition;
+    }
 
     private static IReadOnlyList<BitNetPaperZeroShotTaskResult> EvaluateZeroShot(BitNetPaperModel model) =>
         ZeroShotFixtures
