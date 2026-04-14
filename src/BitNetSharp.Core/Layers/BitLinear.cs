@@ -15,6 +15,9 @@ public sealed class BitLinear : Module
     private readonly int _packedStride; // packed bytes per output row
     private byte[] _packedWeights;
 
+    // Row permutation for cache-aware token-row layout (null = identity)
+    private int[]? _rowPermutation;
+
     // Training state (null until InitializeMasterWeights is called)
     private float[]? _masterWeights;
     private float[]? _masterGradients;
@@ -73,7 +76,8 @@ public sealed class BitLinear : Module
 
                 for (var outputColumn = 0; outputColumn < Config.OutputDimension; outputColumn++)
                 {
-                    TritPacking.UnpackRowInto(_packedWeights, outputColumn * _packedStride, _packedStride, unpackBuffer, inputDim);
+                    var physicalRow = _rowPermutation is not null ? _rowPermutation[outputColumn] : outputColumn;
+                    TritPacking.UnpackRowInto(_packedWeights, physicalRow * _packedStride, _packedStride, unpackBuffer, inputDim);
 
                     var weightSpan = unpackBuffer.AsSpan(0, inputDim);
                     var activationSpan = quantizedInput.AsSpan(activationOffset, inputDim);
@@ -116,7 +120,8 @@ public sealed class BitLinear : Module
                         continue;
                     }
 
-                    TritPacking.UnpackRowInto(_packedWeights, outCol * _packedStride, _packedStride, unpackBuffer, inDim);
+                    var physicalRow = _rowPermutation is not null ? _rowPermutation[outCol] : outCol;
+                    TritPacking.UnpackRowInto(_packedWeights, physicalRow * _packedStride, _packedStride, unpackBuffer, inDim);
 
                     for (var inCol = 0; inCol < inDim; inCol++)
                     {
@@ -233,6 +238,31 @@ public sealed class BitLinear : Module
         _masterGradients ??= new float[weights.Length];
         weights.CopyTo(_masterWeights, 0);
     }
+
+    public void ApplyRowPermutation(int[] permutation)
+    {
+        ArgumentNullException.ThrowIfNull(permutation);
+
+        if (permutation.Length != Config.OutputDimension)
+        {
+            throw new ArgumentException(
+                $"Permutation length {permutation.Length} does not match output dimension {Config.OutputDimension}.",
+                nameof(permutation));
+        }
+
+        // Physically reorder packed weight rows
+        var newPacked = new byte[_packedWeights.Length];
+        for (var logical = 0; logical < Config.OutputDimension; logical++)
+        {
+            var physical = permutation[logical];
+            Array.Copy(_packedWeights, logical * _packedStride, newPacked, physical * _packedStride, _packedStride);
+        }
+
+        _packedWeights = newPacked;
+        _rowPermutation = (int[])permutation.Clone();
+    }
+
+    public int[]? ExportRowPermutation() => _rowPermutation is null ? null : (int[])_rowPermutation.Clone();
 
     public void QuantizeFromFullPrecision(float[,] fullPrecisionWeights)
     {
