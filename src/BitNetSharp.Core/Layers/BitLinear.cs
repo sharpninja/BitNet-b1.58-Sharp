@@ -12,6 +12,11 @@ public sealed class BitLinear : Module
 
     private readonly sbyte[] _ternaryWeights;
 
+    // Training state (null until InitializeMasterWeights is called)
+    private float[]? _masterWeights;
+    private float[]? _masterGradients;
+    private float[,]? _cachedInput;
+
     public BitLinear(BitLinearConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
@@ -44,6 +49,12 @@ public sealed class BitLinear : Module
             throw new ArgumentException($"Expected input dimension {inputDim}, but received {input.GetLength(1)}.", nameof(input));
         }
 
+        // Cache input for BackwardSTE when training
+        if (_masterWeights is not null)
+        {
+            _cachedInput = (float[,])input.Clone();
+        }
+
         var (quantizedInput, rowScales) = QuantizeActivations(input);
         var rows = input.GetLength(0);
         var output = new float[rows, Config.OutputDimension];
@@ -67,6 +78,135 @@ public sealed class BitLinear : Module
         }
 
         return output;
+    }
+
+    public override float[,] BackwardSTE(float[,] gradientOutput)
+    {
+        ArgumentNullException.ThrowIfNull(gradientOutput);
+
+        var rows = gradientOutput.GetLength(0);
+        var outDim = Config.OutputDimension;
+        var inDim = Config.InputDimension;
+        var gradInput = new float[rows, inDim];
+
+        // dL/dInput[row, j] = sum_i(gradOutput[row, i] * ternaryWeight[i, j] * Gamma)
+        for (var row = 0; row < rows; row++)
+        {
+            for (var outCol = 0; outCol < outDim; outCol++)
+            {
+                var grad = gradientOutput[row, outCol] * Gamma;
+                if (grad == 0f)
+                {
+                    continue;
+                }
+
+                var weightOffset = outCol * inDim;
+                for (var inCol = 0; inCol < inDim; inCol++)
+                {
+                    var w = _ternaryWeights[weightOffset + inCol];
+                    if (w > 0) gradInput[row, inCol] += grad;
+                    else if (w < 0) gradInput[row, inCol] -= grad;
+                }
+            }
+        }
+
+        // Accumulate weight gradients if in training mode
+        if (_masterGradients is not null && _cachedInput is not null)
+        {
+            // STE: dL/dW_master[outCol, inCol] = sum_row(gradOutput[row, outCol] * input[row, inCol])
+            for (var row = 0; row < rows; row++)
+            {
+                for (var outCol = 0; outCol < outDim; outCol++)
+                {
+                    var grad = gradientOutput[row, outCol];
+                    if (grad == 0f)
+                    {
+                        continue;
+                    }
+
+                    var weightOffset = outCol * inDim;
+                    for (var inCol = 0; inCol < inDim; inCol++)
+                    {
+                        _masterGradients[weightOffset + inCol] += grad * _cachedInput[row, inCol];
+                    }
+                }
+            }
+        }
+
+        return gradInput;
+    }
+
+    public void InitializeMasterWeights()
+    {
+        var totalWeights = Config.OutputDimension * Config.InputDimension;
+        _masterWeights = new float[totalWeights];
+        _masterGradients = new float[totalWeights];
+
+        for (var i = 0; i < totalWeights; i++)
+        {
+            _masterWeights[i] = _ternaryWeights[i] * Gamma;
+        }
+    }
+
+    public void ZeroGradients()
+    {
+        if (_masterGradients is not null)
+        {
+            Array.Clear(_masterGradients);
+        }
+    }
+
+    public void SyncTernaryFromMaster()
+    {
+        if (_masterWeights is null)
+        {
+            return;
+        }
+
+        var outDim = Config.OutputDimension;
+        var inDim = Config.InputDimension;
+
+        // Recompute Gamma from master weights
+        var absSum = 0f;
+        for (var i = 0; i < _masterWeights.Length; i++)
+        {
+            absSum += MathF.Abs(_masterWeights[i]);
+        }
+
+        Gamma = _masterWeights.Length > 0 ? absSum / _masterWeights.Length : 0f;
+
+        if (Gamma <= 0f)
+        {
+            Array.Clear(_ternaryWeights, 0, _ternaryWeights.Length);
+            return;
+        }
+
+        for (var i = 0; i < _masterWeights.Length; i++)
+        {
+            var normalized = _masterWeights[i] / Gamma + WeightQuantizationEpsilon;
+            _ternaryWeights[i] = (sbyte)Math.Clamp(
+                (int)MathF.Round(normalized, MidpointRounding.AwayFromZero), -1, 1);
+        }
+    }
+
+    public float[]? ExportMasterWeights() => _masterWeights is null ? null : [.. _masterWeights];
+
+    public float[]? ExportMasterGradients() => _masterGradients is null ? null : [.. _masterGradients];
+
+    public void ImportMasterWeights(float[] weights)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+
+        if (weights.Length != Config.OutputDimension * Config.InputDimension)
+        {
+            throw new ArgumentException(
+                $"Expected {Config.OutputDimension * Config.InputDimension} weights, got {weights.Length}.",
+                nameof(weights));
+        }
+
+        _masterWeights ??= new float[weights.Length];
+        _masterGradients ??= new float[weights.Length];
+        weights.CopyTo(_masterWeights, 0);
     }
 
     public void QuantizeFromFullPrecision(float[,] fullPrecisionWeights)

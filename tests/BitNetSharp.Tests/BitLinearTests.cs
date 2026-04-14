@@ -227,19 +227,23 @@ public sealed class BitLinearTests
     }
 
     [Fact]
-    public void BackwardSte_ReturnsClonedGradient()
+    public void BackwardSte_ReturnsInputGradientNotClone()
     {
         var layer = new BitLinear(new BitLinearConfig(inputDimension: 2, outputDimension: 1));
-        var gradient = new float[,]
-        {
-            { 1.5f, -0.25f }
-        };
+        layer.QuantizeFromFullPrecision(new float[,] { { 2.0f, -2.0f } });
 
+        // Forward to populate cache
+        layer.Forward(new float[,] { { 0.5f, -0.25f } });
+
+        var gradient = new float[,] { { 1.5f } };
         var result = layer.BackwardSTE(gradient);
 
         Assert.NotSame(gradient, result);
-        Assert.Equal(gradient[0, 0], result[0, 0]);
-        Assert.Equal(gradient[0, 1], result[0, 1]);
+        Assert.Equal(1, result.GetLength(0));
+        Assert.Equal(2, result.GetLength(1));
+        // With weights [1, -1] and Gamma, gradient should flow through
+        Assert.True(float.IsFinite(result[0, 0]));
+        Assert.True(float.IsFinite(result[0, 1]));
     }
 
     [Fact]
@@ -252,6 +256,72 @@ public sealed class BitLinearTests
         var expected = (long)(inputDim * outputDim * sizeof(sbyte)) + sizeof(float);
 
         Assert.Equal(expected, layer.EstimateResidentParameterBytes());
+    }
+
+    [Fact]
+    public void InitializeMasterWeights_CreatesFloatRepresentation()
+    {
+        var layer = new BitLinear(new BitLinearConfig(inputDimension: 3, outputDimension: 2));
+        layer.QuantizeFromFullPrecision(new float[,]
+        {
+            { 2.0f, -2.0f, 0.05f },
+            { -2.0f, 2.0f, 2.0f }
+        });
+
+        layer.InitializeMasterWeights();
+        var masters = layer.ExportMasterWeights();
+
+        Assert.NotNull(masters);
+        Assert.Equal(6, masters!.Length);
+
+        // Master weights should be ternary * Gamma
+        var gamma = layer.Gamma;
+        Assert.Equal(gamma, masters[0], 4);   // ternary[0,0]=1 -> 1*gamma
+        Assert.Equal(-gamma, masters[1], 4);  // ternary[0,1]=-1 -> -1*gamma
+    }
+
+    [Fact]
+    public void BackwardSTE_ReturnsCorrectInputGradientShape()
+    {
+        var layer = new BitLinear(new BitLinearConfig(inputDimension: 4, outputDimension: 2));
+        layer.QuantizeFromFullPrecision(new float[,]
+        {
+            { 2.0f, -2.0f, 0.05f, 2.0f },
+            { -2.0f, 2.0f, 2.0f, -2.0f }
+        });
+
+        // Forward to cache input
+        var input = new float[,] { { 0.5f, -0.3f, 0.7f, -0.1f } };
+        layer.Forward(input);
+
+        // Backward
+        var gradOutput = new float[,] { { 1.0f, -0.5f } };
+        var gradInput = layer.BackwardSTE(gradOutput);
+
+        Assert.Equal(1, gradInput.GetLength(0));
+        Assert.Equal(4, gradInput.GetLength(1));
+        Assert.True(float.IsFinite(gradInput[0, 0]));
+        Assert.True(float.IsFinite(gradInput[0, 3]));
+    }
+
+    [Fact]
+    public void BackwardSTE_AccumulatesWeightGradients()
+    {
+        var layer = new BitLinear(new BitLinearConfig(inputDimension: 2, outputDimension: 1));
+        layer.QuantizeFromFullPrecision(new float[,] { { 2.0f, -2.0f } });
+        layer.InitializeMasterWeights();
+        layer.ZeroGradients();
+
+        var input = new float[,] { { 1.0f, 0.5f } };
+        layer.Forward(input);
+
+        var gradOutput = new float[,] { { 1.0f } };
+        layer.BackwardSTE(gradOutput);
+
+        var grads = layer.ExportMasterGradients();
+        Assert.NotNull(grads);
+        // Weight gradients should be non-zero for a non-trivial input
+        Assert.True(grads![0] != 0f || grads[1] != 0f);
     }
 
     [Theory]
