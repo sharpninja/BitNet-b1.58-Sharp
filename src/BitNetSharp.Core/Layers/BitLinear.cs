@@ -7,14 +7,14 @@ public sealed class BitLinear : Module
     private const int ActivationQuantizationMaxMagnitude = 127;
     private const float WeightQuantizationEpsilon = 1e-6f;
 
-    private readonly sbyte[,] _ternaryWeights;
+    private readonly sbyte[] _ternaryWeights;
 
     public BitLinear(BitLinearConfig config)
     {
         ArgumentNullException.ThrowIfNull(config);
 
         Config = config;
-        _ternaryWeights = new sbyte[config.OutputDimension, config.InputDimension];
+        _ternaryWeights = new sbyte[config.OutputDimension * config.InputDimension];
     }
 
     public BitLinearConfig Config { get; }
@@ -34,9 +34,11 @@ public sealed class BitLinear : Module
     {
         ArgumentNullException.ThrowIfNull(input);
 
-        if (input.GetLength(1) != Config.InputDimension)
+        var inputDim = Config.InputDimension;
+
+        if (input.GetLength(1) != inputDim)
         {
-            throw new ArgumentException($"Expected input dimension {Config.InputDimension}, but received {input.GetLength(1)}.", nameof(input));
+            throw new ArgumentException($"Expected input dimension {inputDim}, but received {input.GetLength(1)}.", nameof(input));
         }
 
         var (quantizedInput, rowScales) = QuantizeActivations(input);
@@ -46,15 +48,17 @@ public sealed class BitLinear : Module
         for (var row = 0; row < rows; row++)
         {
             var dequantScale = Gamma * rowScales[row];
+            var activationOffset = row * inputDim;
 
             for (var outputColumn = 0; outputColumn < Config.OutputDimension; outputColumn++)
             {
+                var weightOffset = outputColumn * inputDim;
                 var isum = 0;
-                for (var inputColumn = 0; inputColumn < Config.InputDimension; inputColumn++)
+                for (var inputColumn = 0; inputColumn < inputDim; inputColumn++)
                 {
-                    var w = _ternaryWeights[outputColumn, inputColumn];
-                    if (w > 0) isum += quantizedInput[row, inputColumn];
-                    else if (w < 0) isum -= quantizedInput[row, inputColumn];
+                    var w = _ternaryWeights[weightOffset + inputColumn];
+                    if (w > 0) isum += quantizedInput[activationOffset + inputColumn];
+                    else if (w < 0) isum -= quantizedInput[activationOffset + inputColumn];
                 }
 
                 output[row, outputColumn] = isum * dequantScale;
@@ -83,14 +87,16 @@ public sealed class BitLinear : Module
             return;
         }
 
+        var inputDim = Config.InputDimension;
         for (var row = 0; row < Config.OutputDimension; row++)
         {
-            for (var column = 0; column < Config.InputDimension; column++)
+            var offset = row * inputDim;
+            for (var column = 0; column < inputDim; column++)
             {
                 var normalized = fullPrecisionWeights[row, column] / Gamma;
                 normalized += WeightQuantizationEpsilon;
                 var quantized = Math.Clamp((int)MathF.Round(normalized, MidpointRounding.AwayFromZero), -1, 1);
-                _ternaryWeights[row, column] = (sbyte)quantized;
+                _ternaryWeights[offset + column] = (sbyte)quantized;
             }
         }
     }
@@ -98,12 +104,14 @@ public sealed class BitLinear : Module
     public float[,] ToFullPrecision()
     {
         var result = new float[Config.OutputDimension, Config.InputDimension];
+        var inputDim = Config.InputDimension;
 
         for (var row = 0; row < Config.OutputDimension; row++)
         {
-            for (var column = 0; column < Config.InputDimension; column++)
+            var offset = row * inputDim;
+            for (var column = 0; column < inputDim; column++)
             {
-                result[row, column] = _ternaryWeights[row, column] * Gamma;
+                result[row, column] = _ternaryWeights[offset + column] * Gamma;
             }
         }
 
@@ -151,11 +159,11 @@ public sealed class BitLinear : Module
         return sum / weights.Length;
     }
 
-    private static (sbyte[,] quantized, float[] rowScales) QuantizeActivations(float[,] input)
+    private static (sbyte[] quantized, float[] rowScales) QuantizeActivations(float[,] input)
     {
         var rows = input.GetLength(0);
         var cols = input.GetLength(1);
-        var quantized = new sbyte[rows, cols];
+        var quantized = new sbyte[rows * cols];
         var rowScales = new float[rows];
 
         for (var row = 0; row < rows; row++)
@@ -175,10 +183,11 @@ public sealed class BitLinear : Module
             var scale = maxAbs / ActivationQuantizationMaxMagnitude;
             rowScales[row] = scale;
 
+            var offset = row * cols;
             for (var column = 0; column < cols; column++)
             {
                 var q = (int)MathF.Round(input[row, column] / scale, MidpointRounding.AwayFromZero);
-                quantized[row, column] = (sbyte)Math.Clamp(q, -ActivationQuantizationMaxMagnitude, ActivationQuantizationMaxMagnitude);
+                quantized[offset + column] = (sbyte)Math.Clamp(q, -ActivationQuantizationMaxMagnitude, ActivationQuantizationMaxMagnitude);
             }
         }
 
