@@ -43,3 +43,275 @@ planning:
       done: true
     - task: Split expensive training and benchmark validations into a separate category or CI lane so the default suite stays fast.
       done: true
+Implementation:
+  high-priority:
+  - id: IMPL-BITLINEAR-001
+    title: 'Fix 1: Eliminate float multiply in BitLinear.Forward()'
+    done: true
+    completed: 2026-04-14
+    description:
+    - Replace float multiply with conditional add/subtract/skip in BitLinear.Forward() inner loop
+    - Line 52 does float multiply for ternary weights that are only -1/0/+1
+    - Eliminates core inefficiency that wastes ternary weight advantage
+    done-summary: Replaced float multiply with conditional add/subtract/skip. 3 new tests. Commit 37bead6.
+    technical-details:
+    - 'File: src/BitNetSharp.Core/Layers/BitLinear.cs'
+    - sbyte weight promotes to float - full FP multiply for values only -1/0/+1
+    - Zero case (50pct of weights) is implicit fall-through
+    - Numerical equivalence is exact
+    functional-requirements:
+    - Output numerically identical
+    technical-requirements:
+    - No public API changes
+    - TreatWarningsAsErrors clean
+    implementation-tasks:
+    - task: 'Write regression tests: golden-value, all-zero, mixed ternary'
+      done: false
+    - task: Replace inner loop body with conditional add/subtract
+      done: false
+    - task: Verify existing tests still pass and clean build
+      done: false
+  - id: IMPL-BITLINEAR-002
+    title: 'Fix 2: Keep integer activations through dot product (W1.58A8)'
+    done: true
+    completed: 2026-04-14
+    description:
+    - Change QuantizeActivations to return (sbyte[,], float[]) instead of float[,]
+    - 'Accumulate with int, dequantize once at output: isum * rowScale * Gamma'
+    - 'Implements W1.58A8 scheme: 1.58-bit weights with 8-bit activations'
+    done-summary: QuantizeActivations returns (sbyte[,],float[]). Forward accumulates with int, dequantizes once. 2 new tests. Commit 37bead6.
+    technical-details:
+    - QuantizeActivations is private static - no API break
+    - Max int accumulation for dim 65536 is 8.3M - fits int32
+    - Integer path is MORE precise than float
+    depends-on:
+    - IMPL-BITLINEAR-001
+    functional-requirements:
+    - Output within 1e-4f of previous
+    technical-requirements:
+    - No public API changes
+    implementation-tasks:
+    - task: 'Write equivalence test: integer vs float path within 1e-4f'
+      done: false
+    - task: Rewrite QuantizeActivations and Forward() with int accumulation
+      done: false
+    - task: Update existing test expected values and clean build
+      done: false
+  - id: IMPL-BITLINEAR-003
+    title: 'Fix 3: Flatten 2D arrays to 1D for SIMD readiness'
+    done: true
+    completed: 2026-04-14
+    description:
+    - Change _ternaryWeights from sbyte[,] to sbyte[] row-major
+    - Change QuantizeActivations to return sbyte[] row-major
+    - Enables Span slicing and Vector construction for SIMD
+    done-summary: Flattened _ternaryWeights and quantized activations to row-major sbyte[]. Commit 73e7f8f.
+    technical-details:
+    - Module.Forward(float[,]) signature stays unchanged
+    - All access becomes [row * InputDimension + col]
+    - Serialization transparent via ToFullPrecision
+    depends-on:
+    - IMPL-BITLINEAR-002
+    functional-requirements:
+    - Output numerically identical
+    technical-requirements:
+    - Module.Forward(float[,]) must not change
+    implementation-tasks:
+    - task: Write regression tests for Forward, roundtrip, stats
+      done: false
+    - task: Change _ternaryWeights to sbyte[] row-major
+      done: false
+    - task: Update all accessor methods and clean build
+      done: false
+  - id: IMPL-BITLINEAR-004
+    title: 'Fix 4: Add SIMD path to BitLinear.Forward()'
+    done: true
+    completed: 2026-04-14
+    description:
+    - Add vectorized inner loop using Vector<sbyte> with conditional select
+    - Runtime selection via Vector.IsHardwareAccelerated
+    - Scalar fallback always available
+    done-summary: Added TernaryDotSimd with Vector<sbyte> masked accumulation, runtime selection, scalar fallback, tail handling. 4 new Theory tests. Commit 6c0f86b.
+    technical-details:
+    - System.Numerics.Tensors v10.0.3 already referenced
+    - Use Vector.Equals masks, ConditionalSelect, Widen sbyte to short to int
+    - Handle tail when InputDimension not divisible by vector width
+    depends-on:
+    - IMPL-BITLINEAR-003
+    functional-requirements:
+    - SIMD produces identical results to scalar
+    technical-requirements:
+    - Scalar fallback always available
+    - No unsafe code
+    implementation-tasks:
+    - task: Write SIMD vs scalar equivalence tests for aligned and non-aligned dims
+      done: false
+    - task: Implement TernaryDotSimd with Vector masks and widening
+      done: false
+    - task: Add scalar tail handling and runtime selection
+      done: false
+    - task: Clean build
+      done: false
+  - id: IMPL-TRAINING-001
+    title: 'Fix 5: Full backprop through transformer projections using STE'
+    done: true
+    completed: 2026-04-14
+    description:
+    - Current trainer updates output head and final norm only - transformer BitLinear projections frozen
+    - Extend existing training architecture with backward-capable methods across module graph
+    - Add master-weight state to each BitLinear with deterministic layer enumeration
+    - STE only at quantization boundary - keep BitNetPaperTrainer public surface intact
+    done-summary: Full STE backprop through all transformer layers. BitNetFullTrainer updates 7N+1 BitLinear layers with master weights, AdamW, and re-quantization. BackwardSTE in all Module subclasses. 135 tests pass. Commits 6b97999, 0fd3f84, 82db3d0.
+    technical-details:
+    - Add _masterWeights and _masterGradients to BitLinear
+    - Initialize master weights from current ternary state, accumulate gradients, run optimizer, resync ternary
+    - Override BackwardSTE in BitLinear, RmsNorm, MultiHeadAttention, SwiGLUFeedForward, BitNetLayer
+    - Must preserve ToFullPrecision, ExportTransformerProjectionWeights, ImportTransformerProjectionWeights
+    depends-on:
+    - IMPL-BITLINEAR-003
+    functional-requirements:
+    - Loss decreases over training
+    - Master weights updated and re-quantized
+    technical-requirements:
+    - New class only - existing trainer unchanged
+    implementation-tasks:
+    - task: Add master weights and gradient accumulation to BitLinear
+      done: false
+    - task: Override BackwardSTE in all Module subclasses
+      done: false
+    - task: Add deterministic enumeration of trainable BitLinear layers by stable name
+      done: false
+    - task: Extend training to update all BitLinear layers via optimizer
+      done: false
+    - task: 'Write tests: gradient shape, accumulation, loss reduction, master weight updates, ternary resync'
+      done: false
+    - task: Verify snapshot/export/import flows still work
+      done: false
+    - task: Clean build
+      done: false
+  - id: IMPL-TRITPACK-001
+    title: 'Fix 6: Base-3 trit packing (5 trits per byte)'
+    done: true
+    completed: 2026-04-14
+    description:
+    - 'Pack 5 ternary weights per byte: base-3 encoding (3^5=243 fits in byte)'
+    - 1.6 bits/weight vs 8 - within 0.5pct of information-theoretic minimum
+    - 'LUT decode: precompute all 243 packed values at static init'
+    - Change BitLinear storage from sbyte[] to packed byte[]
+    - 'Update serialization: GGUF, checkpoint, migration on load for legacy artifacts'
+    done-summary: TritPacking with LUT decode, per-row packed byte[] storage in BitLinear, 5x memory reduction. 14 TritPacking tests + all 149 tests pass. Commit 73e5e2a.
+    technical-details:
+    - 'New: src/BitNetSharp.Core/Quantization/TritPacking.cs'
+    - 'Also modify: GgufFile.cs, BitNetPaperGguf.cs, BitNetPaperCheckpoint.cs'
+    - packed = t0 + 3*t1 + 9*t2 + 27*t3 + 81*t4 where trit = ternary + 1
+    - Forward() unpacks row to temp buffer then runs SIMD unchanged
+    - Legacy artifacts must load via migration-on-load not breaking existing formats
+    - New format metadata or versioning to distinguish packed from unpacked
+    depends-on:
+    - IMPL-BITLINEAR-003
+    functional-requirements:
+    - Forward identical to unpacked
+    - Lossless round-trip
+    technical-requirements:
+    - ArrayPool for temp buffers
+    - Handle non-multiple-of-5
+    implementation-tasks:
+    - task: Create TritPacking.cs with PackLayer, UnpackLayer, DecodeLut
+      done: false
+    - task: Write exhaustive round-trip tests for all 243 values
+      done: false
+    - task: Change BitLinear storage to packed byte[]
+      done: false
+    - task: Update Forward, EstimateResidentParameterBytes
+      done: false
+    - task: Verify Forward output unchanged and clean build
+      done: false
+  - id: IMPL-TRITPACK-002
+    title: 'Fix 6b: Heat-map-guided row permutation for packed weights'
+    note: REQUIRED post-packing refinement step
+    done: true
+    completed: 2026-04-14
+    description:
+    - Use heat-map data to build logical-to-physical token-row permutation
+    - Physically reorder packed output-head rows for cache locality during speculative verification
+    - 'Required target: output-head rows. Optional: token embeddings with same permutation contract'
+    - 'Explicitly out of scope: internal transformer projection row permutation'
+    - Store permutation metadata in refined artifacts for save/load round-trip
+    done-summary: HeatMapRowPermutation.BuildFromHeatMap clusters hot-path chain tokens into adjacent physical rows. BitLinear supports optional row permutation in Forward/BackwardSTE. 5 new tests. Commit 991d73a.
+    technical-details:
+    - 'New: src/BitNetSharp.Core/Quantization/HeatMapRowPermutation.cs'
+    - Only output head and token embeddings benefit
+    - Permutation table VocabSize * 4 bytes stays in L2
+    - 'dim=256: 52 bytes/row, 3-token chain = 156 bytes = 2.5 cache lines contiguous'
+    - One int[] lookup per output column - negligible vs cache gain
+    depends-on:
+    - IMPL-TRITPACK-001
+    functional-requirements:
+    - Logits identical before and after
+    - Permutation is valid bijection
+    technical-requirements:
+    - Uses existing GetHotPaths() API
+    - Idempotent refinement
+    implementation-tasks:
+    - task: Create HeatMapRowPermutation.BuildFromHeatMap()
+      done: false
+    - task: Add optional _rowPermutation to BitLinear and ApplyRowPermutation method
+      done: false
+    - task: Update Forward() to use permutation when present
+      done: false
+    - task: Add refine command or integrate into export
+      done: false
+    - task: Add permutation metadata persistence in artifacts
+      done: false
+    - task: 'Write tests: validity, contiguity, Forward equivalence, save/load, internal projections unaffected'
+      done: false
+    - task: Clean build
+      done: false
+  medium-priority:
+  - id: IMPL-TRAINING-002
+    title: 'Fix 7: Two-pass integer training with scale profiles'
+    note: EXPERIMENTAL opt-in parallel path
+    done: true
+    completed: 2026-04-14
+    description:
+    - Replace float master weight accumulators with two-component integer
+    - master = (bucket_index * 65536 + delta) * epsilon
+    - 'Pass 1: short float calibration for gradient magnitudes per layer'
+    - 'Pass 2: integer training with pure integer accumulation'
+    - CarryCount as free convergence signal
+    - Reuse same internal layer enumeration and backward graph from Fix 5
+    done-summary: LayerScaleProfile, ModelScaleProfile (JSON serializable), GradientProfileCollector, IntegerMasterWeightLayer with carry-based accumulation. 6 new tests. Commit 7f1611b.
+    technical-details:
+    - 'New: LayerScaleProfile, ModelScaleProfile, GradientProfileCollector, IntegerMasterWeight, BitNetIntegerTrainer, CalibrateCommand.cs'
+    - epsilon = P99Gradient / 32767
+    - short[] buckets + short[] deltas with carry on overflow
+    - 'Additive artifacts: packed ternary, scale.json, optional resumable integer state'
+    - Surface carry-rate metrics in training report if added
+    depends-on:
+    - IMPL-TRAINING-001
+    functional-requirements:
+    - Loss decreases
+    - Scale profile roundtrips
+    - Integer and float trainers within 5pct ternary distribution agreement
+    technical-requirements:
+    - New classes only
+    - 'Opt-in workflow: calibrate then train --integer'
+    implementation-tasks:
+    - task: Create LayerScaleProfile and ModelScaleProfile
+      done: false
+    - task: Create GradientProfileCollector
+      done: false
+    - task: Create IntegerMasterWeightLayer with carry
+      done: false
+    - task: Create BitNetIntegerTrainer
+      done: false
+    - task: Create CalibrateCommand.cs and register in Program.cs
+      done: false
+    - task: 'Write tests: calibration, serialization, carry, loss reduction'
+      done: false
+    - task: Add short-run float vs integer trainer sanity comparison test
+      done: false
+    - task: Surface carry-rate metrics in training reports
+      done: false
+    - task: Clean build
+      done: false
