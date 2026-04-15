@@ -283,180 +283,113 @@ app.MapGet("/status", (
 }).AllowAnonymous();
 
 // ── Worker endpoints (JWT-protected) ──────────────────────────────
-app.MapPost("/register", (
+// Every handler below is a thin pass-through: pull the authenticated
+// client_id claim off the JWT, build the CQRS command, dispatch it,
+// map Result<T> to HTTP. No business logic in the endpoint layer.
+
+app.MapPost("/register", async (
     [FromBody] WorkerRegistrationRequest request,
     HttpContext http,
-    SqliteWorkerRegistryStore workerStore,
-    CoordinatorOptions options,
-    TimeProvider time) =>
+    IDispatcher dispatcher) =>
 {
-    if (request is null)
-    {
-        return Results.Json(
-            new ErrorResponse("invalid_request", "Request body is missing."),
+    var clientId = http.User.FindFirst("client_id")?.Value ?? string.Empty;
+    var result = await dispatcher
+        .SendAsync<WorkerRegistrationResponse>(new RegisterWorkerCommand(clientId, request))
+        .ConfigureAwait(false);
+
+    return result.IsSuccess
+        ? Results.Ok(result.Value)
+        : Results.Json(
+            new ErrorResponse("register_failed", result.Error ?? "unknown"),
             statusCode: StatusCodes.Status400BadRequest);
-    }
-
-    var clientId = http.User.FindFirst("client_id")?.Value;
-    if (string.IsNullOrWhiteSpace(clientId))
-    {
-        return Results.Json(
-            new ErrorResponse("unknown_client", "JWT did not carry a client_id claim."),
-            statusCode: StatusCodes.Status401Unauthorized);
-    }
-
-    var recommendedTokens = TaskSizingCalculator.RecommendedTokensPerTask(
-        request.Capability.TokensPerSecond,
-        TimeSpan.FromSeconds(options.TargetTaskDurationSeconds),
-        options.FullStepEfficiency);
-
-    var now = time.GetUtcNow();
-    workerStore.Upsert(new WorkerRecord(
-        WorkerId: clientId,
-        Name: string.IsNullOrWhiteSpace(request.WorkerName) ? clientId : request.WorkerName,
-        CpuThreads: request.Capability.CpuThreads,
-        TokensPerSecond: request.Capability.TokensPerSecond,
-        RecommendedTokensPerTask: recommendedTokens,
-        ProcessArchitecture: request.ProcessArchitecture,
-        OsDescription: request.OsDescription,
-        RegisteredAtUtc: now,
-        LastHeartbeatUtc: now,
-        State: WorkerState.Active));
-
-    var response = new WorkerRegistrationResponse(
-        WorkerId: clientId,
-        BearerToken: string.Empty,
-        InitialWeightVersion: options.InitialWeightVersion,
-        RecommendedTokensPerTask: recommendedTokens,
-        HeartbeatIntervalSeconds: options.HeartbeatIntervalSeconds,
-        ServerTime: now);
-
-    return Results.Ok(response);
 }).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
 
 // ── /work — claim the next pending task for this worker ──────────
-app.MapGet("/work", (
+app.MapGet("/work", async (
     HttpContext http,
-    SqliteWorkQueueStore workQueue,
-    CoordinatorOptions options) =>
+    IDispatcher dispatcher) =>
 {
-    var clientId = http.User.FindFirst("client_id")?.Value;
-    if (string.IsNullOrWhiteSpace(clientId))
+    var clientId = http.User.FindFirst("client_id")?.Value ?? string.Empty;
+    var result = await dispatcher
+        .SendAsync<WorkTaskAssignment?>(new ClaimNextTaskCommand(clientId))
+        .ConfigureAwait(false);
+
+    if (!result.IsSuccess)
     {
         return Results.Json(
-            new ErrorResponse("unknown_client", "JWT did not carry a client_id claim."),
-            statusCode: StatusCodes.Status401Unauthorized);
-    }
-
-    var leaseDuration = TimeSpan.FromSeconds(options.TargetTaskDurationSeconds * 2);
-    var claimed = workQueue.TryClaimNextPending(clientId, leaseDuration);
-    if (claimed is null)
-    {
-        return Results.StatusCode(StatusCodes.Status204NoContent);
-    }
-
-    var baseUrl = options.BaseUrl.TrimEnd('/');
-    var assignment = new WorkTaskAssignment(
-        TaskId: claimed.TaskId,
-        WeightVersion: claimed.WeightVersion,
-        WeightUrl: $"{baseUrl}/weights/{claimed.WeightVersion}",
-        ShardId: claimed.ShardId,
-        ShardOffset: claimed.ShardOffset,
-        ShardLength: claimed.ShardLength,
-        TokensPerTask: claimed.TokensPerTask,
-        KLocalSteps: claimed.KLocalSteps,
-        HyperparametersJson: claimed.HyperparametersJson,
-        DeadlineUtc: claimed.DeadlineUtc ?? DateTimeOffset.UtcNow.Add(leaseDuration));
-
-    return Results.Ok(assignment);
-}).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
-
-// ── /heartbeat — worker pings the coordinator periodically ───────
-app.MapPost("/heartbeat", (
-    [FromBody] HeartbeatRequest request,
-    HttpContext http,
-    SqliteWorkerRegistryStore workerStore,
-    CoordinatorOptions options,
-    TimeProvider time) =>
-{
-    if (request is null)
-    {
-        return Results.Json(
-            new ErrorResponse("invalid_request", "Heartbeat body is missing."),
+            new ErrorResponse("work_failed", result.Error ?? "unknown"),
             statusCode: StatusCodes.Status400BadRequest);
     }
 
-    var clientId = http.User.FindFirst("client_id")?.Value;
-    if (string.IsNullOrWhiteSpace(clientId))
+    return result.Value is null
+        ? Results.StatusCode(StatusCodes.Status204NoContent)
+        : Results.Ok(result.Value);
+}).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
+
+// ── /heartbeat — worker pings the coordinator periodically ───────
+app.MapPost("/heartbeat", async (
+    [FromBody] HeartbeatRequest request,
+    HttpContext http,
+    IDispatcher dispatcher) =>
+{
+    var clientId = http.User.FindFirst("client_id")?.Value ?? string.Empty;
+    var result = await dispatcher
+        .SendAsync<HeartbeatResponse>(new SubmitHeartbeatCommand(clientId, request))
+        .ConfigureAwait(false);
+
+    if (result.IsSuccess)
     {
-        return Results.Json(
-            new ErrorResponse("unknown_client", "JWT did not carry a client_id claim."),
-            statusCode: StatusCodes.Status401Unauthorized);
+        return Results.Ok(result.Value);
     }
 
-    var touched = workerStore.TouchHeartbeat(clientId);
-    if (!touched)
+    if (result.Error == SubmitHeartbeatCommandHandler.UnregisteredFailureCode)
     {
         return Results.Json(
             new ErrorResponse("unregistered", "Worker must POST /register before heartbeating."),
             statusCode: StatusCodes.Status410Gone);
     }
 
-    return Results.Ok(new HeartbeatResponse(
-        ShouldDrain: false,
-        RecommendedTokensPerTaskOverride: null,
-        ServerTime: time.GetUtcNow()));
+    return Results.Json(
+        new ErrorResponse("heartbeat_failed", result.Error ?? "unknown"),
+        statusCode: StatusCodes.Status400BadRequest);
 }).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
 
 // ── /gradient — worker reports task completion ──────────────────
 // D-1 stub: validates ownership, marks the task Done, does NOT yet
 // apply the gradient to the global weights. Phase D-4 introduces the
 // gradient decoder + weight updater.
-app.MapPost("/gradient", (
+app.MapPost("/gradient", async (
     [FromBody] GradientSubmission submission,
     HttpContext http,
-    SqliteWorkQueueStore workQueue,
-    ILogger<Program> logger) =>
+    IDispatcher dispatcher) =>
 {
-    if (submission is null)
+    var clientId = http.User.FindFirst("client_id")?.Value ?? string.Empty;
+    var result = await dispatcher
+        .SendAsync<GradientAcceptance>(new SubmitGradientCommand(clientId, submission))
+        .ConfigureAwait(false);
+
+    if (result.IsSuccess)
     {
-        return Results.Json(
-            new ErrorResponse("invalid_request", "Gradient body is missing."),
-            statusCode: StatusCodes.Status400BadRequest);
+        return Results.Ok(result.Value);
     }
 
-    var clientId = http.User.FindFirst("client_id")?.Value;
-    if (string.IsNullOrWhiteSpace(clientId) || clientId != submission.WorkerId)
+    if (result.Error == SubmitGradientCommandHandler.WorkerMismatchCode)
     {
         return Results.Json(
             new ErrorResponse("worker_mismatch", "Gradient workerId must match the JWT client_id."),
             statusCode: StatusCodes.Status403Forbidden);
     }
 
-    var completed = workQueue.MarkCompleted(submission.TaskId, clientId);
-    if (!completed)
+    if (result.Error == SubmitGradientCommandHandler.TaskNotAssignedCode)
     {
         return Results.Json(
             new ErrorResponse("task_not_assigned", "Task is not currently assigned to this worker."),
             statusCode: StatusCodes.Status409Conflict);
     }
 
-    logger.LogInformation(
-        "Accepted gradient for task {TaskId} from worker {ClientId}: format={Format}, bytes={Size}, tokens={Tokens}, loss={Loss}, staleness={Staleness}",
-        submission.TaskId,
-        clientId,
-        submission.GradientFormat,
-        submission.GradientPayload?.Length ?? 0,
-        submission.TokensSeen,
-        submission.LossAfter,
-        0);
-
-    return Results.Ok(new
-    {
-        accepted = true,
-        task_id = submission.TaskId,
-        worker_id = clientId
-    });
+    return Results.Json(
+        new ErrorResponse("gradient_failed", result.Error ?? "unknown"),
+        statusCode: StatusCodes.Status400BadRequest);
 }).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
 
 // ── /weights/{version} — streams a weight blob to the worker ─────
