@@ -103,31 +103,44 @@ public sealed class WorkerClientRegistry
     /// <see cref="Client"/> model consumed by the in-memory client
     /// store. Each worker client is configured for the OAuth 2.0
     /// client-credentials grant and the <c>bitnet-worker</c> API scope.
+    /// Re-evaluated on every call so consumers always see the latest
+    /// registry state (important for admin-rotate support).
     /// </summary>
     public IEnumerable<Client> ToDuendeClients(int accessTokenLifetimeSeconds)
     {
         foreach (var entry in _clients.Values)
         {
-            yield return new Client
-            {
-                ClientId = entry.ClientId,
-                ClientName = entry.DisplayName,
-                AllowedGrantTypes = GrantTypes.ClientCredentials,
-                ClientSecrets =
-                {
-                    new Secret(Sha256Hex(entry.PlainTextSecret))
-                },
-                AllowedScopes = { IdentityServerResources.WorkerScopeName },
-                AccessTokenLifetime = accessTokenLifetimeSeconds,
-                AccessTokenType = AccessTokenType.Jwt,
-                AllowOfflineAccess = false,
-                RequireClientSecret = true,
-                Claims =
-                {
-                    new ClientClaim("worker_display_name", entry.DisplayName)
-                }
-            };
+            yield return BuildDuendeClient(entry, accessTokenLifetimeSeconds);
         }
+    }
+
+    /// <summary>
+    /// Builds the Duende <see cref="Client"/> that corresponds to a
+    /// single registry entry. Exposed as a static so
+    /// <see cref="CompositeClientStore"/> can reuse the exact same
+    /// shape when it is asked for a client by id.
+    /// </summary>
+    public static Client BuildDuendeClient(WorkerClientEntry entry, int accessTokenLifetimeSeconds)
+    {
+        return new Client
+        {
+            ClientId = entry.ClientId,
+            ClientName = entry.DisplayName,
+            AllowedGrantTypes = GrantTypes.ClientCredentials,
+            ClientSecrets =
+            {
+                new Secret(Sha256Hex(entry.PlainTextSecret))
+            },
+            AllowedScopes = { IdentityServerResources.WorkerScopeName },
+            AccessTokenLifetime = accessTokenLifetimeSeconds,
+            AccessTokenType = AccessTokenType.Jwt,
+            AllowOfflineAccess = false,
+            RequireClientSecret = true,
+            Claims =
+            {
+                new ClientClaim("worker_display_name", entry.DisplayName)
+            }
+        };
     }
 
     /// <summary>
@@ -159,7 +172,7 @@ public sealed class WorkerClientRegistry
     /// internal and deliberately simple so we don't take a dep on
     /// IdentityModel just for its <c>ToSha256</c> extension method.
     /// </summary>
-    private static string Sha256Hex(string value)
+    internal static string Sha256Hex(string value)
     {
         var bytes = Encoding.UTF8.GetBytes(value);
         var hash = SHA256.HashData(bytes);

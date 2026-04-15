@@ -91,21 +91,32 @@ builder.Services.AddSingleton(sp =>
 });
 
 // ── Worker client registry + Duende IdentityServer ────────────────
-var workerRegistry = new WorkerClientRegistry();
-workerRegistry.Seed(builder.Configuration
-    .GetSection($"{CoordinatorOptions.SectionName}:WorkerClients")
-    .Get<List<WorkerClientOptions>>() ?? new List<WorkerClientOptions>());
-builder.Services.AddSingleton(workerRegistry);
+// Registry is seeded lazily from IConfiguration so WebApplicationFactory
+// integration tests can inject in-memory WorkerClients via
+// ConfigureAppConfiguration and have them picked up by the registry.
+// The top-level snapshot below is ONLY used for startup-time knobs like
+// the JWT authority URL; the real client list lives behind a
+// CompositeClientStore that the Duende client lookup consults on every
+// request.
+builder.Services.AddSingleton<WorkerClientRegistry>(sp =>
+{
+    var configuration = sp.GetRequiredService<IConfiguration>();
+    var section = configuration.GetSection($"{CoordinatorOptions.SectionName}:WorkerClients");
+    var clients = section.Get<List<WorkerClientOptions>>() ?? new List<WorkerClientOptions>();
+    var registry = new WorkerClientRegistry();
+    registry.Seed(clients);
+    return registry;
+});
 
 var coordinatorSnapshot = builder.Configuration
     .GetSection(CoordinatorOptions.SectionName)
     .Get<CoordinatorOptions>() ?? new CoordinatorOptions();
-var accessTokenLifetimeSeconds = coordinatorSnapshot.AccessTokenLifetimeSeconds;
 var coordinatorBaseUrl = coordinatorSnapshot.BaseUrl.TrimEnd('/');
 
 // Duende TestUsers — seeded with the single admin account read from
-// CoordinatorOptions.Admin. The cookie-based IS login flow validates
-// credentials against this list via the default ResourceOwnerPasswordValidator.
+// CoordinatorOptions.Admin. If the admin credentials are empty at
+// startup, an empty list goes in and the login page cannot succeed;
+// operators see a log warning on first /admin/api-keys hit.
 var adminTestUsers = new List<TestUser>();
 if (!string.IsNullOrWhiteSpace(coordinatorSnapshot.Admin.Username) &&
     !string.IsNullOrWhiteSpace(coordinatorSnapshot.Admin.Password))
@@ -123,11 +134,6 @@ if (!string.IsNullOrWhiteSpace(coordinatorSnapshot.Admin.Username) &&
     });
 }
 
-// Merge worker clients + admin UI client into the Duende client list.
-var duendeClients = new List<Client>();
-duendeClients.AddRange(workerRegistry.ToDuendeClients(accessTokenLifetimeSeconds));
-duendeClients.Add(IdentityServerResources.BuildAdminUiClient(coordinatorBaseUrl));
-
 builder.Services.AddIdentityServer(options =>
     {
         options.Events.RaiseErrorEvents = true;
@@ -144,7 +150,7 @@ builder.Services.AddIdentityServer(options =>
     .AddInMemoryIdentityResources(IdentityServerResources.IdentityResources)
     .AddInMemoryApiScopes(IdentityServerResources.ApiScopes)
     .AddInMemoryApiResources(IdentityServerResources.ApiResources)
-    .AddInMemoryClients(duendeClients)
+    .AddClientStore<CompositeClientStore>()
     .AddTestUsers(adminTestUsers)
     .AddDeveloperSigningCredential(persistKey: false);
 
@@ -552,3 +558,16 @@ static string BuildConnectionString(CoordinatorOptions coord) =>
 /// discriminate the assembly entry point.
 /// </summary>
 public partial class Program;
+
+namespace BitNetSharp.Distributed.Coordinator
+{
+    /// <summary>
+    /// Named marker class that exists only so the tests project can
+    /// say <c>WebApplicationFactory&lt;CoordinatorHostMarker&gt;</c>
+    /// without colliding with the Worker project's top-level
+    /// <see cref="Program"/> class. WebApplicationFactory uses the
+    /// type parameter only to locate the assembly to bootstrap; any
+    /// type in the coordinator assembly works.
+    /// </summary>
+    public sealed class CoordinatorHostMarker;
+}
