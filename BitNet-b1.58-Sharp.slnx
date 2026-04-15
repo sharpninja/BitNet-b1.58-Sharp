@@ -2,6 +2,8 @@
   <Folder Name="/src/">
     <Project Path="src/BitNetSharp.App/BitNetSharp.App.csproj" />
     <Project Path="src/BitNetSharp.Core/BitNetSharp.Core.csproj" />
+    <Project Path="src/BitNetSharp.Distributed.Contracts/BitNetSharp.Distributed.Contracts.csproj" />
+    <Project Path="src/BitNetSharp.Distributed.Coordinator/BitNetSharp.Distributed.Coordinator.csproj" />
     <Project Path="src/BitNetSharp.Distributed.Worker/BitNetSharp.Distributed.Worker.csproj" />
   </Folder>
   <Folder Name="/tests/">

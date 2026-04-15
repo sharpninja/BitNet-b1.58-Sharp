@@ -1,0 +1,346 @@
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using Microsoft.Data.Sqlite;
+
+namespace BitNetSharp.Distributed.Coordinator.Persistence;
+
+/// <summary>
+/// Thin SQLite-backed data access layer for the coordinator work queue.
+///
+/// The store owns the database connection lifecycle: it opens a single
+/// <see cref="SqliteConnection"/> in WAL mode for the process and runs
+/// schema migration on first touch. It does NOT enforce business rules
+/// — that job belongs to the services that sit on top of it. The store
+/// only worries about safe SQL, parameter binding, and row mapping.
+///
+/// All state transitions are wrapped in <c>BEGIN IMMEDIATE</c>
+/// transactions so concurrent worker requests cannot race each other
+/// into an inconsistent state. SQLite's single-writer guarantee plus
+/// WAL concurrent readers is exactly what the single-coordinator
+/// topology needs.
+/// </summary>
+public sealed class SqliteWorkQueueStore : IDisposable
+{
+    private readonly SqliteConnection _connection;
+    private readonly TimeProvider _time;
+    private readonly object _writeGate = new();
+
+    public SqliteWorkQueueStore(string connectionString, TimeProvider? time = null)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(connectionString);
+        _time = time ?? TimeProvider.System;
+        _connection = new SqliteConnection(connectionString);
+        _connection.Open();
+
+        // WAL + normal sync is the standard recipe for "safe but fast"
+        // single-writer workloads. busy_timeout gives short retries a
+        // chance to land instead of bombing out on SQLITE_BUSY.
+        ExecuteNonQuery("PRAGMA journal_mode = WAL;");
+        ExecuteNonQuery("PRAGMA synchronous = NORMAL;");
+        ExecuteNonQuery("PRAGMA busy_timeout = 5000;");
+        ExecuteNonQuery("PRAGMA foreign_keys = ON;");
+
+        MigrateSchema();
+    }
+
+    /// <summary>
+    /// Creates the schema if it does not exist. Idempotent — safe to run
+    /// on every process start. Migrations are tracked by a single
+    /// <c>schema_version</c> row so future upgrades can branch on it.
+    /// </summary>
+    private void MigrateSchema()
+    {
+        ExecuteNonQuery(@"
+CREATE TABLE IF NOT EXISTS schema_meta (
+    key   TEXT PRIMARY KEY,
+    value TEXT NOT NULL
+);
+INSERT OR IGNORE INTO schema_meta (key, value) VALUES ('schema_version', '1');
+
+CREATE TABLE IF NOT EXISTS tasks (
+    task_id          TEXT    PRIMARY KEY,
+    weight_version   INTEGER NOT NULL,
+    shard_id         TEXT    NOT NULL,
+    shard_offset     INTEGER NOT NULL,
+    shard_length     INTEGER NOT NULL,
+    tokens_per_task  INTEGER NOT NULL,
+    k_local_steps    INTEGER NOT NULL,
+    hp_json          TEXT    NOT NULL,
+    state            TEXT    NOT NULL,
+    assigned_to      TEXT,
+    assigned_at      INTEGER,
+    deadline_at      INTEGER,
+    attempt          INTEGER NOT NULL DEFAULT 0,
+    created_at       INTEGER NOT NULL,
+    completed_at     INTEGER
+);
+
+CREATE INDEX IF NOT EXISTS ix_tasks_state_created
+    ON tasks(state, created_at);
+
+CREATE INDEX IF NOT EXISTS ix_tasks_state_deadline
+    ON tasks(state, deadline_at);
+
+CREATE INDEX IF NOT EXISTS ix_tasks_assigned_to
+    ON tasks(assigned_to);
+");
+    }
+
+    /// <summary>
+    /// Inserts a new task in the <c>Pending</c> state. The task is
+    /// immediately visible to the next dequeue call.
+    /// </summary>
+    public void EnqueuePending(WorkTaskRecord task)
+    {
+        ArgumentNullException.ThrowIfNull(task);
+        if (task.State != WorkTaskState.Pending)
+        {
+            throw new ArgumentException("Enqueued tasks must start in the Pending state.", nameof(task));
+        }
+
+        lock (_writeGate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+INSERT INTO tasks (
+    task_id, weight_version, shard_id, shard_offset, shard_length,
+    tokens_per_task, k_local_steps, hp_json, state,
+    assigned_to, assigned_at, deadline_at, attempt, created_at, completed_at
+) VALUES (
+    $task_id, $weight_version, $shard_id, $shard_offset, $shard_length,
+    $tokens_per_task, $k_local_steps, $hp_json, 'Pending',
+    NULL, NULL, NULL, 0, $created_at, NULL
+);";
+            cmd.Parameters.AddWithValue("$task_id", task.TaskId);
+            cmd.Parameters.AddWithValue("$weight_version", task.WeightVersion);
+            cmd.Parameters.AddWithValue("$shard_id", task.ShardId);
+            cmd.Parameters.AddWithValue("$shard_offset", task.ShardOffset);
+            cmd.Parameters.AddWithValue("$shard_length", task.ShardLength);
+            cmd.Parameters.AddWithValue("$tokens_per_task", task.TokensPerTask);
+            cmd.Parameters.AddWithValue("$k_local_steps", task.KLocalSteps);
+            cmd.Parameters.AddWithValue("$hp_json", task.HyperparametersJson);
+            cmd.Parameters.AddWithValue("$created_at", task.CreatedAtUtc.ToUnixTimeSeconds());
+            cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>
+    /// Atomically claims the oldest pending task for the given worker,
+    /// sets its state to <c>Assigned</c>, stamps the deadline, and
+    /// returns the updated row. Returns <c>null</c> when the queue is
+    /// empty. The whole select-and-update runs inside
+    /// <c>BEGIN IMMEDIATE</c> so concurrent workers cannot claim the
+    /// same task.
+    /// </summary>
+    public WorkTaskRecord? TryClaimNextPending(string workerId, TimeSpan leaseDuration)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
+        if (leaseDuration <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(leaseDuration), "Lease duration must be positive.");
+        }
+
+        lock (_writeGate)
+        {
+            // Microsoft.Data.Sqlite's default BeginTransaction() maps to
+            // BEGIN IMMEDIATE (non-deferred, Serializable), which is what
+            // we need to prevent two dequeue callers from selecting the
+            // same pending row.
+            using var transaction = _connection.BeginTransaction();
+
+            using var selectCmd = _connection.CreateCommand();
+            selectCmd.Transaction = transaction;
+            selectCmd.CommandText = @"
+SELECT task_id FROM tasks
+WHERE state = 'Pending'
+ORDER BY created_at ASC, task_id ASC
+LIMIT 1;";
+            var taskIdObj = selectCmd.ExecuteScalar();
+            if (taskIdObj is null || taskIdObj is DBNull)
+            {
+                transaction.Commit();
+                return null;
+            }
+
+            var taskId = (string)taskIdObj;
+            var nowUnix = _time.GetUtcNow().ToUnixTimeSeconds();
+            var deadlineUnix = _time.GetUtcNow().Add(leaseDuration).ToUnixTimeSeconds();
+
+            using var updateCmd = _connection.CreateCommand();
+            updateCmd.Transaction = transaction;
+            updateCmd.CommandText = @"
+UPDATE tasks
+SET state       = 'Assigned',
+    assigned_to = $worker,
+    assigned_at = $now,
+    deadline_at = $deadline,
+    attempt     = attempt + 1
+WHERE task_id = $task_id AND state = 'Pending';";
+            updateCmd.Parameters.AddWithValue("$worker", workerId);
+            updateCmd.Parameters.AddWithValue("$now", nowUnix);
+            updateCmd.Parameters.AddWithValue("$deadline", deadlineUnix);
+            updateCmd.Parameters.AddWithValue("$task_id", taskId);
+            var rows = updateCmd.ExecuteNonQuery();
+            if (rows != 1)
+            {
+                // Lost the race with another thread that re-released
+                // the row between SELECT and UPDATE. Treat as empty.
+                transaction.Commit();
+                return null;
+            }
+
+            var record = LoadById(taskId, transaction);
+            transaction.Commit();
+            return record;
+        }
+    }
+
+    /// <summary>
+    /// Marks the given task <c>Done</c>. Returns <c>true</c> if the row
+    /// transitioned, <c>false</c> when the task does not exist or was
+    /// not currently assigned to the caller.
+    /// </summary>
+    public bool MarkCompleted(string taskId, string workerId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(taskId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
+
+        lock (_writeGate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+UPDATE tasks
+SET state        = 'Done',
+    completed_at = $now
+WHERE task_id = $task_id
+  AND assigned_to = $worker
+  AND state = 'Assigned';";
+            cmd.Parameters.AddWithValue("$now", _time.GetUtcNow().ToUnixTimeSeconds());
+            cmd.Parameters.AddWithValue("$task_id", taskId);
+            cmd.Parameters.AddWithValue("$worker", workerId);
+            return cmd.ExecuteNonQuery() == 1;
+        }
+    }
+
+    /// <summary>
+    /// Marks the given task <c>Failed</c> permanently. Only allowed if
+    /// the task is currently <c>Assigned</c> to <paramref name="workerId"/>.
+    /// </summary>
+    public bool MarkFailed(string taskId, string workerId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(taskId);
+        ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
+
+        lock (_writeGate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+UPDATE tasks
+SET state        = 'Failed',
+    completed_at = $now
+WHERE task_id = $task_id
+  AND assigned_to = $worker
+  AND state = 'Assigned';";
+            cmd.Parameters.AddWithValue("$now", _time.GetUtcNow().ToUnixTimeSeconds());
+            cmd.Parameters.AddWithValue("$task_id", taskId);
+            cmd.Parameters.AddWithValue("$worker", workerId);
+            return cmd.ExecuteNonQuery() == 1;
+        }
+    }
+
+    /// <summary>
+    /// Finds every <c>Assigned</c> task whose deadline has passed and
+    /// returns it to <c>Pending</c> so another worker can pick it up.
+    /// Returns the number of tasks that were recycled.
+    /// </summary>
+    public int RecycleTimedOutAssignments()
+    {
+        lock (_writeGate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+UPDATE tasks
+SET state       = 'Pending',
+    assigned_to = NULL,
+    assigned_at = NULL,
+    deadline_at = NULL
+WHERE state = 'Assigned'
+  AND deadline_at IS NOT NULL
+  AND deadline_at < $now;";
+            cmd.Parameters.AddWithValue("$now", _time.GetUtcNow().ToUnixTimeSeconds());
+            return cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>
+    /// Returns the count of tasks currently in the given state. Handy
+    /// for <c>/status</c> dashboards and smoke tests.
+    /// </summary>
+    public int CountByState(WorkTaskState state)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(1) FROM tasks WHERE state = $state;";
+        cmd.Parameters.AddWithValue("$state", state.ToString());
+        var result = cmd.ExecuteScalar();
+        return result is null or DBNull ? 0 : Convert.ToInt32(result, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Reads a single task row by id. Returns <c>null</c> if no row
+    /// exists. Public so tests and the coordinator's <c>/status</c>
+    /// endpoint can inspect task state directly.
+    /// </summary>
+    public WorkTaskRecord? GetById(string taskId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(taskId);
+        return LoadById(taskId, transaction: null);
+    }
+
+    private WorkTaskRecord? LoadById(string taskId, SqliteTransaction? transaction)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.Transaction = transaction;
+        cmd.CommandText = @"
+SELECT task_id, weight_version, shard_id, shard_offset, shard_length,
+       tokens_per_task, k_local_steps, hp_json, state,
+       assigned_to, assigned_at, deadline_at, attempt,
+       created_at, completed_at
+FROM tasks WHERE task_id = $task_id;";
+        cmd.Parameters.AddWithValue("$task_id", taskId);
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read())
+        {
+            return null;
+        }
+
+        return new WorkTaskRecord(
+            TaskId: reader.GetString(0),
+            WeightVersion: reader.GetInt64(1),
+            ShardId: reader.GetString(2),
+            ShardOffset: reader.GetInt64(3),
+            ShardLength: reader.GetInt64(4),
+            TokensPerTask: reader.GetInt64(5),
+            KLocalSteps: reader.GetInt32(6),
+            HyperparametersJson: reader.GetString(7),
+            State: Enum.Parse<WorkTaskState>(reader.GetString(8)),
+            AssignedWorkerId: reader.IsDBNull(9) ? null : reader.GetString(9),
+            AssignedAtUtc: reader.IsDBNull(10) ? null : DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(10)),
+            DeadlineUtc: reader.IsDBNull(11) ? null : DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(11)),
+            Attempt: reader.GetInt32(12),
+            CreatedAtUtc: DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(13)),
+            CompletedAtUtc: reader.IsDBNull(14) ? null : DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(14)));
+    }
+
+    private void ExecuteNonQuery(string sql)
+    {
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = sql;
+        cmd.ExecuteNonQuery();
+    }
+
+    public void Dispose()
+    {
+        _connection.Dispose();
+    }
+}

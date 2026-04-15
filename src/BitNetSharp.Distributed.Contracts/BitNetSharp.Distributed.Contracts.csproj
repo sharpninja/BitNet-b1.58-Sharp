@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework Condition="$([MSBuild]::VersionGreaterThanOrEquals('$(NETCoreSdkVersion)', '10.0.100')) != 'True'">net9.0</TargetFramework>
+    <TargetFrameworks Condition="$([MSBuild]::VersionGreaterThanOrEquals('$(NETCoreSdkVersion)', '10.0.100')) == 'True'">net9.0;net10.0</TargetFrameworks>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <RootNamespace>BitNetSharp.Distributed.Contracts</RootNamespace>
+    <AssemblyName>BitNetSharp.Distributed.Contracts</AssemblyName>
+    <Description>Wire-format DTOs shared between the BitNet distributed training coordinator and its workers.</Description>
+  </PropertyGroup>
+
+</Project>
