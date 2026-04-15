@@ -68,6 +68,16 @@ public sealed class CoordinatorOptions
     public int AccessTokenLifetimeSeconds { get; set; } = 3600;
 
     /// <summary>
+    /// Public base URL at which this coordinator is reachable. The
+    /// identity server and the admin OIDC client both use this value
+    /// as the OpenID Connect issuer / authority so self-referential
+    /// discovery works. In production this is the ngrok reserved
+    /// domain; in local development it is whatever HTTPS URL Kestrel
+    /// binds to.
+    /// </summary>
+    public string BaseUrl { get; set; } = "https://localhost:5001";
+
+    /// <summary>
     /// List of OAuth 2.0 client-credentials clients that are allowed
     /// to authenticate as workers. Populated from environment at
     /// startup (see class remarks for env-var naming). Add one entry

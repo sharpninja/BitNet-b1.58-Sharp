@@ -1,0 +1,59 @@
+@page "/Account/Login"
+@layout MainLayout
+
+@* Static-SSR login page rendered inside Duende IdentityServer's
+   interactive login flow. Duende redirects unauthenticated users here
+   with a ?returnUrl=... query parameter pointing at the IS
+   /connect/authorize continuation URL. The form posts to the minimal
+   API endpoint /Account/Login/submit in Program.cs, which validates
+   the credentials against the TestUserStore and calls SignInAsync on
+   the "idsrv" cookie scheme before redirecting back. *@
+
+<h2>Sign in</h2>
+
+<p>
+    This coordinator is protected. Sign in with the admin credentials
+    configured at startup via
+    <code>Coordinator__Admin__Username</code> and
+    <code>Coordinator__Admin__Password</code>.
+</p>
+
+@if (!string.IsNullOrWhiteSpace(Error))
+{
+    <p class="warn">@Error</p>
+}
+
+<form method="post" action="/Account/Login/submit">
+    <input type="hidden" name="returnUrl" value="@ReturnUrl" />
+    <div style="max-width:340px; display:flex; flex-direction:column; gap:12px; margin-top:16px;">
+        <label>
+            <div style="font-size:12px; color:#bbb; margin-bottom:2px;">Username</div>
+            <input name="username" autocomplete="username" required
+                   style="width:100%; padding:8px; background:#1c1c1c; color:#eee; border:1px solid #333; border-radius:4px;" />
+        </label>
+        <label>
+            <div style="font-size:12px; color:#bbb; margin-bottom:2px;">Password</div>
+            <input type="password" name="password" autocomplete="current-password" required
+                   style="width:100%; padding:8px; background:#1c1c1c; color:#eee; border:1px solid #333; border-radius:4px;" />
+        </label>
+        <button type="submit" class="btn" style="align-self:flex-start; margin-top:8px;">Sign in</button>
+    </div>
+</form>
+
+@code {
+    /// <summary>
+    /// Populated from the <c>?returnUrl</c> query parameter when
+    /// Duende redirects here from <c>/connect/authorize</c>. After a
+    /// successful login the submit endpoint redirects the browser
+    /// back to this URL so the OIDC handshake can continue.
+    /// </summary>
+    [SupplyParameterFromQuery(Name = "returnUrl")]
+    public string? ReturnUrl { get; set; }
+
+    /// <summary>
+    /// One-shot error banner set by the submit endpoint via
+    /// <c>?error=...</c> on a failed sign-in attempt.
+    /// </summary>
+    [SupplyParameterFromQuery(Name = "error")]
+    public string? Error { get; set; }
+}

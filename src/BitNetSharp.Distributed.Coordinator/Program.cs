@@ -1,12 +1,19 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
+using System.Security.Claims;
 using BitNetSharp.Distributed.Contracts;
-using BitNetSharp.Distributed.Coordinator.Auth;
 using BitNetSharp.Distributed.Coordinator.Components;
 using BitNetSharp.Distributed.Coordinator.Configuration;
 using BitNetSharp.Distributed.Coordinator.Identity;
 using BitNetSharp.Distributed.Coordinator.Middleware;
 using BitNetSharp.Distributed.Coordinator.Persistence;
+using Duende.IdentityServer;
+using Duende.IdentityServer.Models;
+using Duende.IdentityServer.Test;
+using Microsoft.AspNetCore.Authentication;
+using Microsoft.AspNetCore.Authentication.Cookies;
+using Microsoft.AspNetCore.Authentication.OpenIdConnect;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
@@ -15,35 +22,36 @@ using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
+using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 
 // ────────────────────────────────────────────────────────────────────────
 //  BitNetSharp.Distributed.Coordinator — Phase D-1 host
 // ────────────────────────────────────────────────────────────────────────
-//  Responsibilities wired up in this file:
-//    1. Bind CoordinatorOptions from config + environment. The
-//       per-worker OAuth client list and admin credentials both come
-//       from environment variables so no secrets live in source.
-//    2. Configure Duende IdentityServer with in-memory clients seeded
-//       from WorkerClientRegistry, an ApiResource + ApiScope, and a
-//       developer signing credential.
-//    3. Configure Microsoft.AspNetCore.Authentication.JwtBearer to
-//       validate worker tokens against the in-process IS authority.
-//    4. Add a custom JwtRevocationMiddleware that rejects any JWT
-//       whose `iat` claim predates the SqliteClientRevocationStore
-//       entry for the client — this is the immediate-expiration hook
-//       for /admin/rotate/{clientId}.
-//    5. Register /health and /status.
-//    6. Register /register as the worker's on-startup endpoint (JWT
-//       required; persists a WorkerRecord).
-//    7. Register /admin/api-keys and /admin/rotate/{clientId} behind
-//       HTTP Basic auth so the operator can display and rotate the
-//       worker credentials from a browser.
+//  Single-process host serving three concerns:
+//
+//  1. Duende IdentityServer                                 (OAuth/OIDC provider)
+//     ├─ Worker machine-login (client_credentials grant)
+//     └─ Admin interactive login (authorization_code + PKCE)
+//
+//  2. Coordinator worker API                                (JWT bearer guarded)
+//     ├─ POST /register        — worker-on-startup capability handshake
+//     └─ /work /heartbeat /gradient /weights (future steps)
+//
+//  3. Blazor admin UI                                       (cookie + OIDC guarded)
+//     ├─ GET  /admin/api-keys  — list + rotate worker secrets
+//     ├─ GET  /Account/Login   — login form presented by IS
+//     └─ POST /Account/Login/submit  — credential validator
+//
+//  Auth schemes stacked in this file:
+//      "Cookies"  — admin session cookie set after OIDC code exchange
+//      "oidc"     — OpenIdConnect challenge pointing at local IS
+//      "Bearer"   — JWT validator for worker endpoints
+//      "idsrv"    — Duende's own default cookie scheme for the IS UI
 // ────────────────────────────────────────────────────────────────────────
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Configuration
-    .AddEnvironmentVariables();
+builder.Configuration.AddEnvironmentVariables();
 
 builder.Services.Configure<CoordinatorOptions>(
     builder.Configuration.GetSection(CoordinatorOptions.SectionName));
@@ -83,6 +91,32 @@ var coordinatorSnapshot = builder.Configuration
     .GetSection(CoordinatorOptions.SectionName)
     .Get<CoordinatorOptions>() ?? new CoordinatorOptions();
 var accessTokenLifetimeSeconds = coordinatorSnapshot.AccessTokenLifetimeSeconds;
+var coordinatorBaseUrl = coordinatorSnapshot.BaseUrl.TrimEnd('/');
+
+// Duende TestUsers — seeded with the single admin account read from
+// CoordinatorOptions.Admin. The cookie-based IS login flow validates
+// credentials against this list via the default ResourceOwnerPasswordValidator.
+var adminTestUsers = new List<TestUser>();
+if (!string.IsNullOrWhiteSpace(coordinatorSnapshot.Admin.Username) &&
+    !string.IsNullOrWhiteSpace(coordinatorSnapshot.Admin.Password))
+{
+    adminTestUsers.Add(new TestUser
+    {
+        SubjectId = "admin",
+        Username = coordinatorSnapshot.Admin.Username,
+        Password = coordinatorSnapshot.Admin.Password,
+        Claims =
+        {
+            new Claim("name", coordinatorSnapshot.Admin.Username),
+            new Claim("role", "admin")
+        }
+    });
+}
+
+// Merge worker clients + admin UI client into the Duende client list.
+var duendeClients = new List<Client>();
+duendeClients.AddRange(workerRegistry.ToDuendeClients(accessTokenLifetimeSeconds));
+duendeClients.Add(IdentityServerResources.BuildAdminUiClient(coordinatorBaseUrl));
 
 builder.Services.AddIdentityServer(options =>
     {
@@ -90,30 +124,60 @@ builder.Services.AddIdentityServer(options =>
         options.Events.RaiseFailureEvents = true;
         options.Events.RaiseSuccessEvents = true;
         options.EmitStaticAudienceClaim = true;
-        options.LicenseKey = null; // community / dev mode — warns but works
+        options.LicenseKey = null; // community / dev mode
+
+        // Interactive login page the IS redirects to when an
+        // unauthenticated user hits /connect/authorize.
+        options.UserInteraction.LoginUrl = "/Account/Login";
+        options.UserInteraction.LoginReturnUrlParameter = "returnUrl";
     })
+    .AddInMemoryIdentityResources(IdentityServerResources.IdentityResources)
     .AddInMemoryApiScopes(IdentityServerResources.ApiScopes)
     .AddInMemoryApiResources(IdentityServerResources.ApiResources)
-    .AddInMemoryClients(workerRegistry.ToDuendeClients(accessTokenLifetimeSeconds))
+    .AddInMemoryClients(duendeClients)
+    .AddTestUsers(adminTestUsers)
     .AddDeveloperSigningCredential(persistKey: false);
 
-// ── Authentication: JWT bearer for workers + Basic for admin ──────
+// ── Authentication schemes ────────────────────────────────────────
 builder.Services
-    .AddAuthentication(defaultScheme: "Bearer")
+    .AddAuthentication(options =>
+    {
+        // The default scheme used by admin Blazor pages is the cookie
+        // the OIDC middleware drops after a successful code exchange.
+        // Worker endpoints opt into JWT validation explicitly via their
+        // authorization policy so the two planes do not interfere.
+        options.DefaultScheme = CookieAuthenticationDefaults.AuthenticationScheme;
+        options.DefaultChallengeScheme = OpenIdConnectDefaults.AuthenticationScheme;
+    })
+    .AddCookie(CookieAuthenticationDefaults.AuthenticationScheme, options =>
+    {
+        options.Cookie.Name = "bitnet-coord-admin";
+        options.Cookie.SameSite = SameSiteMode.Lax;
+        options.LoginPath = "/Account/Login";
+        options.AccessDeniedPath = "/Account/Login";
+    })
+    .AddOpenIdConnect(OpenIdConnectDefaults.AuthenticationScheme, options =>
+    {
+        options.Authority = coordinatorBaseUrl;
+        options.ClientId = IdentityServerResources.AdminUiClientId;
+        options.ResponseType = OpenIdConnectResponseType.Code;
+        options.UsePkce = true;
+        options.RequireHttpsMetadata = false; // localhost dev / ngrok TLS
+        options.SaveTokens = true;
+        options.GetClaimsFromUserInfoEndpoint = true;
+        options.Scope.Clear();
+        options.Scope.Add("openid");
+        options.Scope.Add("profile");
+        options.TokenValidationParameters.NameClaimType = "name";
+        options.TokenValidationParameters.RoleClaimType = "role";
+    })
     .AddJwtBearer("Bearer", options =>
     {
-        // In a single-process setup the issuer and audience are the
-        // coordinator itself; JwtBearer uses the local IS authority
-        // to discover the signing keys via the test-friendly
-        // backchannel provided by WebApplicationFactory.
-        options.Authority = "https://localhost:5001";
+        options.Authority = coordinatorBaseUrl;
         options.Audience = IdentityServerResources.WorkerScopeName;
-        options.RequireHttpsMetadata = false; // dev + tests over HTTP
-        options.MapInboundClaims = false;     // keep original JWT claim names (iat, client_id, scope)
-    })
-    .AddScheme<AdminBasicAuthenticationOptions, AdminBasicAuthenticationHandler>(
-        "AdminBasic",
-        options => { });
+        options.RequireHttpsMetadata = false;
+        options.MapInboundClaims = false;
+    });
 
 builder.Services.AddAuthorization(options =>
 {
@@ -126,22 +190,17 @@ builder.Services.AddAuthorization(options =>
 
     options.AddPolicy("AdminPolicy", policy =>
     {
-        policy.AddAuthenticationSchemes("AdminBasic");
+        policy.AddAuthenticationSchemes(CookieAuthenticationDefaults.AuthenticationScheme);
         policy.RequireAuthenticatedUser();
         policy.RequireRole("admin");
     });
 });
 
-// Blazor / Razor Components for the admin web UI. Static render mode
-// only — the admin pages do not need interactive circuits, so there is
-// no SignalR overhead and no client bundle.
 builder.Services.AddRazorComponents();
 
 var app = builder.Build();
 
-// Ensure all three stores create their schema + directory on startup
-// by resolving them once. Prevents "file not found" races on the first
-// request.
+// Ensure all three stores create their schema on startup.
 _ = app.Services.GetRequiredService<SqliteWorkQueueStore>();
 _ = app.Services.GetRequiredService<SqliteWorkerRegistryStore>();
 _ = app.Services.GetRequiredService<SqliteClientRevocationStore>();
@@ -157,7 +216,7 @@ app.MapGet("/health", () => Results.Ok(new
     status = "ok",
     time   = DateTimeOffset.UtcNow,
     phase  = "D-1"
-}));
+})).AllowAnonymous();
 
 app.MapGet("/status", (
     SqliteWorkQueueStore workQueue,
@@ -182,7 +241,7 @@ app.MapGet("/status", (
         },
         time = DateTimeOffset.UtcNow
     });
-});
+}).AllowAnonymous();
 
 // ── Worker endpoints (JWT-protected) ──────────────────────────────
 app.MapPost("/register", (
@@ -227,7 +286,7 @@ app.MapPost("/register", (
 
     var response = new WorkerRegistrationResponse(
         WorkerId: clientId,
-        BearerToken: string.Empty, // JWT already carried on the request; no additional bearer issued
+        BearerToken: string.Empty,
         InitialWeightVersion: options.InitialWeightVersion,
         RecommendedTokensPerTask: recommendedTokens,
         HeartbeatIntervalSeconds: options.HeartbeatIntervalSeconds,
@@ -236,15 +295,45 @@ app.MapPost("/register", (
     return Results.Ok(response);
 }).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
 
-// ── Admin Blazor page (HTTP Basic auth) ───────────────────────────
+// ── Admin Blazor UI (cookie + OIDC) ───────────────────────────────
 app.MapRazorComponents<App>();
 
-// ── Admin rotate endpoint (HTTP Basic auth) ───────────────────────
-// Kept as a plain minimal API endpoint so it can receive POSTs from
-// both the Blazor page's HTML form AND from operator scripts curling
-// the coordinator directly. Supports an optional ?redirect= query so
-// the web form can bounce back to /admin/api-keys?rotated={id}; a
-// JSON client omits the redirect and gets a JSON body instead.
+// ── Account/Login POST handler ────────────────────────────────────
+// Receives the login form submission from Components/Pages/LoginPage.razor,
+// validates the credentials against Duende's TestUserStore, signs in
+// on the "idsrv" cookie so the in-progress /connect/authorize
+// request can resume, and redirects the browser back to the caller's
+// returnUrl — which is the Duende authorize continuation URL.
+app.MapPost("/Account/Login/submit", async (
+    [FromForm] string username,
+    [FromForm] string password,
+    [FromForm] string? returnUrl,
+    HttpContext http,
+    TestUserStore users) =>
+{
+    if (!users.ValidateCredentials(username, password))
+    {
+        var safeReturn = string.IsNullOrWhiteSpace(returnUrl) ? "/admin/api-keys" : returnUrl;
+        return Results.Redirect(
+            $"/Account/Login?error={Uri.EscapeDataString("Invalid credentials")}&returnUrl={Uri.EscapeDataString(safeReturn)}");
+    }
+
+    var user = users.FindByUsername(username);
+    var claims = new List<Claim>
+    {
+        new(ClaimTypes.Name, user.Username),
+        new("name", user.Username),
+        new("role", "admin"),
+        new("sub", user.SubjectId)
+    };
+    var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, IdentityServerConstants.DefaultCookieAuthenticationScheme));
+    await http.SignInAsync(IdentityServerConstants.DefaultCookieAuthenticationScheme, principal);
+
+    var redirect = string.IsNullOrWhiteSpace(returnUrl) ? "/admin/api-keys" : returnUrl;
+    return Results.Redirect(redirect);
+}).DisableAntiforgery();
+
+// ── Admin rotate endpoint (cookie auth) ───────────────────────────
 app.MapPost("/admin/rotate/{clientId}", (
     string clientId,
     [FromQuery] string? redirect,
@@ -281,7 +370,7 @@ app.MapPost("/admin/rotate/{clientId}", (
             new ErrorResponse("unknown_client", $"Client '{clientId}' is not registered."),
             statusCode: StatusCodes.Status404NotFound);
     }
-}).RequireAuthorization("AdminPolicy");
+}).RequireAuthorization("AdminPolicy").DisableAntiforgery();
 
 app.Run();
 

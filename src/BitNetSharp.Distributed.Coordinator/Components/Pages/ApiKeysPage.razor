@@ -1,5 +1,5 @@
 @page "/admin/api-keys"
-@attribute [Authorize(Policy = "AdminPolicy", AuthenticationSchemes = "AdminBasic")]
+@attribute [Authorize(Policy = "AdminPolicy")]
 @inject WorkerClientRegistry Registry
 @inject SqliteClientRevocationStore Revocations
 
