@@ -120,6 +120,7 @@ builder.Services.AddSingleton(sp =>
         "weights");
     return new FileSystemWeightStore(weightsDir);
 });
+builder.Services.AddSingleton<WeightApplicationService>();
 
 // ── Worker client registry + Duende IdentityServer ────────────────
 // Registry is seeded lazily from IConfiguration so WebApplicationFactory
@@ -271,6 +272,11 @@ _ = app.Services.GetRequiredService<SqliteWorkQueueStore>();
 _ = app.Services.GetRequiredService<SqliteWorkerRegistryStore>();
 _ = app.Services.GetRequiredService<SqliteClientRevocationStore>();
 _ = app.Services.GetRequiredService<FileSystemWeightStore>();
+
+// Eagerly materialize the global weight vector (or load latest
+// persisted version from disk) so the first /gradient request has
+// a target to apply against.
+app.Services.GetRequiredService<WeightApplicationService>().EnsureInitialized();
 
 app.UseAuthentication();
 app.UseAuthorization();

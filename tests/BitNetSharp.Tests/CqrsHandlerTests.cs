@@ -6,6 +6,7 @@ using BitNetSharp.Distributed.Contracts;
 using BitNetSharp.Distributed.Coordinator.Configuration;
 using BitNetSharp.Distributed.Coordinator.Cqrs.Commands;
 using BitNetSharp.Distributed.Coordinator.Cqrs.Queries;
+using BitNetSharp.Distributed.Coordinator.Services;
 using GetTaskQueueSnapshotQueryHandler = BitNetSharp.Distributed.Coordinator.Cqrs.Queries.GetTaskQueueSnapshotQueryHandler;
 using BitNetSharp.Distributed.Coordinator.Identity;
 using BitNetSharp.Distributed.Coordinator.Persistence;
@@ -27,21 +28,26 @@ namespace BitNetSharp.Tests;
 public sealed class CqrsHandlerTests : IDisposable
 {
     private readonly string _databasePath;
+    private readonly string _weightsDirectory;
     private readonly FakeTimeProvider _time;
     private readonly SqliteWorkerRegistryStore _workerStore;
     private readonly SqliteWorkQueueStore _queueStore;
     private readonly SqliteClientRevocationStore _revocations;
+    private readonly FileSystemWeightStore _weightStore;
+    private readonly WeightApplicationService _weightApplication;
     private readonly WorkerClientRegistry _registry;
     private readonly IOptionsMonitor<CoordinatorOptions> _options;
 
     public CqrsHandlerTests()
     {
         _databasePath = Path.Combine(Path.GetTempPath(), $"bitnet-cqrs-{Guid.NewGuid():N}.db");
+        _weightsDirectory = Path.Combine(Path.GetTempPath(), $"bitnet-cqrs-weights-{Guid.NewGuid():N}");
         _time = new FakeTimeProvider(new DateTimeOffset(2026, 4, 15, 19, 0, 0, TimeSpan.Zero));
         var connectionString = $"Data Source={_databasePath}";
         _workerStore = new SqliteWorkerRegistryStore(connectionString, _time);
         _queueStore = new SqliteWorkQueueStore(connectionString, _time);
         _revocations = new SqliteClientRevocationStore(connectionString, _time);
+        _weightStore = new FileSystemWeightStore(_weightsDirectory);
 
         _registry = new WorkerClientRegistry();
         _registry.Seed(new[]
@@ -60,8 +66,18 @@ public sealed class CqrsHandlerTests : IDisposable
             FullStepEfficiency = 0.25d,
             HeartbeatIntervalSeconds = 30,
             InitialWeightVersion = 1,
+            InitialWeightDimension = 8,
+            BaseLearningRate = 0.1d,
+            StalenessAlpha = 0.5d,
+            MaxStalenessSteps = 5,
             BaseUrl = "http://localhost"
         });
+
+        _weightApplication = new WeightApplicationService(
+            _weightStore,
+            _options,
+            NullLogger<WeightApplicationService>.Instance);
+        _weightApplication.EnsureInitialized();
     }
 
     public void Dispose()
@@ -72,6 +88,10 @@ public sealed class CqrsHandlerTests : IDisposable
         TryDelete(_databasePath);
         TryDelete(_databasePath + "-wal");
         TryDelete(_databasePath + "-shm");
+        if (Directory.Exists(_weightsDirectory))
+        {
+            try { Directory.Delete(_weightsDirectory, recursive: true); } catch { }
+        }
     }
 
     private static void TryDelete(string path)
@@ -234,7 +254,7 @@ public sealed class CqrsHandlerTests : IDisposable
     // ── SubmitGradientCommand ───────────────────────────────────────
 
     private SubmitGradientCommandHandler BuildGradientHandler() =>
-        new(_queueStore, NullLogger<SubmitGradientCommandHandler>.Instance);
+        new(_queueStore, _weightApplication, NullLogger<SubmitGradientCommandHandler>.Instance);
 
     [Fact]
     public async Task SubmitGradient_marks_task_done_on_happy_path()
@@ -287,6 +307,136 @@ public sealed class CqrsHandlerTests : IDisposable
 
         Assert.True(result.IsFailure);
         Assert.Equal(SubmitGradientCommandHandler.WorkerMismatchCode, result.Error);
+    }
+
+    [Fact]
+    public async Task SubmitGradient_applies_real_int8_gradient_and_bumps_weight_version()
+    {
+        _queueStore.EnqueuePending(NewPendingTask("task-real-grad"));
+        _queueStore.TryClaimNextPending("worker-alpha", TimeSpan.FromMinutes(10));
+
+        var gradient = new float[_weightApplication.Dimension];
+        for (var i = 0; i < gradient.Length; i++)
+        {
+            gradient[i] = 0.5f;
+        }
+        var residual = new float[gradient.Length];
+        var payload = Int8GradientCodec.Encode(gradient, residual);
+        var versionBefore = _weightApplication.CurrentVersion;
+
+        var handler = BuildGradientHandler();
+        var command = new SubmitGradientCommand(
+            "worker-alpha",
+            new GradientSubmission(
+                TaskId: "task-real-grad",
+                WorkerId: "worker-alpha",
+                BaseWeightVersion: versionBefore,
+                TokensSeen: 4096,
+                LossAfter: 1.0,
+                GradientFormat: Int8GradientCodec.FormatId,
+                GradientPayload: payload,
+                WallClockMs: 500));
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(command, context);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(versionBefore + 1, result.Value!.NewWeightVersion);
+        Assert.Equal(0, result.Value.Staleness);
+        Assert.True(result.Value.EffectiveLearningRate > 0f);
+        Assert.Equal(1, _queueStore.CountByState(WorkTaskState.Done));
+        Assert.Equal(versionBefore + 1, _weightApplication.CurrentVersion);
+    }
+
+    [Fact]
+    public async Task SubmitGradient_rejects_stale_gradient_beyond_max_staleness()
+    {
+        _queueStore.EnqueuePending(NewPendingTask("task-stale"));
+        _queueStore.TryClaimNextPending("worker-alpha", TimeSpan.FromMinutes(10));
+
+        // Push the weight version forward so the upcoming submission
+        // is six versions behind, exceeding the MaxStalenessSteps=5
+        // configured in the fixture.
+        var gradient = new float[_weightApplication.Dimension];
+        gradient[0] = 1f;
+        for (var i = 0; i < 6; i++)
+        {
+            var r = new float[gradient.Length];
+            _weightApplication.Apply(_weightApplication.CurrentVersion, Int8GradientCodec.Decode(Int8GradientCodec.Encode(gradient, r)));
+        }
+
+        var residual = new float[gradient.Length];
+        var payload = Int8GradientCodec.Encode(gradient, residual);
+        var handler = BuildGradientHandler();
+        var command = new SubmitGradientCommand(
+            "worker-alpha",
+            new GradientSubmission(
+                TaskId: "task-stale",
+                WorkerId: "worker-alpha",
+                BaseWeightVersion: 1,
+                TokensSeen: 0,
+                LossAfter: 0,
+                GradientFormat: Int8GradientCodec.FormatId,
+                GradientPayload: payload,
+                WallClockMs: 0));
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(command, context);
+
+        Assert.True(result.IsFailure);
+        Assert.Contains(SubmitGradientCommandHandler.StaleGradientCode, result.Error);
+    }
+
+    [Fact]
+    public async Task SubmitGradient_rejects_malformed_payload()
+    {
+        _queueStore.EnqueuePending(NewPendingTask("task-bad-payload"));
+        _queueStore.TryClaimNextPending("worker-alpha", TimeSpan.FromMinutes(10));
+
+        var handler = BuildGradientHandler();
+        var command = new SubmitGradientCommand(
+            "worker-alpha",
+            new GradientSubmission(
+                TaskId: "task-bad-payload",
+                WorkerId: "worker-alpha",
+                BaseWeightVersion: 1,
+                TokensSeen: 0,
+                LossAfter: 0,
+                GradientFormat: Int8GradientCodec.FormatId,
+                GradientPayload: new byte[] { 1, 2, 3, 4 }, // nowhere near a valid blob
+                WallClockMs: 0));
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(command, context);
+
+        Assert.True(result.IsFailure);
+        Assert.Contains(SubmitGradientCommandHandler.InvalidPayloadCode, result.Error);
+    }
+
+    [Fact]
+    public async Task SubmitGradient_rejects_unknown_format()
+    {
+        _queueStore.EnqueuePending(NewPendingTask("task-unknown-fmt"));
+        _queueStore.TryClaimNextPending("worker-alpha", TimeSpan.FromMinutes(10));
+
+        var handler = BuildGradientHandler();
+        var command = new SubmitGradientCommand(
+            "worker-alpha",
+            new GradientSubmission(
+                TaskId: "task-unknown-fmt",
+                WorkerId: "worker-alpha",
+                BaseWeightVersion: 1,
+                TokensSeen: 0,
+                LossAfter: 0,
+                GradientFormat: "mystery-codec-v99",
+                GradientPayload: new byte[] { 0 },
+                WallClockMs: 0));
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(command, context);
+
+        Assert.True(result.IsFailure);
+        Assert.Contains(SubmitGradientCommandHandler.InvalidPayloadCode, result.Error);
     }
 
     [Fact]

@@ -78,6 +78,40 @@ public sealed class CoordinatorOptions
     public string BaseUrl { get; set; } = "https://localhost:5001";
 
     /// <summary>
+    /// Dimension of the global weight vector the coordinator tracks
+    /// in memory. Phase D-4 uses a flat fp32 vector of this size.
+    /// Defaults to 4096 which is small enough to fit comfortably in
+    /// the test harness and large enough to exercise real int8
+    /// quantization behavior.
+    /// </summary>
+    public int InitialWeightDimension { get; set; } = 4096;
+
+    /// <summary>
+    /// Base learning rate applied to decoded worker gradients. The
+    /// effective rate used during
+    /// <see cref="BitNetSharp.Distributed.Coordinator.Services.WeightApplicationService.Apply"/>
+    /// is scaled down for stale gradients via
+    /// <see cref="StalenessAlpha"/>.
+    /// </summary>
+    public double BaseLearningRate { get; set; } = 0.01d;
+
+    /// <summary>
+    /// Linear staleness penalty: effective_lr =
+    /// base_lr / (1 + staleness * alpha). Higher alpha means the
+    /// coordinator trusts stale gradients less. Zero disables
+    /// staleness compensation entirely.
+    /// </summary>
+    public double StalenessAlpha { get; set; } = 0.5d;
+
+    /// <summary>
+    /// Maximum number of weight versions a gradient is allowed to
+    /// lag behind the current global version before the coordinator
+    /// rejects the submission outright. Ten is the v1 default — see
+    /// the distributed training design notes.
+    /// </summary>
+    public long MaxStalenessSteps { get; set; } = 10;
+
+    /// <summary>
     /// List of OAuth 2.0 client-credentials clients that are allowed
     /// to authenticate as workers. Populated from environment at
     /// startup (see class remarks for env-var naming). Add one entry
