@@ -56,6 +56,21 @@ using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 //      "idsrv"    — Duende's own default cookie scheme for the IS UI
 // ────────────────────────────────────────────────────────────────────────
 
+// ── Dev CLI subcommand: seed-tasks ──────────────────────────────
+// Allows an operator to inject N pending training tasks into the
+// coordinator's SQLite work queue without going through the admin
+// web UI. Useful for Phase D-2 smoke-test rigs and scripting.
+//
+//     dotnet BitNetSharp.Distributed.Coordinator.dll seed-tasks 10
+//
+// Reads the database path and other config from environment
+// variables / appsettings.json the same way the web host does so
+// it targets whichever DB the service uses.
+if (args.Length > 0 && string.Equals(args[0], "seed-tasks", StringComparison.OrdinalIgnoreCase))
+{
+    return SeedTasksCommandLine(args);
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Running under Windows Service Control Manager sets the current
@@ -566,9 +581,83 @@ app.MapPost("/admin/rotate/{clientId}", async (
 }).RequireAuthorization("AdminPolicy").DisableAntiforgery();
 
 app.Run();
+return 0;
 
 static string BuildConnectionString(CoordinatorOptions coord) =>
     $"Data Source={coord.DatabasePath};Cache=Shared";
+
+/// <summary>
+/// Seeds pending training tasks into the coordinator's SQLite work
+/// queue from the CLI. Invoked when <c>args[0] == "seed-tasks"</c>
+/// so it runs before the web host is constructed and exits
+/// immediately after the insert loop completes.
+/// </summary>
+static int SeedTasksCommandLine(string[] args)
+{
+    try
+    {
+        var count = 5;
+        if (args.Length > 1 && int.TryParse(args[1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsedCount) && parsedCount > 0)
+        {
+            count = parsedCount;
+        }
+
+        // Mirror the web host's configuration pipeline so this
+        // command targets the same database file the service uses.
+        var config = new ConfigurationBuilder()
+            .SetBasePath(System.IO.Path.GetDirectoryName(typeof(Program).Assembly.Location) ?? ".")
+            .AddJsonFile("appsettings.json", optional: true)
+            .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}.json", optional: true)
+            .AddEnvironmentVariables()
+            .Build();
+
+        var coordinator = new CoordinatorOptions();
+        config.GetSection(CoordinatorOptions.SectionName).Bind(coordinator);
+
+        if (string.IsNullOrWhiteSpace(coordinator.DatabasePath))
+        {
+            Console.Error.WriteLine("Coordinator:DatabasePath is not set.");
+            return 2;
+        }
+
+        using var store = new SqliteWorkQueueStore(
+            $"Data Source={coordinator.DatabasePath}",
+            TimeProvider.System);
+
+        var now = DateTimeOffset.UtcNow;
+        var inserted = 0;
+        for (var i = 0; i < count; i++)
+        {
+            var taskId = $"task-seed-{Guid.NewGuid():N}";
+            store.EnqueuePending(new WorkTaskRecord(
+                TaskId: taskId,
+                WeightVersion: coordinator.InitialWeightVersion,
+                ShardId: "shard-seed",
+                ShardOffset: (long)i * 8192,
+                ShardLength: 8192,
+                TokensPerTask: 8192,
+                KLocalSteps: 4,
+                HyperparametersJson: "{}",
+                State: WorkTaskState.Pending,
+                AssignedWorkerId: null,
+                AssignedAtUtc: null,
+                DeadlineUtc: null,
+                Attempt: 0,
+                CreatedAtUtc: now,
+                CompletedAtUtc: null));
+            inserted++;
+        }
+
+        var pending = store.CountByState(WorkTaskState.Pending);
+        Console.WriteLine($"Seeded {inserted} tasks into {coordinator.DatabasePath}. Queue pending count: {pending}.");
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"seed-tasks failed: {ex}");
+        return 1;
+    }
+}
 
 /// <summary>
 /// Empty partial so WebApplicationFactory-based integration tests in
