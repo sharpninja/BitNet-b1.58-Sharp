@@ -8,7 +8,10 @@ namespace BitNetSharp.Core;
 public sealed class BitNetPaperModel
 {
     private const int MaxPredictionLimit = 8;
-    private const double ProbabilityFloor = 1e-9d;
+    // Matches TraditionalLocalModel.MinimumProbability (1e-6f) so perplexity comparisons are
+    // apples-to-apples. The previous 1e-9 floor penalized BitNet by ~6.9 nats per out-of-vocab
+    // token vs the traditional baseline on the same WikiText2 slice, inflating reported ppl.
+    private const double ProbabilityFloor = 1e-6d;
 
     private static readonly HashSet<string> ReservedTokens =
     [

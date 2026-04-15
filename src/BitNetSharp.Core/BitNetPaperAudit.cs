@@ -56,7 +56,9 @@ public static class BitNetPaperAuditor
 {
     private const string DefaultPrompt = "how are you hosted";
     private const double TheoreticalTernaryUpperBoundBitsPerWeight = 1.584962500721156d;
-    private const double ProbabilityFloor = 1e-9d;
+    // Matches BitNetPaperModel.ProbabilityFloor (1e-6) and TraditionalLocalModel.MinimumProbability
+    // (1e-6f) so every perplexity code path uses the same floor and comparisons are apples-to-apples.
+    private const double ProbabilityFloor = 1e-6d;
 
     private static readonly (string Task, string Prompt, string ExpectedToken)[] ZeroShotFixtures =
     [
@@ -388,7 +390,7 @@ public static class BitNetPaperAuditor
                         logits[row] = sum;
                     }
 
-                    totalLoss -= Math.Log(Math.Max(GetSoftmaxProbability(logits, targetIds[position]), 1e-9d));
+                    totalLoss -= Math.Log(Math.Max(GetSoftmaxProbability(logits, targetIds[position]), ProbabilityFloor));
                     totalTokens++;
                 }
             }
@@ -423,7 +425,7 @@ public static class BitNetPaperAuditor
             if (i == targetId) targetMass = mass;
         }
 
-        return partition <= 0d ? 1e-9d : targetMass / partition;
+        return partition <= 0d ? ProbabilityFloor : targetMass / partition;
     }
 
     private static IReadOnlyList<BitNetPaperZeroShotTaskResult> EvaluateZeroShot(BitNetPaperModel model) =>
