@@ -2,6 +2,7 @@
   <Folder Name="/src/">
     <Project Path="src/BitNetSharp.App/BitNetSharp.App.csproj" />
     <Project Path="src/BitNetSharp.Core/BitNetSharp.Core.csproj" />
+    <Project Path="src/BitNetSharp.Distributed.Worker/BitNetSharp.Distributed.Worker.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/BitNetSharp.Tests/BitNetSharp.Tests.csproj" />

@@ -27,6 +27,7 @@
   <ItemGroup>
     <ProjectReference Include="..\..\src\BitNetSharp.Core\BitNetSharp.Core.csproj" />
     <ProjectReference Include="..\..\src\BitNetSharp.App\BitNetSharp.App.csproj" />
+    <ProjectReference Include="..\..\src\BitNetSharp.Distributed.Worker\BitNetSharp.Distributed.Worker.csproj" />
   </ItemGroup>
 
 </Project>

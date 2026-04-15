@@ -1,0 +1,41 @@
+# Prevent the Docker build context from ballooning. The Dockerfile copies
+# only the two project directories it actually needs, but .dockerignore
+# still has to strip any large build artefacts the user may have left in
+# those directories.
+
+**/bin
+**/obj
+**/TestResults
+**/artifacts
+**/.vs
+**/.vscode
+**/.idea
+**/.gh-pages-worktree
+**/node_modules
+
+# Never bake checkpoints or large gguf assets into a worker image.
+**/Data/Models
+**/*.gguf
+**/*.bin.bak
+**/*.checkpoint.json
+**/*.bitnet.json
+**/*.traditional.json
+
+# Local zips and tarballs sometimes sit next to the source while we iterate.
+**/*.zip
+**/*.tar
+**/*.tar.gz
+
+# Source control and editor scratch.
+.git
+.gitignore
+.github
+.claude
+.azuredevops
+
+# Repository-level files that the build does not need.
+README.md
+LICENSE*
+docs/
+tests/
+Directory.Packages.props

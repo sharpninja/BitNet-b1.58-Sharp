@@ -1,0 +1,75 @@
+# ─────────────────────────────────────────────────────────────────────────
+#  BitNetSharp.Distributed.Worker — local multi-replica dev stack.
+#
+#  Spin up N workers against a coordinator URL (ngrok or direct) with:
+#
+#      cd docker/worker
+#      cp .env.example .env               # edit to set the coordinator URL
+#      docker compose up --scale worker=4 # four workers in parallel
+#
+#  Each replica runs the full startup BenchmarkDotNet calibration pass and
+#  reports its tokens-per-second score to the coordinator, which then sizes
+#  its task batches for ~10 minutes of compute per unit on that worker.
+#
+#  To scale into the cloud, use this same image (ghcr.io/sharpninja/
+#  bitnetsharp-worker) from any orchestrator that understands OCI — ECS,
+#  Fargate, Nomad, Kubernetes, Azure Container Apps, Hetzner Cloud, etc.
+#  No state is persisted on the worker side; killing and replacing an
+#  instance is always safe once the currently-assigned task has checkpointed
+#  or timed out.
+# ─────────────────────────────────────────────────────────────────────────
+
+services:
+  worker:
+    build:
+      context: ../..
+      dockerfile: docker/worker/Dockerfile
+    image: ghcr.io/sharpninja/bitnetsharp-worker:dev
+    # Replica count. Override on the command line with
+    # `docker compose up --scale worker=N`.
+    deploy:
+      replicas: 1
+      resources:
+        limits:
+          # Cap each replica so N replicas on one box do not starve each
+          # other. Tune to match the host: e.g. a 32-thread box running
+          # 4 replicas can set cpus: "8.0".
+          cpus: "0"
+        reservations:
+          cpus: "1.0"
+    environment:
+      # ── required ────────────────────────────────────────────────────
+      BITNET_COORDINATOR_URL: ${BITNET_COORDINATOR_URL:?set BITNET_COORDINATOR_URL in .env}
+      BITNET_ENROLLMENT_KEY: ${BITNET_ENROLLMENT_KEY:?set BITNET_ENROLLMENT_KEY in .env}
+      # ── optional ────────────────────────────────────────────────────
+      BITNET_WORKER_NAME: ${BITNET_WORKER_NAME:-}
+      BITNET_CPU_THREADS: ${BITNET_CPU_THREADS:-}
+      BITNET_HEARTBEAT_SECONDS: ${BITNET_HEARTBEAT_SECONDS:-30}
+      BITNET_SHUTDOWN_SECONDS: ${BITNET_SHUTDOWN_SECONDS:-30}
+      BITNET_LOG_LEVEL: ${BITNET_LOG_LEVEL:-info}
+    # Never run as root inside the container. The image already sets
+    # USER bitnet (uid 10001) but the explicit block here documents it
+    # for orchestrators that skip the image metadata.
+    user: "10001:10001"
+    read_only: true
+    tmpfs:
+      # Required so the health beacon and BenchmarkDotNet temp artefacts
+      # can be written while the rest of the filesystem stays read-only.
+      - /tmp:size=64m,mode=1777
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    restart: unless-stopped
+    stop_grace_period: 45s
+    healthcheck:
+      test: ["CMD-SHELL", "test -f /tmp/bitnet-worker-alive && [ $$(( $$(date +%s) - $$(stat -c %Y /tmp/bitnet-worker-alive) )) -lt 120 ]"]
+      interval: 30s
+      timeout: 5s
+      start_period: 120s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
