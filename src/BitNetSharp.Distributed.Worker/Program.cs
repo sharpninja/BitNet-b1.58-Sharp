@@ -61,9 +61,14 @@ try
     Console.WriteLine($"[heartbeat] Local beacon path: {config.HealthBeaconPath}");
     Console.WriteLine($"[heartbeat] Interval: {config.HeartbeatInterval.TotalSeconds:F0}s");
 
-    await RunHeartbeatLoopAsync(client, config, beacon, registration is not null, cts.Token).ConfigureAwait(false);
+    var heartbeatTask = RunHeartbeatLoopAsync(client, config, beacon, registration is not null, cts.Token);
+    var workTask = registration is not null
+        ? RunWorkLoopAsync(client, config, report, cts.Token)
+        : Task.CompletedTask;
 
-    Console.WriteLine("[shutdown] Heartbeat loop exited cleanly. Goodbye.");
+    await Task.WhenAll(heartbeatTask, workTask).ConfigureAwait(false);
+
+    Console.WriteLine("[shutdown] Heartbeat + work loops exited cleanly. Goodbye.");
     return 0;
 }
 catch (InvalidOperationException configError)
@@ -103,6 +108,118 @@ static async Task<WorkerRegistrationResponse?> TryRegisterAsync(
     {
         Console.Error.WriteLine($"[register] Failed to register with coordinator: {ex.Message}");
         return null;
+    }
+}
+
+static async Task RunWorkLoopAsync(
+    CoordinatorClient client,
+    WorkerConfig config,
+    CapabilityReport calibration,
+    CancellationToken cancellationToken)
+{
+    // Idle backoff when the queue is empty so a worker does not hammer
+    // the coordinator with empty /work polls. 5 seconds is short
+    // enough that newly enqueued tasks are picked up quickly, long
+    // enough that an idle pool of a hundred workers only generates
+    // 20 polls per second against the coordinator.
+    var idleBackoff = TimeSpan.FromSeconds(5);
+
+    try
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            WorkTaskAssignment? task;
+            try
+            {
+                task = await client.TryClaimWorkAsync(cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[work] Transient error fetching task: {ex.Message}");
+                await SafeDelay(idleBackoff, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            if (task is null)
+            {
+                await SafeDelay(idleBackoff, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            Console.WriteLine($"[work] Claimed task {task.TaskId} ({task.TokensPerTask:N0} tokens, weight v{task.WeightVersion}).");
+
+            // D-1 stub: simulate training time proportional to the
+            // calibrated throughput so the full register→work→gradient
+            // round-trip can be exercised without real training. The
+            // D-4 commit swaps this for actual ternary-matmul training.
+            var simulatedSeconds = calibration.TokensPerSecond > 0d
+                ? task.TokensPerTask / (calibration.TokensPerSecond * 0.25d)
+                : 10d;
+            var simulatedDuration = TimeSpan.FromSeconds(Math.Min(simulatedSeconds, 30d));
+            Console.WriteLine($"[work] Simulating compute for {simulatedDuration.TotalSeconds:F1}s (stub)…");
+            var wallClockStart = DateTimeOffset.UtcNow;
+            try
+            {
+                await Task.Delay(simulatedDuration, cancellationToken).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+
+            var wallClockMs = (long)(DateTimeOffset.UtcNow - wallClockStart).TotalMilliseconds;
+            var submission = new GradientSubmission(
+                TaskId: task.TaskId,
+                WorkerId: config.ClientId,
+                BaseWeightVersion: task.WeightVersion,
+                TokensSeen: task.TokensPerTask,
+                LossAfter: 0d,                    // stub: no real loss to report
+                GradientFormat: "stub-noop",
+                GradientPayload: Array.Empty<byte>(),
+                WallClockMs: wallClockMs);
+
+            try
+            {
+                var accepted = await client.SubmitGradientAsync(submission, cancellationToken).ConfigureAwait(false);
+                if (accepted)
+                {
+                    Console.WriteLine($"[work] Gradient submission for {task.TaskId} accepted.");
+                }
+                else
+                {
+                    Console.WriteLine($"[work] Gradient submission for {task.TaskId} rejected (ownership or stale).");
+                }
+            }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                Console.Error.WriteLine($"[work] Transient error submitting gradient: {ex.Message}");
+                await SafeDelay(idleBackoff, cancellationToken).ConfigureAwait(false);
+            }
+        }
+    }
+    catch (OperationCanceledException)
+    {
+        // Expected on graceful shutdown.
+    }
+}
+
+static async Task SafeDelay(TimeSpan delay, CancellationToken cancellationToken)
+{
+    try
+    {
+        await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+    }
+    catch (OperationCanceledException)
+    {
+        // Cancellation is a normal signal to return from the caller's loop.
     }
 }
 

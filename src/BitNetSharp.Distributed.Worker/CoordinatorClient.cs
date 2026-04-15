@@ -215,6 +215,44 @@ internal sealed class CoordinatorClient : IDisposable
             .ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// POSTs the completed <see cref="GradientSubmission"/> to
+    /// <c>/gradient</c>. Returns <c>true</c> when the coordinator
+    /// accepted the submission (200), <c>false</c> when it rejected
+    /// the submission due to ownership mismatch (403) or because the
+    /// task was already recycled (409). Throws on any other non-2xx
+    /// status so transient failures bubble up to the caller's
+    /// retry/backoff logic.
+    /// </summary>
+    public async Task<bool> SubmitGradientAsync(
+        GradientSubmission submission,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(submission);
+
+        var token = await GetAccessTokenAsync(cancellationToken).ConfigureAwait(false);
+        using var message = new HttpRequestMessage(HttpMethod.Post, "gradient")
+        {
+            Content = JsonContent.Create(submission)
+        };
+        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+
+        using var response = await _http.SendAsync(message, cancellationToken).ConfigureAwait(false);
+        if (response.IsSuccessStatusCode)
+        {
+            return true;
+        }
+
+        if (response.StatusCode == System.Net.HttpStatusCode.Forbidden
+            || response.StatusCode == System.Net.HttpStatusCode.Conflict)
+        {
+            return false;
+        }
+
+        response.EnsureSuccessStatusCode();
+        return false; // Unreachable; EnsureSuccessStatusCode throws.
+    }
+
     public void Dispose()
     {
         _tokenLock.Dispose();

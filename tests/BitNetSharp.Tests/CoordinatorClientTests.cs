@@ -208,4 +208,74 @@ public sealed class CoordinatorClientTests
 
         Assert.Null(response);
     }
+
+    [Fact]
+    public async Task SubmitGradientAsync_returns_true_on_200()
+    {
+        var handler = new StubHandler();
+        handler.Enqueue(HttpStatusCode.OK, """
+        { "access_token": "t", "expires_in": 3600 }
+        """);
+        handler.Enqueue(HttpStatusCode.OK, """
+        { "accepted": true, "task_id": "task-1", "worker_id": "worker-alpha" }
+        """);
+
+        using var client = CreateClient(handler, SampleConfig());
+        var submission = new GradientSubmission(
+            TaskId: "task-1",
+            WorkerId: "worker-alpha",
+            BaseWeightVersion: 42,
+            TokensSeen: 4096,
+            LossAfter: 1.23,
+            GradientFormat: "int8-ef",
+            GradientPayload: new byte[] { 1, 2, 3 },
+            WallClockMs: 1000);
+
+        var accepted = await client.SubmitGradientAsync(submission);
+        Assert.True(accepted);
+    }
+
+    [Fact]
+    public async Task SubmitGradientAsync_returns_false_on_403()
+    {
+        var handler = new StubHandler();
+        handler.Enqueue(HttpStatusCode.OK, """
+        { "access_token": "t", "expires_in": 3600 }
+        """);
+        handler.Enqueue(HttpStatusCode.Forbidden);
+
+        using var client = CreateClient(handler, SampleConfig());
+        var accepted = await client.SubmitGradientAsync(new GradientSubmission(
+            TaskId: "task-1",
+            WorkerId: "worker-alpha",
+            BaseWeightVersion: 42,
+            TokensSeen: 0,
+            LossAfter: 0,
+            GradientFormat: "int8-ef",
+            GradientPayload: Array.Empty<byte>(),
+            WallClockMs: 0));
+        Assert.False(accepted);
+    }
+
+    [Fact]
+    public async Task SubmitGradientAsync_returns_false_on_409()
+    {
+        var handler = new StubHandler();
+        handler.Enqueue(HttpStatusCode.OK, """
+        { "access_token": "t", "expires_in": 3600 }
+        """);
+        handler.Enqueue(HttpStatusCode.Conflict);
+
+        using var client = CreateClient(handler, SampleConfig());
+        var accepted = await client.SubmitGradientAsync(new GradientSubmission(
+            TaskId: "task-1",
+            WorkerId: "worker-alpha",
+            BaseWeightVersion: 42,
+            TokensSeen: 0,
+            LossAfter: 0,
+            GradientFormat: "int8-ef",
+            GradientPayload: Array.Empty<byte>(),
+            WallClockMs: 0));
+        Assert.False(accepted);
+    }
 }
