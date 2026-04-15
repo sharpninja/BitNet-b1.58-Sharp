@@ -6,6 +6,7 @@ using BitNetSharp.Distributed.Contracts;
 using BitNetSharp.Distributed.Coordinator.Configuration;
 using BitNetSharp.Distributed.Coordinator.Cqrs.Commands;
 using BitNetSharp.Distributed.Coordinator.Cqrs.Queries;
+using GetTaskQueueSnapshotQueryHandler = BitNetSharp.Distributed.Coordinator.Cqrs.Queries.GetTaskQueueSnapshotQueryHandler;
 using BitNetSharp.Distributed.Coordinator.Identity;
 using BitNetSharp.Distributed.Coordinator.Persistence;
 using McpServer.Cqrs;
@@ -424,6 +425,28 @@ public sealed class CqrsHandlerTests : IDisposable
             context);
 
         Assert.True(result.IsFailure);
+    }
+
+    // ── GetTaskQueueSnapshotQuery ───────────────────────────────────
+
+    [Fact]
+    public async Task GetTaskQueueSnapshot_reflects_current_state()
+    {
+        _queueStore.EnqueuePending(NewPendingTask("snap-1"));
+        _queueStore.EnqueuePending(NewPendingTask("snap-2"));
+        _queueStore.TryClaimNextPending("worker-alpha", TimeSpan.FromMinutes(10));
+        _queueStore.EnqueuePending(NewPendingTask("snap-3"));
+
+        var handler = new GetTaskQueueSnapshotQueryHandler(_queueStore);
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(new GetTaskQueueSnapshotQuery(), context);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(2, result.Value!.Pending);
+        Assert.Equal(1, result.Value.Assigned);
+        Assert.Equal(0, result.Value.Done);
+        Assert.Equal(0, result.Value.Failed);
     }
 
     [Fact]

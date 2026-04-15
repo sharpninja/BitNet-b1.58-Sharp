@@ -231,6 +231,7 @@ builder.Services.AddCqrsHandlers(typeof(CoordinatorHostMarker).Assembly);
 // and the static-SSR lifecycle does not leak state across
 // unrelated requests.
 builder.Services.AddTransient<ApiKeysPageViewModel>();
+builder.Services.AddTransient<TasksPageViewModel>();
 
 // Hosted service that transitions stale workers to Gone and
 // recycles timed-out task assignments back to Pending.
@@ -466,8 +467,7 @@ app.MapPost("/Account/Login/submit", async (
 // Admin action: bulk-enqueue a run of pending tasks. Takes the
 // usual shard parameters plus a count and fans out a single
 // EnqueueTasksCommand to the handler. Used to seed a training
-// run from curl/scripts and, eventually, from the Blazor admin
-// tasks page.
+// run from curl / scripts.
 app.MapPost("/admin/tasks/enqueue", async (
     [FromBody] EnqueueTasksCommand command,
     IDispatcher dispatcher) =>
@@ -481,6 +481,44 @@ app.MapPost("/admin/tasks/enqueue", async (
         : Results.Json(
             new ErrorResponse("enqueue_failed", result.Error ?? "unknown"),
             statusCode: StatusCodes.Status400BadRequest);
+}).RequireAuthorization("AdminPolicy").DisableAntiforgery();
+
+// Form-post shim so the /admin/tasks Razor page's HTML form can
+// submit urlencoded data and get a redirect-back instead of the
+// JSON 200 response. Accepts the same parameters as the JSON
+// endpoint above.
+app.MapPost("/admin/tasks/enqueue-form", async (
+    [FromForm] string shardId,
+    [FromForm] long startOffset,
+    [FromForm] long stride,
+    [FromForm] long tokensPerTask,
+    [FromForm] int kLocalSteps,
+    [FromForm] long weightVersion,
+    [FromForm] int count,
+    [FromForm] string? hpJson,
+    IDispatcher dispatcher) =>
+{
+    var command = new EnqueueTasksCommand(
+        ShardId: shardId,
+        ShardStartOffset: startOffset,
+        ShardStride: stride,
+        TokensPerTask: tokensPerTask,
+        KLocalSteps: kLocalSteps,
+        HyperparametersJson: hpJson ?? "{}",
+        WeightVersion: weightVersion,
+        Count: count);
+
+    var result = await dispatcher
+        .SendAsync<EnqueueTasksResult>(command)
+        .ConfigureAwait(false);
+
+    if (result.IsSuccess)
+    {
+        return Results.Redirect($"/admin/tasks?seeded={Uri.EscapeDataString(result.Value!.Inserted.ToString(System.Globalization.CultureInfo.InvariantCulture))}");
+    }
+
+    var errorUrl = $"/admin/tasks?error={Uri.EscapeDataString(result.Error ?? "unknown")}";
+    return Results.Redirect(errorUrl);
 }).RequireAuthorization("AdminPolicy").DisableAntiforgery();
 
 app.MapPost("/admin/rotate/{clientId}", async (

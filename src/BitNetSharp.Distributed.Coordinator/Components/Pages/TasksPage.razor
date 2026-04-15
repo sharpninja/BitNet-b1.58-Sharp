@@ -1,0 +1,80 @@
+@page "/admin/tasks"
+@attribute [Authorize(Policy = "AdminPolicy")]
+@using BitNetSharp.Distributed.Coordinator.Cqrs.Commands
+@using BitNetSharp.Distributed.Coordinator.Cqrs.Queries
+@using BitNetSharp.Distributed.Coordinator.ViewModels
+@inject TasksPageViewModel ViewModel
+
+<h2>Training tasks</h2>
+<p>
+    Bulk-seed a training run. Each form submission fans out
+    <em>Count</em> pending tasks, all referencing the same corpus
+    shard but with monotonically increasing offsets. Workers pick
+    them up through <code>GET /work</code> as soon as they are
+    online.
+</p>
+
+<section style="margin-bottom:24px;">
+    <h3>Queue snapshot</h3>
+    <table>
+        <thead>
+            <tr><th>Pending</th><th>Assigned</th><th>Done</th><th>Failed</th></tr>
+        </thead>
+        <tbody>
+            <tr>
+                <td>@ViewModel.Snapshot.Pending</td>
+                <td>@ViewModel.Snapshot.Assigned</td>
+                <td class="ok">@ViewModel.Snapshot.Done</td>
+                <td class="@(ViewModel.Snapshot.Failed == 0 ? "" : "warn")">@ViewModel.Snapshot.Failed</td>
+            </tr>
+        </tbody>
+    </table>
+</section>
+
+@if (!string.IsNullOrWhiteSpace(ViewModel.LastEnqueueSummary))
+{
+    <p class="ok">@ViewModel.LastEnqueueSummary</p>
+}
+
+@if (!string.IsNullOrWhiteSpace(ViewModel.LastError))
+{
+    <p class="warn">@ViewModel.LastError</p>
+}
+
+<section>
+    <h3>Seed new tasks</h3>
+    <form method="post" action="/admin/tasks/enqueue-form" enctype="application/x-www-form-urlencoded" style="max-width:420px; display:flex; flex-direction:column; gap:10px;">
+        <label>Shard ID
+            <input name="shardId" value="shard-A" required style="width:100%; padding:6px;" />
+        </label>
+        <label>Start offset
+            <input name="startOffset" type="number" value="0" required style="width:100%; padding:6px;" />
+        </label>
+        <label>Stride (bytes per task; 0 = same as tokens/task)
+            <input name="stride" type="number" value="0" required style="width:100%; padding:6px;" />
+        </label>
+        <label>Tokens per task
+            <input name="tokensPerTask" type="number" value="4096" required style="width:100%; padding:6px;" />
+        </label>
+        <label>K local steps
+            <input name="kLocalSteps" type="number" value="4" required style="width:100%; padding:6px;" />
+        </label>
+        <label>Weight version
+            <input name="weightVersion" type="number" value="1" required style="width:100%; padding:6px;" />
+        </label>
+        <label>Count
+            <input name="count" type="number" value="10" required style="width:100%; padding:6px;" />
+        </label>
+        <label>Hyperparameters JSON
+            <input name="hpJson" value="{}" style="width:100%; padding:6px;" />
+        </label>
+        <button type="submit" class="btn" style="align-self:flex-start; margin-top:8px;">Enqueue</button>
+    </form>
+</section>
+
+@code {
+    protected override async Task OnInitializedAsync()
+    {
+        await ViewModel.LoadAsync();
+    }
+}
