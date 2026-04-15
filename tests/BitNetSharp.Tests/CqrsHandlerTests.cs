@@ -467,6 +467,55 @@ public sealed class CqrsHandlerTests : IDisposable
 
     // ── GetWorkerClientsQuery ───────────────────────────────────────
 
+    // ── GetWorkerInstallScriptQuery ─────────────────────────────────
+
+    [Fact]
+    public async Task GetWorkerInstallScript_renders_bash_for_known_client()
+    {
+        var handler = new GetWorkerInstallScriptQueryHandler(_registry, _options);
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(
+            new GetWorkerInstallScriptQuery("worker-alpha", InstallShell.Bash),
+            context);
+
+        Assert.True(result.IsSuccess);
+        Assert.EndsWith(".sh", result.Value!.Filename);
+        Assert.Contains("BITNET_CLIENT_ID=\"worker-alpha\"", result.Value.Content);
+        Assert.Contains("BITNET_CLIENT_SECRET=\"alpha-secret\"", result.Value.Content);
+        Assert.Contains("http://localhost", result.Value.Content);
+    }
+
+    [Fact]
+    public async Task GetWorkerInstallScript_renders_powershell_for_known_client()
+    {
+        var handler = new GetWorkerInstallScriptQueryHandler(_registry, _options);
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(
+            new GetWorkerInstallScriptQuery("worker-alpha", InstallShell.PowerShell),
+            context);
+
+        Assert.True(result.IsSuccess);
+        Assert.EndsWith(".ps1", result.Value!.Filename);
+        Assert.Contains("BITNET_CLIENT_ID         = 'worker-alpha'", result.Value.Content);
+        Assert.Contains("BITNET_CLIENT_SECRET     = 'alpha-secret'", result.Value.Content);
+    }
+
+    [Fact]
+    public async Task GetWorkerInstallScript_fails_for_unknown_client()
+    {
+        var handler = new GetWorkerInstallScriptQueryHandler(_registry, _options);
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(
+            new GetWorkerInstallScriptQuery("ghost-client", InstallShell.Bash),
+            context);
+
+        Assert.True(result.IsFailure);
+        Assert.Contains("Unknown worker client", result.Error);
+    }
+
     [Fact]
     public async Task GetWorkerClients_returns_registry_entries_with_revocation_status()
     {

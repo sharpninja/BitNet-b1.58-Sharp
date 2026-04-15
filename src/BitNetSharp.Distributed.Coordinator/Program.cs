@@ -260,6 +260,7 @@ builder.Services.AddCqrsHandlers(typeof(CoordinatorHostMarker).Assembly);
 // unrelated requests.
 builder.Services.AddTransient<ApiKeysPageViewModel>();
 builder.Services.AddTransient<TasksPageViewModel>();
+builder.Services.AddTransient<InstallPageViewModel>();
 
 // Hosted service that transitions stale workers to Gone and
 // recycles timed-out task assignments back to Pending.
