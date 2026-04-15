@@ -129,7 +129,7 @@ public sealed class WorkerClientRegistry
             AllowedGrantTypes = GrantTypes.ClientCredentials,
             ClientSecrets =
             {
-                new Secret(Sha256Hex(entry.PlainTextSecret))
+                new Secret(Sha256Base64(entry.PlainTextSecret))
             },
             AllowedScopes = { IdentityServerResources.WorkerScopeName },
             AccessTokenLifetime = accessTokenLifetimeSeconds,
@@ -172,16 +172,18 @@ public sealed class WorkerClientRegistry
     /// internal and deliberately simple so we don't take a dep on
     /// IdentityModel just for its <c>ToSha256</c> extension method.
     /// </summary>
-    internal static string Sha256Hex(string value)
+    /// <summary>
+    /// Computes the SHA-256 hash of the given plaintext string and
+    /// returns it as standard base64 — the exact format Duende's
+    /// default hashed-shared-secret validator expects. Internal so
+    /// the test project can reach it via InternalsVisibleTo if we
+    /// ever add assertions over secret hashing.
+    /// </summary>
+    internal static string Sha256Base64(string value)
     {
         var bytes = Encoding.UTF8.GetBytes(value);
         var hash = SHA256.HashData(bytes);
-        var hex = new StringBuilder(hash.Length * 2);
-        foreach (var b in hash)
-        {
-            hex.Append(b.ToString("x2", System.Globalization.CultureInfo.InvariantCulture));
-        }
-        return hex.ToString();
+        return Convert.ToBase64String(hash);
     }
 }
 
