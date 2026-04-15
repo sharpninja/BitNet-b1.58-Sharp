@@ -26,6 +26,7 @@ using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting.WindowsServices;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Microsoft.IdentityModel.Protocols.OpenIdConnect;
@@ -56,6 +57,17 @@ using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 // ────────────────────────────────────────────────────────────────────────
 
 var builder = WebApplication.CreateBuilder(args);
+
+// Running under Windows Service Control Manager sets the current
+// working directory to System32, which would break relative
+// appsettings.json and database path resolution. WindowsServiceHelpers
+// detects the SCM case and repoints content root to the assembly
+// directory so the service picks up the same config files as a
+// console launch.
+builder.Host.UseWindowsService(options =>
+{
+    options.ServiceName = "BitNetCoordinator";
+});
 
 builder.Configuration.AddEnvironmentVariables();
 
