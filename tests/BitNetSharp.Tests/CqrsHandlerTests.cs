@@ -371,5 +371,81 @@ public sealed class CqrsHandlerTests : IDisposable
         Assert.True(result.IsFailure);
         Assert.NotNull(result.Error);
     }
+
+    // ── EnqueueTasksCommand ─────────────────────────────────────────
+
+    private EnqueueTasksCommandHandler BuildEnqueueHandler() =>
+        new(_queueStore, _time, NullLogger<EnqueueTasksCommandHandler>.Instance);
+
+    [Fact]
+    public async Task EnqueueTasks_inserts_requested_count_with_monotonic_offsets()
+    {
+        var handler = BuildEnqueueHandler();
+        var command = new EnqueueTasksCommand(
+            ShardId: "shard-bulk",
+            ShardStartOffset: 0,
+            ShardStride: 4096,
+            TokensPerTask: 4096,
+            KLocalSteps: 4,
+            HyperparametersJson: "{\"lr\":1e-3}",
+            WeightVersion: 1,
+            Count: 3);
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(command, context);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(3, result.Value!.Inserted);
+        Assert.NotEqual(result.Value.FirstTaskId, result.Value.LastTaskId);
+        Assert.Equal(3, _queueStore.CountByState(WorkTaskState.Pending));
+    }
+
+    [Fact]
+    public async Task EnqueueTasks_rejects_non_positive_count()
+    {
+        var handler = BuildEnqueueHandler();
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(
+            new EnqueueTasksCommand("shard-x", 0, 0, 4096, 4, "{}", 1, 0),
+            context);
+
+        Assert.True(result.IsFailure);
+    }
+
+    [Fact]
+    public async Task EnqueueTasks_rejects_empty_shard_id()
+    {
+        var handler = BuildEnqueueHandler();
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(
+            new EnqueueTasksCommand("", 0, 0, 4096, 4, "{}", 1, 1),
+            context);
+
+        Assert.True(result.IsFailure);
+    }
+
+    [Fact]
+    public async Task EnqueueTasks_defaults_stride_to_tokens_per_task()
+    {
+        var handler = BuildEnqueueHandler();
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(
+            new EnqueueTasksCommand(
+                ShardId: "shard-default-stride",
+                ShardStartOffset: 1000,
+                ShardStride: 0,
+                TokensPerTask: 512,
+                KLocalSteps: 4,
+                HyperparametersJson: "",
+                WeightVersion: 1,
+                Count: 2),
+            context);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(2, result.Value!.Inserted);
+    }
 }
 #endif

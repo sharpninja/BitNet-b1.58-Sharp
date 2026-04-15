@@ -463,6 +463,26 @@ app.MapPost("/Account/Login/submit", async (
 // RotateClientSecretCommand through the CQRS pipeline and maps the
 // result to HTTP. Same handler is reachable from ViewModel / tests /
 // scripts.
+// Admin action: bulk-enqueue a run of pending tasks. Takes the
+// usual shard parameters plus a count and fans out a single
+// EnqueueTasksCommand to the handler. Used to seed a training
+// run from curl/scripts and, eventually, from the Blazor admin
+// tasks page.
+app.MapPost("/admin/tasks/enqueue", async (
+    [FromBody] EnqueueTasksCommand command,
+    IDispatcher dispatcher) =>
+{
+    var result = await dispatcher
+        .SendAsync<EnqueueTasksResult>(command)
+        .ConfigureAwait(false);
+
+    return result.IsSuccess
+        ? Results.Ok(result.Value)
+        : Results.Json(
+            new ErrorResponse("enqueue_failed", result.Error ?? "unknown"),
+            statusCode: StatusCodes.Status400BadRequest);
+}).RequireAuthorization("AdminPolicy").DisableAntiforgery();
+
 app.MapPost("/admin/rotate/{clientId}", async (
     string clientId,
     [FromQuery] string? redirect,
