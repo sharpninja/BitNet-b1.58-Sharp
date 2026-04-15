@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
 using System.Linq;
 using System.Security.Claims;
 using BitNetSharp.Distributed.Contracts;
@@ -78,6 +79,14 @@ builder.Services.AddSingleton(sp =>
     var coord = sp.GetRequiredService<CoordinatorOptions>();
     var time  = sp.GetRequiredService<TimeProvider>();
     return new SqliteClientRevocationStore(BuildConnectionString(coord), time);
+});
+builder.Services.AddSingleton(sp =>
+{
+    var coord = sp.GetRequiredService<CoordinatorOptions>();
+    var weightsDir = Path.Combine(
+        Path.GetDirectoryName(Path.GetFullPath(coord.DatabasePath)) ?? ".",
+        "weights");
+    return new FileSystemWeightStore(weightsDir);
 });
 
 // ── Worker client registry + Duende IdentityServer ────────────────
@@ -200,10 +209,11 @@ builder.Services.AddRazorComponents();
 
 var app = builder.Build();
 
-// Ensure all three stores create their schema on startup.
+// Ensure all stores create their schema / directories on startup.
 _ = app.Services.GetRequiredService<SqliteWorkQueueStore>();
 _ = app.Services.GetRequiredService<SqliteWorkerRegistryStore>();
 _ = app.Services.GetRequiredService<SqliteClientRevocationStore>();
+_ = app.Services.GetRequiredService<FileSystemWeightStore>();
 
 app.UseAuthentication();
 app.UseAuthorization();
@@ -293,6 +303,159 @@ app.MapPost("/register", (
         ServerTime: now);
 
     return Results.Ok(response);
+}).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
+
+// ── /work — claim the next pending task for this worker ──────────
+app.MapGet("/work", (
+    HttpContext http,
+    SqliteWorkQueueStore workQueue,
+    CoordinatorOptions options) =>
+{
+    var clientId = http.User.FindFirst("client_id")?.Value;
+    if (string.IsNullOrWhiteSpace(clientId))
+    {
+        return Results.Json(
+            new ErrorResponse("unknown_client", "JWT did not carry a client_id claim."),
+            statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var leaseDuration = TimeSpan.FromSeconds(options.TargetTaskDurationSeconds * 2);
+    var claimed = workQueue.TryClaimNextPending(clientId, leaseDuration);
+    if (claimed is null)
+    {
+        return Results.StatusCode(StatusCodes.Status204NoContent);
+    }
+
+    var baseUrl = options.BaseUrl.TrimEnd('/');
+    var assignment = new WorkTaskAssignment(
+        TaskId: claimed.TaskId,
+        WeightVersion: claimed.WeightVersion,
+        WeightUrl: $"{baseUrl}/weights/{claimed.WeightVersion}",
+        ShardId: claimed.ShardId,
+        ShardOffset: claimed.ShardOffset,
+        ShardLength: claimed.ShardLength,
+        TokensPerTask: claimed.TokensPerTask,
+        KLocalSteps: claimed.KLocalSteps,
+        HyperparametersJson: claimed.HyperparametersJson,
+        DeadlineUtc: claimed.DeadlineUtc ?? DateTimeOffset.UtcNow.Add(leaseDuration));
+
+    return Results.Ok(assignment);
+}).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
+
+// ── /heartbeat — worker pings the coordinator periodically ───────
+app.MapPost("/heartbeat", (
+    [FromBody] HeartbeatRequest request,
+    HttpContext http,
+    SqliteWorkerRegistryStore workerStore,
+    CoordinatorOptions options,
+    TimeProvider time) =>
+{
+    if (request is null)
+    {
+        return Results.Json(
+            new ErrorResponse("invalid_request", "Heartbeat body is missing."),
+            statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    var clientId = http.User.FindFirst("client_id")?.Value;
+    if (string.IsNullOrWhiteSpace(clientId))
+    {
+        return Results.Json(
+            new ErrorResponse("unknown_client", "JWT did not carry a client_id claim."),
+            statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var touched = workerStore.TouchHeartbeat(clientId);
+    if (!touched)
+    {
+        return Results.Json(
+            new ErrorResponse("unregistered", "Worker must POST /register before heartbeating."),
+            statusCode: StatusCodes.Status410Gone);
+    }
+
+    return Results.Ok(new HeartbeatResponse(
+        ShouldDrain: false,
+        RecommendedTokensPerTaskOverride: null,
+        ServerTime: time.GetUtcNow()));
+}).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
+
+// ── /gradient — worker reports task completion ──────────────────
+// D-1 stub: validates ownership, marks the task Done, does NOT yet
+// apply the gradient to the global weights. Phase D-4 introduces the
+// gradient decoder + weight updater.
+app.MapPost("/gradient", (
+    [FromBody] GradientSubmission submission,
+    HttpContext http,
+    SqliteWorkQueueStore workQueue,
+    ILogger<Program> logger) =>
+{
+    if (submission is null)
+    {
+        return Results.Json(
+            new ErrorResponse("invalid_request", "Gradient body is missing."),
+            statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    var clientId = http.User.FindFirst("client_id")?.Value;
+    if (string.IsNullOrWhiteSpace(clientId) || clientId != submission.WorkerId)
+    {
+        return Results.Json(
+            new ErrorResponse("worker_mismatch", "Gradient workerId must match the JWT client_id."),
+            statusCode: StatusCodes.Status403Forbidden);
+    }
+
+    var completed = workQueue.MarkCompleted(submission.TaskId, clientId);
+    if (!completed)
+    {
+        return Results.Json(
+            new ErrorResponse("task_not_assigned", "Task is not currently assigned to this worker."),
+            statusCode: StatusCodes.Status409Conflict);
+    }
+
+    logger.LogInformation(
+        "Accepted gradient for task {TaskId} from worker {ClientId}: format={Format}, bytes={Size}, tokens={Tokens}, loss={Loss}, staleness={Staleness}",
+        submission.TaskId,
+        clientId,
+        submission.GradientFormat,
+        submission.GradientPayload?.Length ?? 0,
+        submission.TokensSeen,
+        submission.LossAfter,
+        0);
+
+    return Results.Ok(new
+    {
+        accepted = true,
+        task_id = submission.TaskId,
+        worker_id = clientId
+    });
+}).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
+
+// ── /weights/{version} — streams a weight blob to the worker ─────
+app.MapGet("/weights/{version:long}", (
+    long version,
+    FileSystemWeightStore weights) =>
+{
+    var manifest = weights.TryGetManifest(version);
+    if (manifest is null)
+    {
+        return Results.Json(
+            new ErrorResponse("unknown_version", $"Weight version {version} is not available."),
+            statusCode: StatusCodes.Status404NotFound);
+    }
+
+    var stream = weights.TryOpenReadStream(version);
+    if (stream is null)
+    {
+        return Results.Json(
+            new ErrorResponse("unknown_version", $"Weight version {version} is not available."),
+            statusCode: StatusCodes.Status404NotFound);
+    }
+
+    return Results.File(
+        fileStream: stream,
+        contentType: "application/octet-stream",
+        fileDownloadName: $"bitnet-weights-v{version}.bin",
+        enableRangeProcessing: true);
 }).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
 
 // ── Admin Blazor UI (cookie + OIDC) ───────────────────────────────
