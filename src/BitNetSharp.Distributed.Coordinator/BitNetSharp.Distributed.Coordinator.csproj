@@ -21,6 +21,21 @@
 
   <ItemGroup>
     <ProjectReference Include="..\BitNetSharp.Distributed.Contracts\BitNetSharp.Distributed.Contracts.csproj" />
+    <!--
+      Cross-repo project references to the McpServer CQRS + MVVM
+      libraries. These two projects supply the ICommand / IQuery /
+      IDispatcher / Result<T> primitives and the CqrsRelayCommand
+      bridge to CommunityToolkit.Mvvm that the Blazor admin pages
+      use as their view-model pattern. Assumed layout:
+        F:\GitHub\BitNet-b1.58-Sharp   <- this repo
+        F:\GitHub\McpServer            <- CQRS source
+      Override via the MsBuild property McpServerRepoPath if the
+      two repos live in a different parent directory.
+    -->
+    <ProjectReference Include="$(McpServerRepoPath)..\..\..\McpServer\src\McpServer.Cqrs\McpServer.Cqrs.csproj"
+                      Condition="'$(McpServerRepoPath)' == ''" />
+    <ProjectReference Include="$(McpServerRepoPath)..\..\..\McpServer\src\McpServer.Cqrs.Mvvm\McpServer.Cqrs.Mvvm.csproj"
+                      Condition="'$(McpServerRepoPath)' == ''" />
   </ItemGroup>
 
   <ItemGroup>

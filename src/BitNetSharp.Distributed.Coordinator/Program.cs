@@ -4,12 +4,16 @@ using System.IO;
 using System.Linq;
 using System.Security.Claims;
 using BitNetSharp.Distributed.Contracts;
+using BitNetSharp.Distributed.Coordinator;
 using BitNetSharp.Distributed.Coordinator.Components;
 using BitNetSharp.Distributed.Coordinator.Configuration;
 using BitNetSharp.Distributed.Coordinator.Identity;
+using BitNetSharp.Distributed.Coordinator.Cqrs.Commands;
 using BitNetSharp.Distributed.Coordinator.Middleware;
 using BitNetSharp.Distributed.Coordinator.Persistence;
 using BitNetSharp.Distributed.Coordinator.Services;
+using BitNetSharp.Distributed.Coordinator.ViewModels;
+using McpServer.Cqrs;
 using Duende.IdentityServer;
 using Duende.IdentityServer.Models;
 using Duende.IdentityServer.Test;
@@ -213,6 +217,20 @@ builder.Services.AddAuthorization(options =>
 });
 
 builder.Services.AddRazorComponents();
+
+// CQRS dispatcher + assembly scan so every ICommandHandler /
+// IQueryHandler implemented in the coordinator assembly is
+// registered automatically. ViewModels pull IDispatcher from DI
+// and dispatch through the same pipeline as the minimal API
+// endpoints, so there is one canonical way to exercise business
+// logic no matter which UI is hosting it.
+builder.Services.AddCqrsDispatcher();
+builder.Services.AddCqrsHandlers(typeof(CoordinatorHostMarker).Assembly);
+
+// ViewModels are transient so each render gets a fresh instance
+// and the static-SSR lifecycle does not leak state across
+// unrelated requests.
+builder.Services.AddTransient<ApiKeysPageViewModel>();
 
 // Hosted service that transitions stale workers to Gone and
 // recycles timed-out task assignments back to Pending.
@@ -508,42 +526,40 @@ app.MapPost("/Account/Login/submit", async (
 }).DisableAntiforgery();
 
 // ── Admin rotate endpoint (cookie auth) ───────────────────────────
-app.MapPost("/admin/rotate/{clientId}", (
+// Thin pass-through: no business logic lives here, it dispatches a
+// RotateClientSecretCommand through the CQRS pipeline and maps the
+// result to HTTP. Same handler is reachable from ViewModel / tests /
+// scripts.
+app.MapPost("/admin/rotate/{clientId}", async (
     string clientId,
     [FromQuery] string? redirect,
-    WorkerClientRegistry registry,
-    SqliteClientRevocationStore revocations,
-    ILogger<Program> logger) =>
+    IDispatcher dispatcher) =>
 {
-    try
-    {
-        var freshSecret = registry.Rotate(clientId);
-        var revokedAt   = revocations.Revoke(clientId);
-        logger.LogWarning(
-            "Admin rotated client secret for {ClientId} at {RevokedAt}. Existing JWTs for this client are now invalid.",
-            clientId,
-            revokedAt);
+    var result = await dispatcher
+        .SendAsync<RotationResult>(new RotateClientSecretCommand(clientId))
+        .ConfigureAwait(false);
 
-        if (!string.IsNullOrWhiteSpace(redirect))
-        {
-            var separator = redirect.Contains('?') ? '&' : '?';
-            var target = $"{redirect}{separator}rotated={Uri.EscapeDataString(clientId)}";
-            return Results.Redirect(target);
-        }
-
-        return Results.Ok(new
-        {
-            client_id  = clientId,
-            new_secret = freshSecret,
-            revoked_at = revokedAt
-        });
-    }
-    catch (KeyNotFoundException)
+    if (!result.IsSuccess)
     {
         return Results.Json(
-            new ErrorResponse("unknown_client", $"Client '{clientId}' is not registered."),
+            new ErrorResponse("rotate_failed", result.Error ?? "Rotate command failed."),
             statusCode: StatusCodes.Status404NotFound);
     }
+
+    var rotation = result.Value!;
+    if (!string.IsNullOrWhiteSpace(redirect))
+    {
+        var separator = redirect.Contains('?') ? '&' : '?';
+        var target = $"{redirect}{separator}rotated={Uri.EscapeDataString(rotation.ClientId)}";
+        return Results.Redirect(target);
+    }
+
+    return Results.Ok(new
+    {
+        client_id  = rotation.ClientId,
+        new_secret = rotation.NewSecret,
+        revoked_at = rotation.RevokedAtUtc
+    });
 }).RequireAuthorization("AdminPolicy").DisableAntiforgery();
 
 app.Run();

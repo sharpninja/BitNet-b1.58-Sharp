@@ -1,34 +1,37 @@
 @page "/admin/api-keys"
 @attribute [Authorize(Policy = "AdminPolicy")]
-@inject WorkerClientRegistry Registry
-@inject SqliteClientRevocationStore Revocations
+@using BitNetSharp.Distributed.Coordinator.ViewModels
+@inject ApiKeysPageViewModel ViewModel
 
 @* Admin-only page that lists every configured worker OAuth client
-   with its client_id, display name, plain-text client_secret (the
-   "API key" operators copy into worker environments), and a rotate
-   button that regenerates the secret and immediately invalidates
-   any JWT previously issued for that client. Protected by HTTP
-   Basic auth via the AdminBasic scheme. *@
+   with its client_id, display name, plain-text client_secret, and
+   a rotate button. Code-behind is a single OnInitializedAsync
+   forwarding to the ViewModel — no business logic here. *@
 
 <h2>Worker API keys</h2>
 <p>
     Copy the client secret into the corresponding worker's
-    <code>Coordinator__WorkerClients__N__ClientSecret</code> environment
-    variable. Rotating a key is instant — every JWT already issued for
-    that client is rejected on its next request, and the worker must
-    be restarted with the new secret to re-authenticate.
+    <code>BITNET_CLIENT_SECRET</code> environment variable. Rotating
+    a key immediately invalidates any JWT previously issued for that
+    client; the worker must be restarted with the new secret to
+    re-authenticate.
 </p>
 
-@if (!string.IsNullOrWhiteSpace(RotatedClientId))
+@if (!string.IsNullOrWhiteSpace(ViewModel.RotatedClientId))
 {
     <p class="warn">
-        Rotated <code>@RotatedClientId</code>. The new secret is now
-        visible in the table below. Old JWTs for this client will be
+        Rotated <code>@ViewModel.RotatedClientId</code>. The new secret
+        is shown in the table below. Old JWTs for this client will be
         rejected immediately.
     </p>
 }
 
-@if (_entries.Count == 0)
+@if (!string.IsNullOrWhiteSpace(ViewModel.LastError))
+{
+    <p class="warn">@ViewModel.LastError</p>
+}
+
+@if (ViewModel.Clients.Count == 0)
 {
     <p class="warn">
         No worker clients configured. Set
@@ -51,15 +54,14 @@ else
             </tr>
         </thead>
         <tbody>
-            @foreach (var entry in _entries)
+            @foreach (var entry in ViewModel.Clients)
             {
-                var revokedAt = Revocations.GetRevokedAt(entry.ClientId);
                 <tr>
                     <td>@entry.ClientId</td>
                     <td>@entry.DisplayName</td>
-                    <td class="secret">@entry.PlainTextSecret</td>
-                    <td class="@(revokedAt is null ? "" : "revoked")">
-                        @(revokedAt?.ToString("u") ?? "—")
+                    <td class="secret">@entry.ClientSecret</td>
+                    <td class="@(entry.RevokedAtUtc is null ? "" : "revoked")">
+                        @(entry.RevokedAtUtc?.ToString("u") ?? "—")
                     </td>
                     <td>
                         <form method="post" action="@($"/admin/rotate/{entry.ClientId}?redirect=/admin/api-keys")">
@@ -73,17 +75,12 @@ else
 }
 
 @code {
-    private IReadOnlyList<WorkerClientEntry> _entries = Array.Empty<WorkerClientEntry>();
-
-    /// <summary>
-    /// Populated by the router from the <c>?rotated=...</c> query
-    /// parameter set by the <c>/admin/rotate/{clientId}</c> redirect.
-    /// </summary>
     [SupplyParameterFromQuery(Name = "rotated")]
     public string? RotatedClientId { get; set; }
 
-    protected override void OnInitialized()
+    protected override async Task OnInitializedAsync()
     {
-        _entries = Registry.ListAll();
+        ViewModel.RotatedClientId = RotatedClientId;
+        await ViewModel.LoadAsync();
     }
 }
