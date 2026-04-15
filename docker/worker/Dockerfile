@@ -14,7 +14,8 @@
 #
 #    BITNET_COORDINATOR_URL   public https URL of the coordinator (e.g. an
 #                             ngrok reserved domain pointing at PAYTON-DESKTOP)
-#    BITNET_ENROLLMENT_KEY    pre-shared secret for worker registration
+#    BITNET_CLIENT_ID         Duende OAuth client id for this worker
+#    BITNET_CLIENT_SECRET     Duende OAuth client secret for this worker
 #
 #  Everything else has safe defaults baked into WorkerConfig and into this
 #  Dockerfile's ENV block below.

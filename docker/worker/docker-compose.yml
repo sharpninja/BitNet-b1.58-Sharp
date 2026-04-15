@@ -40,7 +40,8 @@ services:
     environment:
       # ── required ────────────────────────────────────────────────────
       BITNET_COORDINATOR_URL: ${BITNET_COORDINATOR_URL:?set BITNET_COORDINATOR_URL in .env}
-      BITNET_ENROLLMENT_KEY: ${BITNET_ENROLLMENT_KEY:?set BITNET_ENROLLMENT_KEY in .env}
+      BITNET_CLIENT_ID:       ${BITNET_CLIENT_ID:?set BITNET_CLIENT_ID in .env}
+      BITNET_CLIENT_SECRET:   ${BITNET_CLIENT_SECRET:?set BITNET_CLIENT_SECRET in .env}
       # ── optional ────────────────────────────────────────────────────
       BITNET_WORKER_NAME: ${BITNET_WORKER_NAME:-}
       BITNET_CPU_THREADS: ${BITNET_CPU_THREADS:-}

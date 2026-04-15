@@ -3,13 +3,23 @@ using System;
 namespace BitNetSharp.Distributed.Worker;
 
 /// <summary>
-/// Strongly-typed view of the environment configuration read by a distributed
-/// training worker. All values come from environment variables so the same
-/// binary can run identically in a container, on bare metal, or inside CI.
+/// Strongly-typed view of the environment configuration read by a
+/// distributed training worker. All values come from environment
+/// variables so the same binary can run identically in a container,
+/// on bare metal, or inside CI.
+///
+/// <para>
+/// The worker authenticates to the coordinator using OAuth 2.0
+/// client credentials (Duende IdentityServer's machine-login flow),
+/// so each worker needs a per-machine <see cref="ClientId"/> /
+/// <see cref="ClientSecret"/> pair provisioned by the operator on
+/// the coordinator's admin page.
+/// </para>
 /// </summary>
 internal sealed record WorkerConfig(
     Uri CoordinatorUrl,
-    string EnrollmentKey,
+    string ClientId,
+    string ClientSecret,
     string WorkerName,
     int CpuThreads,
     TimeSpan HeartbeatInterval,
@@ -18,7 +28,8 @@ internal sealed record WorkerConfig(
     string LogLevel)
 {
     public const string EnvCoordinatorUrl   = "BITNET_COORDINATOR_URL";
-    public const string EnvEnrollmentKey    = "BITNET_ENROLLMENT_KEY";
+    public const string EnvClientId         = "BITNET_CLIENT_ID";
+    public const string EnvClientSecret     = "BITNET_CLIENT_SECRET";
     public const string EnvWorkerName       = "BITNET_WORKER_NAME";
     public const string EnvCpuThreads       = "BITNET_CPU_THREADS";
     public const string EnvHeartbeatSeconds = "BITNET_HEARTBEAT_SECONDS";
@@ -27,10 +38,10 @@ internal sealed record WorkerConfig(
     public const string EnvLogLevel         = "BITNET_LOG_LEVEL";
 
     /// <summary>
-    /// Reads configuration from the process environment. Fails fast (by throwing
-    /// <see cref="InvalidOperationException"/>) if any required value is missing
-    /// or malformed so Docker health checks surface the mistake in logs instead
-    /// of looping silently.
+    /// Reads configuration from the process environment. Fails fast
+    /// (by throwing <see cref="InvalidOperationException"/>) if any
+    /// required value is missing or malformed so Docker health checks
+    /// surface the mistake in logs instead of looping silently.
     /// </summary>
     public static WorkerConfig FromEnvironment()
     {
@@ -42,7 +53,8 @@ internal sealed record WorkerConfig(
                 $"{EnvCoordinatorUrl} must be an absolute http(s) URL. Got '{coordinatorRaw}'.");
         }
 
-        var enrollmentKey = RequireEnv(EnvEnrollmentKey);
+        var clientId     = RequireEnv(EnvClientId);
+        var clientSecret = RequireEnv(EnvClientSecret);
 
         var workerName = Environment.GetEnvironmentVariable(EnvWorkerName);
         if (string.IsNullOrWhiteSpace(workerName))
@@ -68,7 +80,8 @@ internal sealed record WorkerConfig(
 
         return new WorkerConfig(
             coordinatorUrl,
-            enrollmentKey,
+            clientId,
+            clientSecret,
             workerName,
             cpuThreads,
             TimeSpan.FromSeconds(heartbeatSeconds),
