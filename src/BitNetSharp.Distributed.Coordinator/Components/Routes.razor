@@ -1,0 +1,20 @@
+@* Wires the built-in component router to the assembly scan that
+   discovers every Razor page with a @page directive. The router
+   sits inside <CascadingAuthenticationState> so pages gated by
+   [Authorize] pick up the current user's auth state. *@
+<Router AppAssembly="typeof(Program).Assembly">
+    <Found Context="routeData">
+        <AuthorizeRouteView RouteData="routeData" DefaultLayout="typeof(MainLayout)" />
+    </Found>
+    <NotFound>
+        <LayoutView Layout="typeof(MainLayout)">
+            <h1>404 — Not Found</h1>
+            <p>This coordinator has nothing to show at <code>@Navigation.ToBaseRelativePath(Navigation.Uri)</code>.</p>
+        </LayoutView>
+    </NotFound>
+</Router>
+
+@code {
+    [Inject]
+    public NavigationManager Navigation { get; set; } = default!;
+}

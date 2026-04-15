@@ -7,10 +7,15 @@ namespace BitNetSharp.Distributed.Coordinator.Persistence;
 
 /// <summary>
 /// SQLite-backed data access layer for the coordinator's <c>workers</c>
-/// table. Opens and owns its own connection against the coordinator
+/// table. Each row is keyed by the Duende IdentityServer
+/// <c>client_id</c> the worker authenticates as, so registering a
+/// worker is effectively "attach this capability report to the
+/// already-authenticated OAuth client".
+///
+/// Opens and owns its own WAL-mode connection against the coordinator
 /// database file so it can coexist with
-/// <see cref="SqliteWorkQueueStore"/>; WAL mode + SQLite's internal
-/// locking keep concurrent writers safe.
+/// <see cref="SqliteWorkQueueStore"/>; SQLite's internal locking
+/// serializes concurrent writers safely.
 /// </summary>
 public sealed class SqliteWorkerRegistryStore : IDisposable
 {
@@ -39,7 +44,6 @@ public sealed class SqliteWorkerRegistryStore : IDisposable
 CREATE TABLE IF NOT EXISTS workers (
     worker_id                   TEXT    PRIMARY KEY,
     name                        TEXT    NOT NULL,
-    bearer_token_hash           TEXT    NOT NULL UNIQUE,
     cpu_threads                 INTEGER NOT NULL,
     tokens_per_sec              REAL    NOT NULL,
     recommended_tokens_per_task INTEGER NOT NULL,
@@ -50,9 +54,6 @@ CREATE TABLE IF NOT EXISTS workers (
     state                       TEXT    NOT NULL
 );
 
-CREATE INDEX IF NOT EXISTS ix_workers_bearer_hash
-    ON workers(bearer_token_hash);
-
 CREATE INDEX IF NOT EXISTS ix_workers_heartbeat
     ON workers(last_heartbeat);
 
@@ -62,12 +63,14 @@ CREATE INDEX IF NOT EXISTS ix_workers_state
     }
 
     /// <summary>
-    /// Inserts a newly registered worker. Throws
-    /// <see cref="InvalidOperationException"/> if the worker id already
-    /// exists — callers must generate a fresh opaque id per registration
-    /// so idempotent re-registration is always a new row.
+    /// Inserts a newly registered worker, or updates the existing row
+    /// in place if the coordinator is seeing a re-registration from the
+    /// same authenticated Duende client (which is the normal case after
+    /// a worker container restarts). The row's lifecycle state is reset
+    /// to <see cref="WorkerState.Active"/> on upsert so a previously
+    /// "Gone" worker can rejoin cleanly.
     /// </summary>
-    public void Insert(WorkerRecord worker)
+    public void Upsert(WorkerRecord worker)
     {
         ArgumentNullException.ThrowIfNull(worker);
 
@@ -76,17 +79,26 @@ CREATE INDEX IF NOT EXISTS ix_workers_state
             using var cmd = _connection.CreateCommand();
             cmd.CommandText = @"
 INSERT INTO workers (
-    worker_id, name, bearer_token_hash, cpu_threads, tokens_per_sec,
+    worker_id, name, cpu_threads, tokens_per_sec,
     recommended_tokens_per_task, process_architecture, os_description,
     registered_at, last_heartbeat, state
 ) VALUES (
-    $worker_id, $name, $bearer_token_hash, $cpu_threads, $tokens_per_sec,
+    $worker_id, $name, $cpu_threads, $tokens_per_sec,
     $recommended_tokens_per_task, $process_architecture, $os_description,
     $registered_at, $last_heartbeat, $state
-);";
+)
+ON CONFLICT(worker_id) DO UPDATE SET
+    name                        = excluded.name,
+    cpu_threads                 = excluded.cpu_threads,
+    tokens_per_sec              = excluded.tokens_per_sec,
+    recommended_tokens_per_task = excluded.recommended_tokens_per_task,
+    process_architecture        = excluded.process_architecture,
+    os_description              = excluded.os_description,
+    registered_at               = excluded.registered_at,
+    last_heartbeat              = excluded.last_heartbeat,
+    state                       = excluded.state;";
             cmd.Parameters.AddWithValue("$worker_id", worker.WorkerId);
             cmd.Parameters.AddWithValue("$name", worker.Name);
-            cmd.Parameters.AddWithValue("$bearer_token_hash", worker.BearerTokenHash);
             cmd.Parameters.AddWithValue("$cpu_threads", worker.CpuThreads);
             cmd.Parameters.AddWithValue("$tokens_per_sec", worker.TokensPerSecond);
             cmd.Parameters.AddWithValue("$recommended_tokens_per_task", worker.RecommendedTokensPerTask);
@@ -95,37 +107,18 @@ INSERT INTO workers (
             cmd.Parameters.AddWithValue("$registered_at", worker.RegisteredAtUtc.ToUnixTimeSeconds());
             cmd.Parameters.AddWithValue("$last_heartbeat", worker.LastHeartbeatUtc.ToUnixTimeSeconds());
             cmd.Parameters.AddWithValue("$state", worker.State.ToString());
-            try
-            {
-                cmd.ExecuteNonQuery();
-            }
-            catch (SqliteException ex) when (ex.SqliteErrorCode == 19 /* SQLITE_CONSTRAINT */)
-            {
-                throw new InvalidOperationException(
-                    $"Worker '{worker.WorkerId}' or its bearer-token hash is already registered.",
-                    ex);
-            }
+            cmd.ExecuteNonQuery();
         }
     }
 
     /// <summary>
-    /// Finds a worker by its opaque id. Returns <c>null</c> if no such
-    /// worker exists.
+    /// Finds a worker by its opaque id (equal to the Duende client_id).
+    /// Returns <c>null</c> if no such worker exists.
     /// </summary>
     public WorkerRecord? FindById(string workerId)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
         return Load("worker_id = $id", ("$id", workerId));
-    }
-
-    /// <summary>
-    /// Finds a worker by the SHA-256 hash of its bearer token. Used by
-    /// the bearer-auth middleware on every authenticated request.
-    /// </summary>
-    public WorkerRecord? FindByBearerTokenHash(string bearerTokenHash)
-    {
-        ArgumentException.ThrowIfNullOrWhiteSpace(bearerTokenHash);
-        return Load("bearer_token_hash = $hash", ("$hash", bearerTokenHash));
     }
 
     /// <summary>
@@ -213,7 +206,7 @@ WHERE state = 'Active'
         var results = new List<WorkerRecord>();
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = @"
-SELECT worker_id, name, bearer_token_hash, cpu_threads, tokens_per_sec,
+SELECT worker_id, name, cpu_threads, tokens_per_sec,
        recommended_tokens_per_task, process_architecture, os_description,
        registered_at, last_heartbeat, state
 FROM workers
@@ -245,7 +238,7 @@ ORDER BY registered_at ASC, worker_id ASC;";
     {
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = $@"
-SELECT worker_id, name, bearer_token_hash, cpu_threads, tokens_per_sec,
+SELECT worker_id, name, cpu_threads, tokens_per_sec,
        recommended_tokens_per_task, process_architecture, os_description,
        registered_at, last_heartbeat, state
 FROM workers WHERE {whereClause};";
@@ -263,15 +256,14 @@ FROM workers WHERE {whereClause};";
         return new WorkerRecord(
             WorkerId: reader.GetString(0),
             Name: reader.GetString(1),
-            BearerTokenHash: reader.GetString(2),
-            CpuThreads: reader.GetInt32(3),
-            TokensPerSecond: reader.GetDouble(4),
-            RecommendedTokensPerTask: reader.GetInt64(5),
-            ProcessArchitecture: reader.IsDBNull(6) ? null : reader.GetString(6),
-            OsDescription: reader.IsDBNull(7) ? null : reader.GetString(7),
-            RegisteredAtUtc: DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(8)),
-            LastHeartbeatUtc: DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(9)),
-            State: Enum.Parse<WorkerState>(reader.GetString(10)));
+            CpuThreads: reader.GetInt32(2),
+            TokensPerSecond: reader.GetDouble(3),
+            RecommendedTokensPerTask: reader.GetInt64(4),
+            ProcessArchitecture: reader.IsDBNull(5) ? null : reader.GetString(5),
+            OsDescription: reader.IsDBNull(6) ? null : reader.GetString(6),
+            RegisteredAtUtc: DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(7)),
+            LastHeartbeatUtc: DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(8)),
+            State: Enum.Parse<WorkerState>(reader.GetString(9)));
     }
 
     private void ExecuteNonQuery(string sql)

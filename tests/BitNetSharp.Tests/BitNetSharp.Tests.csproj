@@ -28,7 +28,17 @@
     <ProjectReference Include="..\..\src\BitNetSharp.Core\BitNetSharp.Core.csproj" />
     <ProjectReference Include="..\..\src\BitNetSharp.App\BitNetSharp.App.csproj" />
     <ProjectReference Include="..\..\src\BitNetSharp.Distributed.Contracts\BitNetSharp.Distributed.Contracts.csproj" />
-    <ProjectReference Include="..\..\src\BitNetSharp.Distributed.Coordinator\BitNetSharp.Distributed.Coordinator.csproj" />
+    <!--
+      Coordinator targets net10.0 only because Duende.IdentityServer +
+      ASP.NET Core JwtBearer 10.0 require it. The tests project keeps
+      its dual-target net9/net10 multi-targeting, and reference gets
+      pulled in conditionally so the net9 slice still compiles.
+      Coordinator-specific tests are gated with a preprocessor
+      directive inside the test files so xunit only discovers them
+      on the net10 slice.
+    -->
+    <ProjectReference Include="..\..\src\BitNetSharp.Distributed.Coordinator\BitNetSharp.Distributed.Coordinator.csproj"
+                      Condition="'$(TargetFramework)' == 'net10.0'" />
     <ProjectReference Include="..\..\src\BitNetSharp.Distributed.Worker\BitNetSharp.Distributed.Worker.csproj" />
   </ItemGroup>
 

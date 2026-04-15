@@ -1,0 +1,89 @@
+@page "/admin/api-keys"
+@attribute [Authorize(Policy = "AdminPolicy", AuthenticationSchemes = "AdminBasic")]
+@inject WorkerClientRegistry Registry
+@inject SqliteClientRevocationStore Revocations
+
+@* Admin-only page that lists every configured worker OAuth client
+   with its client_id, display name, plain-text client_secret (the
+   "API key" operators copy into worker environments), and a rotate
+   button that regenerates the secret and immediately invalidates
+   any JWT previously issued for that client. Protected by HTTP
+   Basic auth via the AdminBasic scheme. *@
+
+<h2>Worker API keys</h2>
+<p>
+    Copy the client secret into the corresponding worker's
+    <code>Coordinator__WorkerClients__N__ClientSecret</code> environment
+    variable. Rotating a key is instant — every JWT already issued for
+    that client is rejected on its next request, and the worker must
+    be restarted with the new secret to re-authenticate.
+</p>
+
+@if (!string.IsNullOrWhiteSpace(RotatedClientId))
+{
+    <p class="warn">
+        Rotated <code>@RotatedClientId</code>. The new secret is now
+        visible in the table below. Old JWTs for this client will be
+        rejected immediately.
+    </p>
+}
+
+@if (_entries.Count == 0)
+{
+    <p class="warn">
+        No worker clients configured. Set
+        <code>Coordinator__WorkerClients__0__ClientId</code> and
+        <code>Coordinator__WorkerClients__0__ClientSecret</code>
+        (plus any additional numbered entries) in the coordinator's
+        environment, then restart.
+    </p>
+}
+else
+{
+    <table>
+        <thead>
+            <tr>
+                <th>Client ID</th>
+                <th>Display name</th>
+                <th>Client secret (API key)</th>
+                <th>Revoked at (UTC)</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var entry in _entries)
+            {
+                var revokedAt = Revocations.GetRevokedAt(entry.ClientId);
+                <tr>
+                    <td>@entry.ClientId</td>
+                    <td>@entry.DisplayName</td>
+                    <td class="secret">@entry.PlainTextSecret</td>
+                    <td class="@(revokedAt is null ? "" : "revoked")">
+                        @(revokedAt?.ToString("u") ?? "—")
+                    </td>
+                    <td>
+                        <form method="post" action="@($"/admin/rotate/{entry.ClientId}?redirect=/admin/api-keys")">
+                            <button class="btn" type="submit">Rotate</button>
+                        </form>
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+@code {
+    private IReadOnlyList<WorkerClientEntry> _entries = Array.Empty<WorkerClientEntry>();
+
+    /// <summary>
+    /// Populated by the router from the <c>?rotated=...</c> query
+    /// parameter set by the <c>/admin/rotate/{clientId}</c> redirect.
+    /// </summary>
+    [SupplyParameterFromQuery(Name = "rotated")]
+    public string? RotatedClientId { get; set; }
+
+    protected override void OnInitialized()
+    {
+        _entries = Registry.ListAll();
+    }
+}

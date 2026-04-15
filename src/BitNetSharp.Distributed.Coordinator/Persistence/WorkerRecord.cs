@@ -4,24 +4,22 @@ namespace BitNetSharp.Distributed.Coordinator.Persistence;
 
 /// <summary>
 /// Internal domain record for a worker row in the coordinator's SQLite
-/// <c>workers</c> table. This type is distinct from the wire-format
-/// <see cref="BitNetSharp.Distributed.Contracts.WorkerRegistrationRequest"/>
-/// and <see cref="BitNetSharp.Distributed.Contracts.WorkerRegistrationResponse"/>
-/// so coordinator-only fields — specifically the bearer-token hash that
-/// workers never see — never leak into the wire protocol.
+/// <c>workers</c> table. The primary key doubles as the Duende
+/// IdentityServer <c>client_id</c> that the worker authenticates with
+/// on every request — one worker = one OAuth client.
 ///
 /// <para>
-/// <see cref="BearerTokenHash"/> stores a base64-encoded SHA-256 digest
-/// of the bearer token the coordinator issued. The coordinator never
-/// persists the raw token itself; the bearer-auth middleware re-hashes
-/// the incoming header and looks up the worker by hash so leaking the
-/// database file alone would not compromise the fleet.
+/// No bearer-token hash is persisted on this row. Authentication
+/// credentials live on the Duende client configuration
+/// (which itself is supplied via environment variables at coordinator
+/// startup). Validation of the JWT access token is handled by the
+/// Microsoft.AspNetCore.Authentication.JwtBearer middleware and does
+/// not require a per-request DB lookup.
 /// </para>
 /// </summary>
 public sealed record WorkerRecord(
     string WorkerId,
     string Name,
-    string BearerTokenHash,
     int CpuThreads,
     double TokensPerSecond,
     long RecommendedTokensPerTask,

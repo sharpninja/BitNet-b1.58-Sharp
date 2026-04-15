@@ -1,0 +1,33 @@
+@* Root component that renders the HTML shell for every page served by
+   the BitNet coordinator admin UI. Pure static render — no circuits,
+   no WebSockets — because the admin surface is a handful of admin-only
+   pages that do not need streaming updates. *@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <base href="/" />
+    <title>BitNet Coordinator</title>
+    <link rel="icon" href="data:," />
+    <HeadOutlet />
+    <style>
+        body { font-family: system-ui, -apple-system, Segoe UI, sans-serif; background: #111; color: #eee; padding: 24px; }
+        h1, h2 { color: #fff; }
+        a { color: #9cf; }
+        table { border-collapse: collapse; width: 100%; margin-top: 12px; }
+        th, td { padding: 8px 12px; border-bottom: 1px solid #333; text-align: left; font-family: ui-monospace, monospace; }
+        th { background: #222; }
+        tr:hover { background: #1c1c1c; }
+        .secret { word-break: break-all; color: #9cf; }
+        .revoked { color: #f87; }
+        .btn { display: inline-block; padding: 4px 10px; background: #1e40af; color: #fff; text-decoration: none; border-radius: 4px; font-family: system-ui, sans-serif; font-size: 12px; border: 0; cursor: pointer; }
+        .btn:hover { background: #2a56d1; }
+        .warn { color: #f87; }
+        .ok { color: #7f7; }
+    </style>
+</head>
+<body>
+    <Routes />
+</body>
+</html>

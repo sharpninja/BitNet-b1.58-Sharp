@@ -1,0 +1,19 @@
+@inherits LayoutComponentBase
+
+@* Minimalist layout: page header + content slot. The Body property
+   is the rendering point for the routed page. *@
+<div>
+    <header style="margin-bottom:16px;">
+        <h1 style="margin:0;">BitNet Coordinator</h1>
+        <nav style="margin-top:4px; font-size:13px;">
+            <a href="/admin/api-keys">API keys</a>
+            &middot;
+            <a href="/status">status JSON</a>
+            &middot;
+            <a href="/health">health</a>
+        </nav>
+    </header>
+    <main>
+        @Body
+    </main>
+</div>
