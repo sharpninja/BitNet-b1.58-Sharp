@@ -9,6 +9,7 @@ using BitNetSharp.Distributed.Coordinator.Configuration;
 using BitNetSharp.Distributed.Coordinator.Identity;
 using BitNetSharp.Distributed.Coordinator.Middleware;
 using BitNetSharp.Distributed.Coordinator.Persistence;
+using BitNetSharp.Distributed.Coordinator.Services;
 using Duende.IdentityServer;
 using Duende.IdentityServer.Models;
 using Duende.IdentityServer.Test;
@@ -206,6 +207,10 @@ builder.Services.AddAuthorization(options =>
 });
 
 builder.Services.AddRazorComponents();
+
+// Hosted service that transitions stale workers to Gone and
+// recycles timed-out task assignments back to Pending.
+builder.Services.AddHostedService<StaleSweeperService>();
 
 var app = builder.Build();
 
