@@ -78,11 +78,18 @@ public sealed class CoordinatorOptions
     public string BaseUrl { get; set; } = "https://localhost:5001";
 
     /// <summary>
+    /// Named model preset that determines the global weight vector
+    /// dimension. Recognized: "small" (~7M), "medium" (~56M),
+    /// "large" (~121M). When set, overrides
+    /// <see cref="InitialWeightDimension"/> with the preset's
+    /// TotalWeightElements.
+    /// </summary>
+    public string ModelPreset { get; set; } = "small";
+
+    /// <summary>
     /// Dimension of the global weight vector the coordinator tracks
-    /// in memory. Phase D-4 uses a flat fp32 vector of this size.
-    /// Defaults to 4096 which is small enough to fit comfortably in
-    /// the test harness and large enough to exercise real int8
-    /// quantization behavior.
+    /// in memory. Overridden by <see cref="ModelPreset"/> when set.
+    /// Kept as fallback for custom non-preset configs.
     /// </summary>
     public int InitialWeightDimension { get; set; } = 4096;
 

@@ -121,7 +121,21 @@ public sealed class WeightApplicationService
 
             // No weights on disk yet — materialize a zero vector at the
             // configured initial version + dimension and persist it.
-            _current = new float[Math.Max(1, opts.InitialWeightDimension)];
+            // If a model preset is configured, use its total parameter
+            // count as the weight vector dimension instead of the raw
+            // InitialWeightDimension knob.
+            var dimension = opts.InitialWeightDimension;
+            if (!string.IsNullOrWhiteSpace(opts.ModelPreset))
+            {
+                var preset = BitNetSharp.Distributed.Contracts.TruckMateModelPresets.GetPreset(opts.ModelPreset);
+                dimension = (int)Math.Min(preset.TotalWeightElements, int.MaxValue);
+                _logger.LogInformation(
+                    "Using model preset {Preset}: {Display}",
+                    opts.ModelPreset,
+                    preset.ToDisplayString());
+            }
+
+            _current = new float[Math.Max(1, dimension)];
             _currentVersion = Math.Max(1L, opts.InitialWeightVersion);
             var blob = WeightBlobCodec.Encode(_currentVersion, _current);
             try

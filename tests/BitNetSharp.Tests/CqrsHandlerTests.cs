@@ -68,7 +68,7 @@ public sealed class CqrsHandlerTests : IDisposable
             FullStepEfficiency = 0.25d,
             HeartbeatIntervalSeconds = 30,
             InitialWeightVersion = 1,
-            InitialWeightDimension = 8,
+            ModelPreset = "", InitialWeightDimension = 8,
             BaseLearningRate = 0.1d,
             StalenessAlpha = 0.5d,
             MaxStalenessSteps = 5,

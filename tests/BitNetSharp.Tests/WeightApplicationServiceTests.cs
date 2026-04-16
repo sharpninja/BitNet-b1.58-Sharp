@@ -49,7 +49,7 @@ public sealed class WeightApplicationServiceTests : IDisposable
     {
         var options = new CoordinatorOptions
         {
-            InitialWeightDimension = 6,
+            ModelPreset = "", InitialWeightDimension = 6,
             InitialWeightVersion = 1
         };
         var svc = CreateService(options);
@@ -65,7 +65,7 @@ public sealed class WeightApplicationServiceTests : IDisposable
     [Fact]
     public void EnsureInitialized_is_idempotent()
     {
-        var svc = CreateService(new CoordinatorOptions { InitialWeightDimension = 4 });
+        var svc = CreateService(new CoordinatorOptions { ModelPreset = "", InitialWeightDimension = 4 });
         svc.EnsureInitialized();
         var firstVersion = svc.CurrentVersion;
         svc.EnsureInitialized();
@@ -77,7 +77,7 @@ public sealed class WeightApplicationServiceTests : IDisposable
     {
         var svc = CreateService(new CoordinatorOptions
         {
-            InitialWeightDimension = 4,
+            ModelPreset = "", InitialWeightDimension = 4,
             BaseLearningRate = 0.1,
             StalenessAlpha = 0,
             MaxStalenessSteps = 10
@@ -104,7 +104,7 @@ public sealed class WeightApplicationServiceTests : IDisposable
     {
         var svc = CreateService(new CoordinatorOptions
         {
-            InitialWeightDimension = 3,
+            ModelPreset = "", InitialWeightDimension = 3,
             BaseLearningRate = 0.1,
             StalenessAlpha = 0
         });
@@ -125,7 +125,7 @@ public sealed class WeightApplicationServiceTests : IDisposable
     [Fact]
     public void Apply_rejects_gradient_with_wrong_shape()
     {
-        var svc = CreateService(new CoordinatorOptions { InitialWeightDimension = 4 });
+        var svc = CreateService(new CoordinatorOptions { ModelPreset = "", InitialWeightDimension = 4 });
         svc.EnsureInitialized();
 
         var result = svc.Apply(1, new float[] { 1f, 2f });
@@ -140,7 +140,7 @@ public sealed class WeightApplicationServiceTests : IDisposable
     {
         var svc = CreateService(new CoordinatorOptions
         {
-            InitialWeightDimension = 2,
+            ModelPreset = "", InitialWeightDimension = 2,
             BaseLearningRate = 0.1,
             StalenessAlpha = 0.5,
             MaxStalenessSteps = 5
@@ -164,7 +164,7 @@ public sealed class WeightApplicationServiceTests : IDisposable
     {
         var svc = CreateService(new CoordinatorOptions
         {
-            InitialWeightDimension = 2,
+            ModelPreset = "", InitialWeightDimension = 2,
             BaseLearningRate = 0.1,
             StalenessAlpha = 0,
             MaxStalenessSteps = 1
@@ -184,7 +184,7 @@ public sealed class WeightApplicationServiceTests : IDisposable
     [Fact]
     public void Apply_rejects_gradient_from_future_base_version()
     {
-        var svc = CreateService(new CoordinatorOptions { InitialWeightDimension = 2 });
+        var svc = CreateService(new CoordinatorOptions { ModelPreset = "", InitialWeightDimension = 2 });
         svc.EnsureInitialized();
 
         var result = svc.Apply(999, new float[] { 0f, 0f });
@@ -198,7 +198,7 @@ public sealed class WeightApplicationServiceTests : IDisposable
         // First instance seeds version 1 with a known vector.
         var first = CreateService(new CoordinatorOptions
         {
-            InitialWeightDimension = 3,
+            ModelPreset = "", InitialWeightDimension = 3,
             BaseLearningRate = 0.1
         });
         first.EnsureInitialized();
@@ -210,7 +210,7 @@ public sealed class WeightApplicationServiceTests : IDisposable
         // version 2 on EnsureInitialized rather than starting fresh.
         var second = CreateService(new CoordinatorOptions
         {
-            InitialWeightDimension = 3,
+            ModelPreset = "", InitialWeightDimension = 3,
             BaseLearningRate = 0.1
         });
         second.EnsureInitialized();
