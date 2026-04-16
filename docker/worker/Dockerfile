@@ -31,8 +31,9 @@ COPY global.json Directory.Build.props ./
 
 # Bring in only the projects the worker needs. BitNetSharp.Core supplies
 # the ternary training primitives; the worker project is the Exe target.
-COPY src/BitNetSharp.Core             ./src/BitNetSharp.Core
-COPY src/BitNetSharp.Distributed.Worker ./src/BitNetSharp.Distributed.Worker
+COPY src/BitNetSharp.Core                  ./src/BitNetSharp.Core
+COPY src/BitNetSharp.Distributed.Contracts ./src/BitNetSharp.Distributed.Contracts
+COPY src/BitNetSharp.Distributed.Worker    ./src/BitNetSharp.Distributed.Worker
 
 RUN dotnet restore src/BitNetSharp.Distributed.Worker/BitNetSharp.Distributed.Worker.csproj
 
