@@ -24,7 +24,7 @@
 }
 
 <form method="post" action="/Account/Login/submit">
-    <input type="hidden" name="returnUrl" value="@ReturnUrl" />
+    <input type="hidden" name="returnUrl" value="@EffectiveReturnUrl" />
     <div style="max-width:340px; display:flex; flex-direction:column; gap:12px; margin-top:16px;">
         <label>
             <div style="font-size:12px; color:#bbb; margin-bottom:2px;">Username</div>
@@ -47,8 +47,16 @@
     /// successful login the submit endpoint redirects the browser
     /// back to this URL so the OIDC handshake can continue.
     /// </summary>
-    [SupplyParameterFromQuery(Name = "returnUrl")]
+    /// Duende IS uses uppercase "ReturnUrl" in its redirect;
+    /// bind both casings so the hidden form field always carries
+    /// the return path.
+    [SupplyParameterFromQuery(Name = "ReturnUrl")]
     public string? ReturnUrl { get; set; }
+
+    [SupplyParameterFromQuery(Name = "returnUrl")]
+    public string? ReturnUrlLower { get; set; }
+
+    private string? EffectiveReturnUrl => ReturnUrl ?? ReturnUrlLower;
 
     /// <summary>
     /// One-shot error banner set by the submit endpoint via
