@@ -76,6 +76,11 @@ if (args.Length > 0 && string.Equals(args[0], "generate-corpus", StringCompariso
     return GenerateCorpusCommandLine(args);
 }
 
+if (args.Length > 0 && string.Equals(args[0], "tokenize-corpus", StringComparison.OrdinalIgnoreCase))
+{
+    return TokenizeCorpusCommandLine(args);
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Running under Windows Service Control Manager sets the current
@@ -771,6 +776,110 @@ static int GenerateCorpusCommandLine(string[] args)
     catch (Exception ex)
     {
         Console.Error.WriteLine($"generate-corpus failed: {ex}");
+        return 1;
+    }
+}
+
+/// <summary>
+/// Trains a word-level tokenizer on the text corpus shards, writes
+/// the vocabulary as vocab.json, and pre-tokenizes every shard into
+/// binary int32 files workers can consume directly. Invoked as:
+///
+///     dotnet BitNetSharp.Distributed.Coordinator.dll tokenize-corpus [maxVocab]
+///
+/// Default maxVocab = 8000.
+/// </summary>
+static int TokenizeCorpusCommandLine(string[] args)
+{
+    try
+    {
+        var maxVocab = 8000;
+        if (args.Length > 1 && int.TryParse(args[1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsedVocab) && parsedVocab > 100)
+        {
+            maxVocab = parsedVocab;
+        }
+
+        var config = new ConfigurationBuilder()
+            .SetBasePath(System.IO.Path.GetDirectoryName(typeof(Program).Assembly.Location) ?? ".")
+            .AddJsonFile("appsettings.json", optional: true)
+            .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}.json", optional: true)
+            .AddEnvironmentVariables()
+            .Build();
+
+        var coordinator = new CoordinatorOptions();
+        config.GetSection(CoordinatorOptions.SectionName).Bind(coordinator);
+
+        var corpusDir = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(coordinator.DatabasePath)) ?? ".",
+            "corpus");
+        var tokenizedDir = System.IO.Path.Combine(corpusDir, "tokenized");
+        Directory.CreateDirectory(tokenizedDir);
+
+        // Collect all text shard files
+        var shardFiles = Directory.GetFiles(corpusDir, "*.txt")
+            .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        if (shardFiles.Length == 0)
+        {
+            Console.Error.WriteLine($"No .txt shard files found in {corpusDir}. Run generate-corpus first.");
+            return 2;
+        }
+
+        Console.WriteLine($"Training tokenizer on {shardFiles.Length} shards (maxVocab={maxVocab})…");
+
+        // Stream all lines for tokenizer training
+        IEnumerable<string> AllLines()
+        {
+            foreach (var file in shardFiles)
+            {
+                foreach (var line in File.ReadLines(file))
+                {
+                    if (!string.IsNullOrWhiteSpace(line))
+                    {
+                        yield return line;
+                    }
+                }
+            }
+        }
+
+        var tokenizer = WordLevelTokenizer.TrainFromCorpus(AllLines(), maxVocab);
+        var vocabPath = System.IO.Path.Combine(tokenizedDir, "vocab.json");
+        tokenizer.SaveToFile(vocabPath);
+        Console.WriteLine($"Vocabulary: {tokenizer.VocabSize} tokens → {vocabPath}");
+
+        // Pre-tokenize each shard into a binary int32 file
+        long totalTokens = 0;
+        foreach (var shardFile in shardFiles)
+        {
+            var shardName = System.IO.Path.GetFileNameWithoutExtension(shardFile);
+            var binPath = System.IO.Path.Combine(tokenizedDir, $"{shardName}.bin");
+
+            using var output = File.Create(binPath);
+            var buffer = new byte[4];
+            foreach (var line in File.ReadLines(shardFile))
+            {
+                if (string.IsNullOrWhiteSpace(line)) continue;
+                var ids = tokenizer.Encode(line);
+                foreach (var id in ids)
+                {
+                    System.Buffers.Binary.BinaryPrimitives.WriteInt32LittleEndian(buffer, id);
+                    output.Write(buffer);
+                    totalTokens++;
+                }
+            }
+
+            var binSize = new FileInfo(binPath).Length;
+            Console.WriteLine($"  {shardName}.bin: {binSize:N0} bytes ({binSize / 4:N0} tokens)");
+        }
+
+        Console.WriteLine($"Total: {totalTokens:N0} tokens across {shardFiles.Length} binary shards.");
+        Console.WriteLine($"Tokenized output: {tokenizedDir}");
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"tokenize-corpus failed: {ex}");
         return 1;
     }
 }
