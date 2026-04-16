@@ -26,10 +26,37 @@
     </p>
 }
 
+@if (!string.IsNullOrWhiteSpace(ViewModel.AddedClientId))
+{
+    <p class="warn">
+        Registered <code>@ViewModel.AddedClientId</code>. The generated
+        secret is in the table below — grab it now, then use
+        <a href="/admin/install">/admin/install</a> to download a
+        ready-to-run install script for this worker.
+    </p>
+}
+
 @if (!string.IsNullOrWhiteSpace(ViewModel.LastError))
 {
     <p class="warn">@ViewModel.LastError</p>
 }
+
+<section style="margin:16px 0; padding:12px; border:1px solid #333;">
+    <h3 style="margin-top:0;">Register a new worker client</h3>
+    <form method="post" action="/admin/clients" style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+        <label>
+            Client ID:
+            <input name="clientId" required pattern="[A-Za-z0-9_\-]+"
+                   placeholder="worker-hostname" style="margin-left:4px;" />
+        </label>
+        <label>
+            Display name:
+            <input name="displayName"
+                   placeholder="optional" style="margin-left:4px;" />
+        </label>
+        <button class="btn" type="submit">Register</button>
+    </form>
+</section>
 
 @if (ViewModel.Clients.Count == 0)
 {
@@ -78,9 +105,20 @@ else
     [SupplyParameterFromQuery(Name = "rotated")]
     public string? RotatedClientId { get; set; }
 
+    [SupplyParameterFromQuery(Name = "added")]
+    public string? AddedClientId { get; set; }
+
+    [SupplyParameterFromQuery(Name = "error")]
+    public string? Error { get; set; }
+
     protected override async Task OnInitializedAsync()
     {
         ViewModel.RotatedClientId = RotatedClientId;
+        ViewModel.AddedClientId = AddedClientId;
+        if (!string.IsNullOrWhiteSpace(Error))
+        {
+            ViewModel.LastError = Error;
+        }
         await ViewModel.LoadAsync();
     }
 }

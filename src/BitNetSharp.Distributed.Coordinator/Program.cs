@@ -709,6 +709,31 @@ app.MapPost("/admin/tasks/enqueue-form", async (
     return Results.Redirect(errorUrl);
 }).RequireAuthorization("AdminPolicy").DisableAntiforgery();
 
+// ── Admin add-client endpoint (cookie auth) ───────────────────────
+// Registers a brand-new worker OAuth client at runtime, echoing the
+// generated plaintext secret back through a redirect query string
+// so the ApiKeys page can highlight it exactly like a rotation.
+// Accepts a form-urlencoded POST from the new-client form on
+// /admin/api-keys.
+app.MapPost("/admin/clients", async (
+    [FromForm] string clientId,
+    [FromForm] string? displayName,
+    IDispatcher dispatcher) =>
+{
+    var result = await dispatcher
+        .SendAsync<AddWorkerClientResult>(new AddWorkerClientCommand(clientId, displayName))
+        .ConfigureAwait(false);
+
+    if (!result.IsSuccess)
+    {
+        var errorUrl = $"/admin/api-keys?error={Uri.EscapeDataString(result.Error ?? "unknown")}";
+        return Results.Redirect(errorUrl);
+    }
+
+    var addedUrl = $"/admin/api-keys?added={Uri.EscapeDataString(result.Value!.ClientId)}";
+    return Results.Redirect(addedUrl);
+}).RequireAuthorization("AdminPolicy").DisableAntiforgery();
+
 app.MapPost("/admin/rotate/{clientId}", async (
     string clientId,
     [FromQuery] string? redirect,

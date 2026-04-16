@@ -49,6 +49,14 @@ public sealed partial class ApiKeysPageViewModel : ObservableObject
     private string? _rotatedClientId;
 
     /// <summary>
+    /// When set, the page shows a one-shot confirmation banner saying
+    /// this client was just added. Populated from the <c>?added=</c>
+    /// query string that <c>POST /admin/clients</c> redirects with.
+    /// </summary>
+    [ObservableProperty]
+    private string? _addedClientId;
+
+    /// <summary>
     /// Error message surfaced on the page when the last dispatch
     /// failed. <c>null</c> means everything is green.
     /// </summary>

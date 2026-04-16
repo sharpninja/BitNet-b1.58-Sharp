@@ -79,6 +79,32 @@ public sealed class WorkerClientRegistry
     }
 
     /// <summary>
+    /// Registers a brand-new worker client at runtime, generating a
+    /// cryptographically random secret for it. Intended to be called
+    /// from the admin <c>POST /admin/clients</c> endpoint so operators
+    /// can add workers without restarting the coordinator service.
+    /// Throws if a client with the same id already exists — callers
+    /// must use <see cref="Rotate"/> to refresh an existing entry.
+    /// </summary>
+    public WorkerClientEntry Add(string clientId, string? displayName)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(clientId);
+
+        var effectiveName = string.IsNullOrWhiteSpace(displayName) ? clientId : displayName;
+        var entry = new WorkerClientEntry(
+            ClientId: clientId,
+            PlainTextSecret: GenerateSecret(),
+            DisplayName: effectiveName);
+
+        if (!_clients.TryAdd(clientId, entry))
+        {
+            throw new InvalidOperationException($"Worker client '{clientId}' is already registered.");
+        }
+
+        return entry;
+    }
+
+    /// <summary>
     /// Generates a fresh cryptographically random client secret for
     /// the given client, replaces the in-memory entry, and returns the
     /// new plaintext secret. Throws if no such client exists.
