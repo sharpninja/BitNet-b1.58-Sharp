@@ -22,15 +22,13 @@
     and start polling <code>/work</code>.
 </p>
 <p>
-    One-liner install (replace <code>CLIENT</code> with a client id):
+    Per-client one-liners are rendered below. The URLs include the
+    current client secret as a <code>?k=</code> query parameter so
+    the download endpoint can authenticate the operator without
+    needing a browser cookie. Treat them like the scripts themselves
+    — rotate via <a href="/admin/api-keys">/admin/api-keys</a> to
+    invalidate leaked URLs.
 </p>
-<pre style="background:#0c0c0c; padding:12px; overflow-x:auto; border:1px solid #222;"><code># bash / Linux / macOS
-curl -fsSL -o bitnet-worker.sh "@(ViewModel.BaseUrl)/admin/install/CLIENT.sh" \
-  && chmod +x bitnet-worker.sh && ./bitnet-worker.sh
-
-# PowerShell / Windows
-iwr -UseBasicParsing "@(ViewModel.BaseUrl)/admin/install/CLIENT.ps1" -OutFile bitnet-worker.ps1
-pwsh -NoProfile -ExecutionPolicy Bypass -File .\bitnet-worker.ps1</code></pre>
 <p class="warn">
     The scripts include the plain-text client secret — treat them
     like API keys. Rotate via
@@ -62,20 +60,33 @@ else
                 <span style="color:#999; font-weight:normal;">— @bundle.DisplayName</span>
             </h3>
 
+            @{
+                var bashUrl = $"{ViewModel.BaseUrl}/install/{bundle.ClientId}.sh?k={Uri.EscapeDataString(bundle.ClientSecret)}";
+                var ps1Url  = $"{ViewModel.BaseUrl}/install/{bundle.ClientId}.ps1?k={Uri.EscapeDataString(bundle.ClientSecret)}";
+            }
+
             <h4 style="margin-top:16px;">
                 bash / Linux / macOS
-                <a href="@($"/admin/install/{bundle.ClientId}.sh")"
+                <a href="@bashUrl"
                    download
                    style="margin-left:12px; font-weight:normal; font-size:0.9em;">[ download .sh ]</a>
             </h4>
+            <p style="margin:4px 0 8px 0;"><strong>Remote one-liner:</strong></p>
+            <pre style="background:#0c0c0c; padding:12px; overflow-x:auto; border:1px solid #222;"><code>curl -fsSL -o bitnet-worker.sh "@bashUrl" \
+  &amp;&amp; chmod +x bitnet-worker.sh &amp;&amp; ./bitnet-worker.sh</code></pre>
+            <p style="margin:4px 0 8px 0;"><strong>Rendered script:</strong></p>
             <pre style="background:#0c0c0c; padding:12px; overflow-x:auto; max-height:420px; border:1px solid #222;"><code>@bundle.BashScript</code></pre>
 
             <h4 style="margin-top:16px;">
                 PowerShell / Windows
-                <a href="@($"/admin/install/{bundle.ClientId}.ps1")"
+                <a href="@ps1Url"
                    download
                    style="margin-left:12px; font-weight:normal; font-size:0.9em;">[ download .ps1 ]</a>
             </h4>
+            <p style="margin:4px 0 8px 0;"><strong>Remote one-liner:</strong></p>
+            <pre style="background:#0c0c0c; padding:12px; overflow-x:auto; border:1px solid #222;"><code>iwr -UseBasicParsing "@ps1Url" -OutFile bitnet-worker.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\bitnet-worker.ps1</code></pre>
+            <p style="margin:4px 0 8px 0;"><strong>Rendered script:</strong></p>
             <pre style="background:#0c0c0c; padding:12px; overflow-x:auto; max-height:420px; border:1px solid #222;"><code>@bundle.PowerShellScript</code></pre>
         </section>
     }

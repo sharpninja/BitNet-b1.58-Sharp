@@ -784,6 +784,80 @@ app.MapGet("/admin/install/{clientId}.ps1", async (
             statusCode: StatusCodes.Status404NotFound);
 }).RequireAuthorization("AdminPolicy");
 
+// ── Anonymous install-script download (gated by client secret) ─────
+// The rendered script already embeds the plain-text client secret,
+// so knowledge of the secret is equivalent to being allowed to
+// download it. These routes let an operator fetch the script with a
+// single `curl`/`iwr` on a remote worker machine without needing
+// admin cookies:
+//
+//     curl -fsSL "https://<coord>/install/<client>.sh?k=<secret>" -o bitnet-worker.sh
+//
+// The secret is validated with a constant-time compare against
+// WorkerClientRegistry; rotating the secret via /admin/rotate
+// invalidates any previously-shared download URL.
+static IResult HandleAnonymousInstallDownload(
+    string clientId,
+    string? k,
+    InstallShell shell,
+    BitNetSharp.Distributed.Coordinator.Identity.WorkerClientRegistry registry,
+    IDispatcher dispatcher)
+{
+    if (string.IsNullOrEmpty(k))
+    {
+        return Results.Json(
+            new ErrorResponse("missing_key", "Query parameter 'k' (client secret) is required."),
+            statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var entry = registry.Find(clientId);
+    if (entry is null)
+    {
+        return Results.Json(
+            new ErrorResponse("unknown_client", $"Unknown worker client '{clientId}'."),
+            statusCode: StatusCodes.Status404NotFound);
+    }
+
+    var expected = System.Text.Encoding.UTF8.GetBytes(entry.PlainTextSecret);
+    var actual   = System.Text.Encoding.UTF8.GetBytes(k);
+    if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(expected, actual))
+    {
+        return Results.Json(
+            new ErrorResponse("bad_key", "Invalid client secret."),
+            statusCode: StatusCodes.Status401Unauthorized);
+    }
+
+    var result = dispatcher
+        .QueryAsync<InstallScriptResult>(new GetWorkerInstallScriptQuery(clientId, shell))
+        .GetAwaiter()
+        .GetResult();
+
+    return result.IsSuccess
+        ? Results.File(
+            System.Text.Encoding.UTF8.GetBytes(result.Value!.Content),
+            result.Value!.ContentType,
+            result.Value!.Filename)
+        : Results.Json(
+            new ErrorResponse("install_script_failed", result.Error ?? "unknown"),
+            statusCode: StatusCodes.Status500InternalServerError);
+}
+
+app.MapGet("/install/{clientId}.sh", (
+    string clientId,
+    [FromQuery] string? k,
+    BitNetSharp.Distributed.Coordinator.Identity.WorkerClientRegistry registry,
+    IDispatcher dispatcher) =>
+    HandleAnonymousInstallDownload(clientId, k, InstallShell.Bash, registry, dispatcher))
+    .AllowAnonymous();
+
+app.MapGet("/install/{clientId}.ps1", (
+    string clientId,
+    [FromQuery] string? k,
+    BitNetSharp.Distributed.Coordinator.Identity.WorkerClientRegistry registry,
+    IDispatcher dispatcher) =>
+    HandleAnonymousInstallDownload(clientId, k, InstallShell.PowerShell, registry, dispatcher))
+    .AllowAnonymous();
+
 app.Run();
 return 0;
 
