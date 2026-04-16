@@ -311,6 +311,7 @@ app.Services.GetRequiredService<WeightApplicationService>().EnsureInitialized();
 
 app.UseAuthentication();
 app.UseAuthorization();
+app.UseAntiforgery();
 app.UseMiddleware<JwtRevocationMiddleware>();
 app.UseIdentityServer();
 
