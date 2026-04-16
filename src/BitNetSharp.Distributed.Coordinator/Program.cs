@@ -575,10 +575,23 @@ app.MapPost("/Account/Login/submit", async (
         new("role", "admin"),
         new("sub", user.SubjectId)
     };
-    var principal = new ClaimsPrincipal(new ClaimsIdentity(claims, IdentityServerConstants.DefaultCookieAuthenticationScheme));
-    await http.SignInAsync(IdentityServerConstants.DefaultCookieAuthenticationScheme, principal);
 
-    var redirect = string.IsNullOrWhiteSpace(returnUrl) ? "/admin/api-keys" : returnUrl;
+    // Sign in on the Duende IS cookie so /connect/authorize works
+    // for any future OIDC interactions.
+    var idsrvPrincipal = new ClaimsPrincipal(new ClaimsIdentity(claims, IdentityServerConstants.DefaultCookieAuthenticationScheme));
+    await http.SignInAsync(IdentityServerConstants.DefaultCookieAuthenticationScheme, idsrvPrincipal);
+
+    // ALSO sign in on the application's own Cookies scheme so the
+    // admin dashboard and other [Authorize(Policy="AdminPolicy")]
+    // pages work immediately without a self-referential OIDC code
+    // exchange redirect chain. The login form IS the authentication
+    // event — there is no security benefit to forcing the browser
+    // through /connect/authorize → /signin-oidc just to set a
+    // second cookie.
+    var cookiesPrincipal = new ClaimsPrincipal(new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme));
+    await http.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, cookiesPrincipal);
+
+    var redirect = string.IsNullOrWhiteSpace(returnUrl) ? "/admin/dashboard" : returnUrl;
     return Results.Redirect(redirect);
 }).DisableAntiforgery();
 
