@@ -1,9 +1,15 @@
 # BitNet-b1.58-Sharp Distributed Training — Session Handoff
 
-**Date:** 2026-04-16
+**Date:** 2026-04-16 (updated after tokenizer + presets)
 **Session:** `Claude-20260415T120000Z-bitnet-distributed-training`
-**HEAD:** `497bef5` (both origin + azure synced)
-**Tests:** 307+ fast-lane passing (298 last full run + 9 tokenizer)
+**HEAD:** `adc801a` (both origin + azure synced)
+**Tests:** 314 fast-lane passing
+
+**Latest additions since initial handoff:**
+- WordLevelTokenizer (5174-vocab, Contracts) + tokenize-corpus CLI
+- TruckMateModelPresets (small ~7M, medium ~56M, large ~121M)
+- CoordinatorOptions.ModelPreset → WeightApplicationService dimension override
+- Pre-tokenized corpus staged on PAYTON-DESKTOP (1.83M tokens, 10 binary shards)
 
 ## What was built
 
