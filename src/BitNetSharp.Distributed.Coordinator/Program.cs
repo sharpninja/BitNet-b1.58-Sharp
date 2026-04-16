@@ -568,9 +568,14 @@ app.MapPost("/Account/Login/submit", async (
     }
 
     var user = users.FindByUsername(username);
+    // Use the full ClaimTypes URIs so RequireRole("admin") in the
+    // AdminPolicy matches. The short "role" string doesn't map to
+    // ClaimTypes.Role automatically outside of JwtBearer which has
+    // its own mapping table.
     var claims = new List<Claim>
     {
         new(ClaimTypes.Name, user.Username),
+        new(ClaimTypes.Role, "admin"),
         new("name", user.Username),
         new("role", "admin"),
         new("sub", user.SubjectId)
