@@ -1,0 +1,170 @@
+@page "/admin/dashboard"
+@attribute [Authorize(Policy = "AdminPolicy")]
+@using BitNetSharp.Distributed.Coordinator.Cqrs.Queries
+@using BitNetSharp.Distributed.Coordinator.Persistence
+@using BitNetSharp.Distributed.Coordinator.ViewModels
+@inject DashboardPageViewModel ViewModel
+@inject NavigationManager Navigation
+
+<HeadContent>
+    <meta http-equiv="refresh" content="5" />
+</HeadContent>
+
+<h2>Fleet dashboard</h2>
+<p style="color:#999; font-size:12px;">
+    Auto-refreshes every 5 seconds. Window for the recent
+    rollups is the last 15 minutes of gradient submissions.
+</p>
+
+@if (!string.IsNullOrWhiteSpace(ViewModel.LastError))
+{
+    <p class="warn">@ViewModel.LastError</p>
+}
+
+@if (ViewModel.Snapshot is null)
+{
+    <p>Loading…</p>
+}
+else
+{
+    var s = ViewModel.Snapshot;
+    <section style="display:flex; gap:16px; flex-wrap:wrap; margin-top:12px;">
+        <div class="card">
+            <div class="card-label">Weight version</div>
+            <div class="card-value">@s.CurrentWeightVersion</div>
+            <div class="card-sub">dim @s.WeightDimension</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Pending tasks</div>
+            <div class="card-value">@s.Tasks.Pending</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Assigned tasks</div>
+            <div class="card-value">@s.Tasks.Assigned</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Done</div>
+            <div class="card-value ok">@s.Tasks.Done</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Failed</div>
+            <div class="card-value @(s.Tasks.Failed == 0 ? "" : "warn")">@s.Tasks.Failed</div>
+        </div>
+    </section>
+
+    <h3 style="margin-top:24px;">Workers</h3>
+    <section style="display:flex; gap:16px; flex-wrap:wrap;">
+        <div class="card">
+            <div class="card-label">Configured</div>
+            <div class="card-value">@s.Workers.Configured</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Active</div>
+            <div class="card-value ok">@s.Workers.Active</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Draining</div>
+            <div class="card-value">@s.Workers.Draining</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Gone</div>
+            <div class="card-value warn">@s.Workers.Gone</div>
+        </div>
+    </section>
+
+    <h3 style="margin-top:24px;">Recent activity (last 15 min)</h3>
+    <section style="display:flex; gap:16px; flex-wrap:wrap;">
+        <div class="card">
+            <div class="card-label">Tasks completed</div>
+            <div class="card-value">@s.RecentGlobalTelemetry.TasksCompleted</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Tokens processed</div>
+            <div class="card-value">@s.RecentGlobalTelemetry.TokensSeen.ToString("N0")</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Fleet wall-clock</div>
+            <div class="card-value">@((s.RecentGlobalTelemetry.WallClockMs / 1000.0).ToString("F1")) s</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Avg staleness</div>
+            <div class="card-value">@s.RecentGlobalTelemetry.AverageStaleness.ToString("F2")</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Avg loss</div>
+            <div class="card-value">@s.RecentGlobalTelemetry.AverageLossAfter.ToString("F3")</div>
+        </div>
+    </section>
+
+    <h3 style="margin-top:24px;">Registered workers</h3>
+    @if (s.WorkerRows.Count == 0)
+    {
+        <p class="warn">No workers have registered yet.</p>
+    }
+    else
+    {
+        <table>
+            <thead>
+                <tr>
+                    <th>Client ID</th>
+                    <th>Name</th>
+                    <th>State</th>
+                    <th>Threads</th>
+                    <th>Baseline tok/s</th>
+                    <th>Rec. tok/task</th>
+                    <th>Last heartbeat</th>
+                    <th>Recent tasks</th>
+                    <th>Recent tokens</th>
+                    <th>Avg staleness</th>
+                    <th>Actions</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in s.WorkerRows)
+                {
+                    <tr>
+                        <td>@row.ClientId</td>
+                        <td>@row.Name</td>
+                        <td class="@(row.State == WorkerState.Active ? "ok" : row.State == WorkerState.Gone ? "warn" : "")">@row.State</td>
+                        <td>@row.CpuThreads</td>
+                        <td>@row.TokensPerSecond.ToString("N0")</td>
+                        <td>@row.RecommendedTokensPerTask.ToString("N0")</td>
+                        <td>@row.LastHeartbeatUtc.ToString("u")</td>
+                        <td>@row.RecentTasksCompleted</td>
+                        <td>@row.RecentTokensSeen.ToString("N0")</td>
+                        <td>@row.RecentAverageStaleness.ToString("F2")</td>
+                        <td style="display:flex; gap:6px;">
+                            <form method="post" action="@($"/admin/workers/{row.ClientId}/drain?redirect=/admin/dashboard")" style="margin:0;">
+                                <button class="btn" type="submit">Drain</button>
+                            </form>
+                            <form method="post" action="@($"/admin/workers/{row.ClientId}/gone?redirect=/admin/dashboard")" style="margin:0;">
+                                <button class="btn" type="submit">Gone</button>
+                            </form>
+                            <form method="post" action="@($"/admin/rotate/{row.ClientId}?redirect=/admin/dashboard")" style="margin:0;">
+                                <button class="btn" type="submit">Rotate</button>
+                            </form>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+
+    <p style="color:#666; font-size:11px; margin-top:12px;">
+        Snapshot generated @s.GeneratedAtUtc.ToString("u").
+    </p>
+
+    <style>
+        .card { background:#1c1c1c; border:1px solid #333; padding:12px 16px; min-width:150px; }
+        .card-label { font-size:11px; color:#888; text-transform:uppercase; letter-spacing:0.05em; }
+        .card-value { font-size:24px; font-family:ui-monospace,monospace; margin-top:4px; }
+        .card-sub { font-size:11px; color:#666; }
+    </style>
+}
+
+@code {
+    protected override async Task OnInitializedAsync()
+    {
+        await ViewModel.LoadAsync();
+    }
+}

@@ -33,6 +33,7 @@ public sealed class CqrsHandlerTests : IDisposable
     private readonly SqliteWorkerRegistryStore _workerStore;
     private readonly SqliteWorkQueueStore _queueStore;
     private readonly SqliteClientRevocationStore _revocations;
+    private readonly SqliteTelemetryStore _telemetry;
     private readonly FileSystemWeightStore _weightStore;
     private readonly WeightApplicationService _weightApplication;
     private readonly WorkerClientRegistry _registry;
@@ -47,6 +48,7 @@ public sealed class CqrsHandlerTests : IDisposable
         _workerStore = new SqliteWorkerRegistryStore(connectionString, _time);
         _queueStore = new SqliteWorkQueueStore(connectionString, _time);
         _revocations = new SqliteClientRevocationStore(connectionString, _time);
+        _telemetry = new SqliteTelemetryStore(connectionString, _time);
         _weightStore = new FileSystemWeightStore(_weightsDirectory);
 
         _registry = new WorkerClientRegistry();
@@ -85,6 +87,7 @@ public sealed class CqrsHandlerTests : IDisposable
         _workerStore.Dispose();
         _queueStore.Dispose();
         _revocations.Dispose();
+        _telemetry.Dispose();
         TryDelete(_databasePath);
         TryDelete(_databasePath + "-wal");
         TryDelete(_databasePath + "-shm");
@@ -254,7 +257,7 @@ public sealed class CqrsHandlerTests : IDisposable
     // ── SubmitGradientCommand ───────────────────────────────────────
 
     private SubmitGradientCommandHandler BuildGradientHandler() =>
-        new(_queueStore, _weightApplication, NullLogger<SubmitGradientCommandHandler>.Instance);
+        new(_queueStore, _weightApplication, _telemetry, NullLogger<SubmitGradientCommandHandler>.Instance);
 
     [Fact]
     public async Task SubmitGradient_marks_task_done_on_happy_path()

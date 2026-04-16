@@ -39,6 +39,7 @@ public sealed class SubmitGradientCommandHandler : ICommandHandler<SubmitGradien
 {
     private readonly SqliteWorkQueueStore _workQueue;
     private readonly WeightApplicationService _weights;
+    private readonly SqliteTelemetryStore _telemetry;
     private readonly ILogger<SubmitGradientCommandHandler> _logger;
 
     /// <summary>Returned when the submission's worker_id does not match the JWT.</summary>
@@ -59,10 +60,12 @@ public sealed class SubmitGradientCommandHandler : ICommandHandler<SubmitGradien
     public SubmitGradientCommandHandler(
         SqliteWorkQueueStore workQueue,
         WeightApplicationService weights,
+        SqliteTelemetryStore telemetry,
         ILogger<SubmitGradientCommandHandler> logger)
     {
         _workQueue = workQueue;
         _weights = weights;
+        _telemetry = telemetry;
         _logger = logger;
     }
 
@@ -134,6 +137,16 @@ public sealed class SubmitGradientCommandHandler : ICommandHandler<SubmitGradien
         {
             return Task.FromResult(Result<GradientAcceptance>.Failure(TaskNotAssignedCode));
         }
+
+        _telemetry.RecordAccepted(
+            clientId: command.ClientId,
+            taskId: command.Submission.TaskId,
+            tokensSeen: command.Submission.TokensSeen,
+            wallClockMs: command.Submission.WallClockMs,
+            staleness: staleness,
+            effectiveLr: effectiveLr,
+            newVersion: newVersion,
+            lossAfter: command.Submission.LossAfter);
 
         _logger.LogInformation(
             "Accepted gradient for task {TaskId} from worker {ClientId}: format={Format}, bytes={Size}, tokens={Tokens}, loss={Loss}, staleness={Staleness}, new_version={NewVersion}, effective_lr={EffectiveLr:F4}",

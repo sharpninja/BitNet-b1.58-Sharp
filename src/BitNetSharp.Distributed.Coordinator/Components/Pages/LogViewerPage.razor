@@ -1,0 +1,114 @@
+@page "/admin/logs"
+@attribute [Authorize(Policy = "AdminPolicy")]
+@using BitNetSharp.Distributed.Coordinator.Persistence
+@using BitNetSharp.Distributed.Coordinator.ViewModels
+@inject LogViewerPageViewModel ViewModel
+@inject NavigationManager Navigation
+
+<HeadContent>
+    <meta http-equiv="refresh" content="10" />
+</HeadContent>
+
+<h2>Worker logs</h2>
+<p style="color:#999; font-size:12px;">
+    Structured logs ingested from workers via <code>POST /logs</code>.
+    Auto-refreshes every 10 seconds. Newest first.
+</p>
+
+<form method="get" action="/admin/logs" style="display:flex; gap:8px; flex-wrap:wrap; margin-bottom:16px;">
+    <label style="font-size:12px;">
+        Worker
+        <input name="worker" value="@FilterWorkerId" placeholder="all" style="width:160px; padding:4px;" />
+    </label>
+    <label style="font-size:12px;">
+        Level
+        <select name="level" style="padding:4px;">
+            <option value="">all</option>
+            @foreach (var lvl in new[] { "Trace", "Debug", "Information", "Warning", "Error", "Critical" })
+            {
+                <option value="@lvl" selected="@(FilterLevel == lvl)">@lvl</option>
+            }
+        </select>
+    </label>
+    <label style="font-size:12px;">
+        Search
+        <input name="search" value="@FilterSearch" placeholder="substring" style="width:200px; padding:4px;" />
+    </label>
+    <label style="font-size:12px;">
+        Limit
+        <input name="limit" type="number" value="@Limit" min="10" max="2000" style="width:80px; padding:4px;" />
+    </label>
+    <button type="submit" class="btn" style="align-self:flex-end;">Filter</button>
+</form>
+
+@if (ViewModel.Entries.Count == 0)
+{
+    <p class="warn">No log entries match the current filter.</p>
+}
+else
+{
+    <table style="font-size:12px;">
+        <thead>
+            <tr>
+                <th style="width:170px;">Timestamp (UTC)</th>
+                <th style="width:90px;">Level</th>
+                <th style="width:120px;">Worker</th>
+                <th style="width:200px;">Category</th>
+                <th>Message</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var entry in ViewModel.Entries)
+            {
+                var ts = DateTimeOffset.FromUnixTimeSeconds(entry.TimestampUnix);
+                var levelColor = entry.Level switch
+                {
+                    "Error" or "Critical" => "color:#f87;",
+                    "Warning" => "color:#fc6;",
+                    "Debug" or "Trace" => "color:#666;",
+                    _ => ""
+                };
+                <tr>
+                    <td>@ts.ToString("yyyy-MM-dd HH:mm:ss")</td>
+                    <td style="@levelColor font-weight:bold;">@entry.Level</td>
+                    <td>@entry.WorkerId</td>
+                    <td style="color:#888; word-break:break-all;">@entry.Category</td>
+                    <td style="word-break:break-all;">
+                        @entry.Message
+                        @if (!string.IsNullOrWhiteSpace(entry.Exception))
+                        {
+                            <pre style="background:#1a0000; color:#f87; padding:4px; margin-top:4px; font-size:11px; max-height:200px; overflow:auto;">@entry.Exception</pre>
+                        }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+}
+
+<p style="color:#666; font-size:11px; margin-top:12px;">
+    Showing @ViewModel.Entries.Count entries.
+</p>
+
+@code {
+    [SupplyParameterFromQuery(Name = "worker")]
+    public string? FilterWorkerId { get; set; }
+
+    [SupplyParameterFromQuery(Name = "level")]
+    public string? FilterLevel { get; set; }
+
+    [SupplyParameterFromQuery(Name = "search")]
+    public string? FilterSearch { get; set; }
+
+    [SupplyParameterFromQuery(Name = "limit")]
+    public int Limit { get; set; } = 200;
+
+    protected override void OnInitialized()
+    {
+        ViewModel.FilterWorkerId = FilterWorkerId;
+        ViewModel.FilterLevel = FilterLevel;
+        ViewModel.FilterSearch = FilterSearch;
+        ViewModel.Limit = Limit > 0 ? Limit : 200;
+        ViewModel.Load();
+    }
+}

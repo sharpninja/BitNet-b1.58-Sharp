@@ -120,6 +120,17 @@ builder.Services.AddSingleton(sp =>
         "weights");
     return new FileSystemWeightStore(weightsDir);
 });
+builder.Services.AddSingleton(sp =>
+{
+    var coord = sp.GetRequiredService<CoordinatorOptions>();
+    var time  = sp.GetRequiredService<TimeProvider>();
+    return new SqliteTelemetryStore(BuildConnectionString(coord), time);
+});
+builder.Services.AddSingleton(sp =>
+{
+    var coord = sp.GetRequiredService<CoordinatorOptions>();
+    return new SqliteLogStore(BuildConnectionString(coord));
+});
 builder.Services.AddSingleton<WeightApplicationService>();
 
 // ── Worker client registry + Duende IdentityServer ────────────────
@@ -261,6 +272,8 @@ builder.Services.AddCqrsHandlers(typeof(CoordinatorHostMarker).Assembly);
 builder.Services.AddTransient<ApiKeysPageViewModel>();
 builder.Services.AddTransient<TasksPageViewModel>();
 builder.Services.AddTransient<InstallPageViewModel>();
+builder.Services.AddTransient<DashboardPageViewModel>();
+builder.Services.AddTransient<LogViewerPageViewModel>();
 
 // Hosted service that transitions stale workers to Gone and
 // recycles timed-out task assignments back to Pending.
@@ -273,6 +286,8 @@ _ = app.Services.GetRequiredService<SqliteWorkQueueStore>();
 _ = app.Services.GetRequiredService<SqliteWorkerRegistryStore>();
 _ = app.Services.GetRequiredService<SqliteClientRevocationStore>();
 _ = app.Services.GetRequiredService<FileSystemWeightStore>();
+_ = app.Services.GetRequiredService<SqliteTelemetryStore>();
+_ = app.Services.GetRequiredService<SqliteLogStore>();
 
 // Eagerly materialize the global weight vector (or load latest
 // persisted version from disk) so the first /gradient request has
@@ -427,6 +442,37 @@ app.MapPost("/gradient", async (
         statusCode: StatusCodes.Status400BadRequest);
 }).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
 
+// ── /logs — structured log ingestion from workers ────────────────
+// Workers batch log entries and POST them as a LogBatch. The
+// coordinator stamps the authenticated client_id on every entry
+// so a compromised worker cannot impersonate another's logs.
+app.MapPost("/logs", (
+    [FromBody] LogBatch batch,
+    HttpContext http,
+    SqliteLogStore logStore) =>
+{
+    if (batch?.Entries is null || batch.Entries.Length == 0)
+    {
+        return Results.Ok(new { ingested = 0 });
+    }
+
+    var clientId = http.User.FindFirst("client_id")?.Value ?? "unknown";
+    var rows = new List<LogEntryRow>(batch.Entries.Length);
+    foreach (var entry in batch.Entries)
+    {
+        rows.Add(new LogEntryRow(
+            TimestampUnix: entry.Timestamp.ToUnixTimeSeconds(),
+            Level: entry.Level ?? "Information",
+            Category: entry.Category ?? string.Empty,
+            Message: entry.Message ?? string.Empty,
+            Exception: entry.Exception,
+            WorkerId: clientId));
+    }
+
+    var ingested = logStore.InsertBatch(clientId, rows);
+    return Results.Ok(new { ingested });
+}).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
+
 // ── /weights/{version} — streams a weight blob to the worker ─────
 app.MapGet("/weights/{version:long}", (
     long version,
@@ -515,6 +561,52 @@ app.MapPost("/admin/tasks/enqueue", async (
         : Results.Json(
             new ErrorResponse("enqueue_failed", result.Error ?? "unknown"),
             statusCode: StatusCodes.Status400BadRequest);
+}).RequireAuthorization("AdminPolicy").DisableAntiforgery();
+
+// Admin dashboard: mark worker Draining or Gone. Both endpoints
+// accept a POST with no body, dispatch the CQRS
+// MarkWorkerStateCommand, and redirect back to the dashboard so
+// the new state shows up on the next render.
+app.MapPost("/admin/workers/{workerId}/drain", async (
+    string workerId,
+    [FromQuery] string? redirect,
+    IDispatcher dispatcher) =>
+{
+    var result = await dispatcher
+        .SendAsync<WorkerStateResult>(new MarkWorkerStateCommand(workerId, WorkerState.Draining))
+        .ConfigureAwait(false);
+
+    if (!result.IsSuccess)
+    {
+        return Results.Json(
+            new ErrorResponse("drain_failed", result.Error ?? "unknown"),
+            statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    return string.IsNullOrWhiteSpace(redirect)
+        ? Results.Ok(result.Value)
+        : Results.Redirect(redirect);
+}).RequireAuthorization("AdminPolicy").DisableAntiforgery();
+
+app.MapPost("/admin/workers/{workerId}/gone", async (
+    string workerId,
+    [FromQuery] string? redirect,
+    IDispatcher dispatcher) =>
+{
+    var result = await dispatcher
+        .SendAsync<WorkerStateResult>(new MarkWorkerStateCommand(workerId, WorkerState.Gone))
+        .ConfigureAwait(false);
+
+    if (!result.IsSuccess)
+    {
+        return Results.Json(
+            new ErrorResponse("gone_failed", result.Error ?? "unknown"),
+            statusCode: StatusCodes.Status400BadRequest);
+    }
+
+    return string.IsNullOrWhiteSpace(redirect)
+        ? Results.Ok(result.Value)
+        : Results.Redirect(redirect);
 }).RequireAuthorization("AdminPolicy").DisableAntiforgery();
 
 // Form-post shim so the /admin/tasks Razor page's HTML form can
