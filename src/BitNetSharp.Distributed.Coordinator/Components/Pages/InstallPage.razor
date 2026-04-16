@@ -15,10 +15,22 @@
 <p>
     Each script pins a single configured worker client's
     credentials and walks through Docker-first / source-build
-    fallback install. Save the snippet to a file on the target
-    machine and run it; the worker will calibrate, authenticate
-    against this coordinator, and start polling <code>/work</code>.
+    fallback install. <strong>Download</strong> the script for the
+    target shell via the buttons below (preferred) or copy-paste
+    the snippet into a file; run it on the worker machine and the
+    worker will calibrate, authenticate against this coordinator,
+    and start polling <code>/work</code>.
 </p>
+<p>
+    One-liner install (replace <code>CLIENT</code> with a client id):
+</p>
+<pre style="background:#0c0c0c; padding:12px; overflow-x:auto; border:1px solid #222;"><code># bash / Linux / macOS
+curl -fsSL -o bitnet-worker.sh "@(ViewModel.BaseUrl)/admin/install/CLIENT.sh" \
+  && chmod +x bitnet-worker.sh && ./bitnet-worker.sh
+
+# PowerShell / Windows
+iwr -UseBasicParsing "@(ViewModel.BaseUrl)/admin/install/CLIENT.ps1" -OutFile bitnet-worker.ps1
+pwsh -NoProfile -ExecutionPolicy Bypass -File .\bitnet-worker.ps1</code></pre>
 <p class="warn">
     The scripts include the plain-text client secret — treat them
     like API keys. Rotate via
@@ -50,10 +62,20 @@ else
                 <span style="color:#999; font-weight:normal;">— @bundle.DisplayName</span>
             </h3>
 
-            <h4 style="margin-top:16px;">bash / Linux / macOS</h4>
+            <h4 style="margin-top:16px;">
+                bash / Linux / macOS
+                <a href="@($"/admin/install/{bundle.ClientId}.sh")"
+                   download
+                   style="margin-left:12px; font-weight:normal; font-size:0.9em;">[ download .sh ]</a>
+            </h4>
             <pre style="background:#0c0c0c; padding:12px; overflow-x:auto; max-height:420px; border:1px solid #222;"><code>@bundle.BashScript</code></pre>
 
-            <h4 style="margin-top:16px;">PowerShell / Windows</h4>
+            <h4 style="margin-top:16px;">
+                PowerShell / Windows
+                <a href="@($"/admin/install/{bundle.ClientId}.ps1")"
+                   download
+                   style="margin-left:12px; font-weight:normal; font-size:0.9em;">[ download .ps1 ]</a>
+            </h4>
             <pre style="background:#0c0c0c; padding:12px; overflow-x:auto; max-height:420px; border:1px solid #222;"><code>@bundle.PowerShellScript</code></pre>
         </section>
     }

@@ -1,7 +1,23 @@
 # ─────────────────────────────────────────────────────────────────────────
 #  BitNetSharp.Distributed.Worker — local multi-replica dev stack.
 #
-#  Spin up N workers against a coordinator URL (ngrok or direct) with:
+#  For a SINGLE worker on a single machine, prefer the one-shot install
+#  script served by the coordinator's admin portal — it bakes in the
+#  client credentials and handles the hardened `docker run` for you:
+#
+#      # bash / Linux / macOS
+#      curl -fsSL -o bitnet-worker.sh \
+#           https://<coordinator>/admin/install/<client-id>.sh
+#      chmod +x bitnet-worker.sh && ./bitnet-worker.sh
+#
+#      # PowerShell / Windows
+#      iwr -UseBasicParsing \
+#          https://<coordinator>/admin/install/<client-id>.ps1 `
+#          -OutFile bitnet-worker.ps1
+#      pwsh -NoProfile -ExecutionPolicy Bypass -File .\bitnet-worker.ps1
+#
+#  Use THIS compose file when you want N replicas against the same
+#  coordinator on one host:
 #
 #      cd docker/worker
 #      cp .env.example .env               # edit to set the coordinator URL

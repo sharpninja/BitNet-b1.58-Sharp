@@ -1,9 +1,11 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using BitNetSharp.Distributed.Coordinator.Configuration;
 using BitNetSharp.Distributed.Coordinator.Cqrs.Queries;
 using CommunityToolkit.Mvvm.ComponentModel;
 using McpServer.Cqrs;
+using Microsoft.Extensions.Options;
 
 namespace BitNetSharp.Distributed.Coordinator.ViewModels;
 
@@ -17,10 +19,14 @@ namespace BitNetSharp.Distributed.Coordinator.ViewModels;
 public sealed partial class InstallPageViewModel : ObservableObject
 {
     private readonly IDispatcher _dispatcher;
+    private readonly IOptionsMonitor<CoordinatorOptions> _options;
 
-    public InstallPageViewModel(IDispatcher dispatcher)
+    public InstallPageViewModel(
+        IDispatcher dispatcher,
+        IOptionsMonitor<CoordinatorOptions> options)
     {
         _dispatcher = dispatcher;
+        _options = options;
     }
 
     [ObservableProperty]
@@ -28,6 +34,15 @@ public sealed partial class InstallPageViewModel : ObservableObject
 
     [ObservableProperty]
     private string? _lastError;
+
+    /// <summary>
+    /// Public base URL of the coordinator, trimmed. Used in the
+    /// one-liner install snippets so operators can paste a
+    /// curl/iwr command into a remote machine.
+    /// </summary>
+    public string BaseUrl => string.IsNullOrWhiteSpace(_options.CurrentValue.BaseUrl)
+        ? "http://localhost:5000"
+        : _options.CurrentValue.BaseUrl.TrimEnd('/');
 
     public async Task LoadAsync()
     {

@@ -9,6 +9,7 @@ using BitNetSharp.Distributed.Coordinator.Components;
 using BitNetSharp.Distributed.Coordinator.Configuration;
 using BitNetSharp.Distributed.Coordinator.Identity;
 using BitNetSharp.Distributed.Coordinator.Cqrs.Commands;
+using BitNetSharp.Distributed.Coordinator.Cqrs.Queries;
 using BitNetSharp.Distributed.Coordinator.Middleware;
 using BitNetSharp.Distributed.Coordinator.Persistence;
 using BitNetSharp.Distributed.Coordinator.Services;
@@ -739,6 +740,49 @@ app.MapPost("/admin/rotate/{clientId}", async (
         revoked_at = rotation.RevokedAtUtc
     });
 }).RequireAuthorization("AdminPolicy").DisableAntiforgery();
+
+// ── Admin install-script download endpoints ───────────────────────
+// Serve the per-client bash + PowerShell install scripts rendered by
+// GetWorkerInstallScriptQuery as downloadable files. The admin
+// /admin/install Razor page links operators here so they can grab a
+// ready-to-run script instead of copy-pasting from the browser.
+// Scripts embed the plain-text client secret, so both endpoints stay
+// behind AdminPolicy.
+app.MapGet("/admin/install/{clientId}.sh", async (
+    string clientId,
+    IDispatcher dispatcher) =>
+{
+    var result = await dispatcher
+        .QueryAsync<InstallScriptResult>(new GetWorkerInstallScriptQuery(clientId, InstallShell.Bash))
+        .ConfigureAwait(false);
+
+    return result.IsSuccess
+        ? Results.File(
+            System.Text.Encoding.UTF8.GetBytes(result.Value!.Content),
+            result.Value!.ContentType,
+            result.Value!.Filename)
+        : Results.Json(
+            new ErrorResponse("install_script_failed", result.Error ?? "unknown"),
+            statusCode: StatusCodes.Status404NotFound);
+}).RequireAuthorization("AdminPolicy");
+
+app.MapGet("/admin/install/{clientId}.ps1", async (
+    string clientId,
+    IDispatcher dispatcher) =>
+{
+    var result = await dispatcher
+        .QueryAsync<InstallScriptResult>(new GetWorkerInstallScriptQuery(clientId, InstallShell.PowerShell))
+        .ConfigureAwait(false);
+
+    return result.IsSuccess
+        ? Results.File(
+            System.Text.Encoding.UTF8.GetBytes(result.Value!.Content),
+            result.Value!.ContentType,
+            result.Value!.Filename)
+        : Results.Json(
+            new ErrorResponse("install_script_failed", result.Error ?? "unknown"),
+            statusCode: StatusCodes.Status404NotFound);
+}).RequireAuthorization("AdminPolicy");
 
 app.Run();
 return 0;
