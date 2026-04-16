@@ -71,6 +71,11 @@ if (args.Length > 0 && string.Equals(args[0], "seed-tasks", StringComparison.Ord
     return SeedTasksCommandLine(args);
 }
 
+if (args.Length > 0 && string.Equals(args[0], "generate-corpus", StringComparison.OrdinalIgnoreCase))
+{
+    return GenerateCorpusCommandLine(args);
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Running under Windows Service Control Manager sets the current
@@ -478,6 +483,32 @@ app.MapPost("/logs", (
     return Results.Ok(new { ingested });
 }).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
 
+// ── /corpus/{shardId} — streams a corpus shard to the worker ─────
+// Workers download shard data before computing gradients against it.
+// The coordinator serves shards from the corpus directory as plain
+// text with optional byte-range support.
+app.MapGet("/corpus/{shardId}", (
+    string shardId,
+    CoordinatorOptions options) =>
+{
+    var corpusDir = System.IO.Path.Combine(
+        System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(options.DatabasePath)) ?? ".",
+        "corpus");
+    var shardPath = System.IO.Path.Combine(corpusDir, $"{shardId}.txt");
+    if (!System.IO.File.Exists(shardPath))
+    {
+        return Results.Json(
+            new ErrorResponse("unknown_shard", $"Corpus shard '{shardId}' not found."),
+            statusCode: StatusCodes.Status404NotFound);
+    }
+
+    return Results.File(
+        path: shardPath,
+        contentType: "text/plain; charset=utf-8",
+        fileDownloadName: $"{shardId}.txt",
+        enableRangeProcessing: true);
+}).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
+
 // ── /weights/{version} — streams a weight blob to the worker ─────
 app.MapGet("/weights/{version:long}", (
     long version,
@@ -690,6 +721,59 @@ return 0;
 
 static string BuildConnectionString(CoordinatorOptions coord) =>
     $"Data Source={coord.DatabasePath};Cache=Shared";
+
+/// <summary>
+/// Generates the Truck Mate synthetic training corpus and writes
+/// it as sharded text files + a manifest.json into the corpus
+/// directory alongside the coordinator's database.
+///
+///     dotnet BitNetSharp.Distributed.Coordinator.dll generate-corpus [count]
+///
+/// Default count is 50,000 examples. The corpus is written to the
+/// same parent directory as DatabasePath/corpus/.
+/// </summary>
+static int GenerateCorpusCommandLine(string[] args)
+{
+    try
+    {
+        var count = 50_000;
+        if (args.Length > 1 && int.TryParse(args[1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsedCount) && parsedCount > 0)
+        {
+            count = parsedCount;
+        }
+
+        var config = new ConfigurationBuilder()
+            .SetBasePath(System.IO.Path.GetDirectoryName(typeof(Program).Assembly.Location) ?? ".")
+            .AddJsonFile("appsettings.json", optional: true)
+            .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}.json", optional: true)
+            .AddEnvironmentVariables()
+            .Build();
+
+        var coordinator = new CoordinatorOptions();
+        config.GetSection(CoordinatorOptions.SectionName).Bind(coordinator);
+
+        var corpusDir = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(coordinator.DatabasePath)) ?? ".",
+            "corpus");
+
+        Console.WriteLine($"Generating {count} Truck Mate training examples into {corpusDir}…");
+        var manifest = TruckMateCorpusGenerator.Generate(corpusDir, count);
+
+        Console.WriteLine($"Generated {manifest.TotalExamples} examples across {manifest.Shards.Count} shards.");
+        foreach (var shard in manifest.Shards)
+        {
+            Console.WriteLine($"  {shard.ShardId}: {shard.ExampleCount} examples, {shard.SizeBytes:N0} bytes");
+        }
+
+        Console.WriteLine($"Manifest saved to {System.IO.Path.Combine(corpusDir, "manifest.json")}");
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"generate-corpus failed: {ex}");
+        return 1;
+    }
+}
 
 /// <summary>
 /// Seeds pending training tasks into the coordinator's SQLite work
