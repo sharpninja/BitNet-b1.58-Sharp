@@ -46,7 +46,11 @@ RUN dotnet publish src/BitNetSharp.Distributed.Worker/BitNetSharp.Distributed.Wo
       /p:UseAppHost=false
 
 # ── runtime stage ────────────────────────────────────────────────────────
-FROM mcr.microsoft.com/dotnet/runtime:10.0 AS runtime
+# Ship the SDK (not just the runtime) so BenchmarkDotNet's startup
+# calibration pass can shell out to `dotnet --version` / build its
+# jitted micro-benchmark assembly. Larger image (~900MB vs ~200MB)
+# but the calibration numbers drive task sizing, so accuracy wins.
+FROM mcr.microsoft.com/dotnet/sdk:10.0 AS runtime
 
 LABEL org.opencontainers.image.source="https://github.com/sharpninja/BitNet-b1.58-Sharp"
 LABEL org.opencontainers.image.title="BitNetSharp.Distributed.Worker"
