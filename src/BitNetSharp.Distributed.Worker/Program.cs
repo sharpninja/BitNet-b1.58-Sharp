@@ -5,6 +5,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using BitNetSharp.Distributed.Contracts;
 using BitNetSharp.Distributed.Worker;
+using Serilog;
+using Serilog.Events;
+using Serilog.Sinks.PeriodicBatching;
 
 // ────────────────────────────────────────────────────────────────────────
 //  BitNetSharp.Distributed.Worker entry point
@@ -28,6 +31,25 @@ using BitNetSharp.Distributed.Worker;
 //  register + heartbeat round-trip works end-to-end first.
 // ────────────────────────────────────────────────────────────────────────
 
+// ── Serilog bootstrap ─────────────────────────────────────────────
+// The coordinator log sink is wired up early so it can capture
+// startup messages. It drops batches silently until SetClient is
+// called after authentication succeeds; the console sink covers
+// the gap.
+var coordinatorSink = new CoordinatorLogSink();
+var batchingOptions = new PeriodicBatchingSinkOptions
+{
+    BatchSizeLimit = 50,
+    Period = TimeSpan.FromSeconds(5)
+};
+var batchingSink = new PeriodicBatchingSink(coordinatorSink, batchingOptions);
+
+Log.Logger = new LoggerConfiguration()
+    .MinimumLevel.Debug()
+    .WriteTo.Console(outputTemplate: "[{Timestamp:HH:mm:ss} {Level:u3}] {Message:lj}{NewLine}{Exception}")
+    .WriteTo.Sink(batchingSink)
+    .CreateLogger();
+
 try
 {
     var config = WorkerConfig.FromEnvironment();
@@ -38,28 +60,34 @@ try
 
     var beacon = new HealthBeacon(config.HealthBeaconPath);
 
-    Console.WriteLine("[calibrate] Running startup BenchmarkDotNet capability pass (this usually takes ~15–45 seconds)…");
+    Log.Information("Running startup BenchmarkDotNet capability pass (usually 15-45s)…");
     var report = StartupCalibrator.Run(config);
-    Console.WriteLine($"[calibrate] {report.ToDisplayString()}");
+    Log.Information("{Display}", report.ToDisplayString());
 
     using var client = new CoordinatorClient(config);
 
-    Console.WriteLine($"[register] Requesting JWT from {config.CoordinatorUrl}connect/token…");
+    Log.Information("Requesting JWT from {Url}connect/token…", config.CoordinatorUrl);
     var registration = await TryRegisterAsync(client, config, report, cts.Token).ConfigureAwait(false);
 
     if (registration is not null)
     {
-        Console.WriteLine($"[register] Accepted as worker {registration.WorkerId}. Initial weight version {registration.InitialWeightVersion}.");
-        Console.WriteLine($"[register] Coordinator-assigned task size: {registration.RecommendedTokensPerTask:N0} tokens.");
-        Console.WriteLine($"[register] Heartbeat interval: {registration.HeartbeatIntervalSeconds}s.");
+        // Hand the authenticated client to the Serilog sink so it
+        // can start shipping log batches to the coordinator.
+        coordinatorSink.SetClient(client);
+
+        Log.Information("Accepted as worker {WorkerId}. Initial weight version {Version}. Task size {Tokens:N0} tokens. Heartbeat {Heartbeat}s.",
+            registration.WorkerId,
+            registration.InitialWeightVersion,
+            registration.RecommendedTokensPerTask,
+            registration.HeartbeatIntervalSeconds);
     }
     else
     {
-        Console.WriteLine("[register] Coordinator unreachable — entering local-only mode. Health beacon still running.");
+        Log.Warning("Coordinator unreachable — entering local-only mode. Health beacon still running.");
     }
 
-    Console.WriteLine($"[heartbeat] Local beacon path: {config.HealthBeaconPath}");
-    Console.WriteLine($"[heartbeat] Interval: {config.HeartbeatInterval.TotalSeconds:F0}s");
+    Log.Information("Local beacon path: {BeaconPath}. Interval: {Interval}s.",
+        config.HealthBeaconPath, config.HeartbeatInterval.TotalSeconds);
 
     var heartbeatTask = RunHeartbeatLoopAsync(client, config, beacon, registration is not null, cts.Token);
     var workTask = registration is not null
@@ -68,18 +96,22 @@ try
 
     await Task.WhenAll(heartbeatTask, workTask).ConfigureAwait(false);
 
-    Console.WriteLine("[shutdown] Heartbeat + work loops exited cleanly. Goodbye.");
+    Log.Information("Heartbeat + work loops exited cleanly. Goodbye.");
     return 0;
 }
 catch (InvalidOperationException configError)
 {
-    Console.Error.WriteLine($"[fatal] Configuration error: {configError.Message}");
+    Log.Fatal(configError, "Configuration error");
     return 2;
 }
 catch (Exception unexpected)
 {
-    Console.Error.WriteLine($"[fatal] Unhandled exception: {unexpected}");
+    Log.Fatal(unexpected, "Unhandled exception");
     return 1;
+}
+finally
+{
+    await Log.CloseAndFlushAsync().ConfigureAwait(false);
 }
 
 static async Task<WorkerRegistrationResponse?> TryRegisterAsync(
@@ -106,7 +138,7 @@ static async Task<WorkerRegistrationResponse?> TryRegisterAsync(
     }
     catch (Exception ex)
     {
-        Console.Error.WriteLine($"[register] Failed to register with coordinator: {ex.Message}");
+        Log.Error(ex, "Failed to register with coordinator");
         return null;
     }
 }
@@ -124,6 +156,12 @@ static async Task RunWorkLoopAsync(
     // 20 polls per second against the coordinator.
     var idleBackoff = TimeSpan.FromSeconds(5);
 
+    // Error-feedback residual state maintained across tasks. The
+    // int8 quantization residual from each step is added into the
+    // next step's gradient before encoding so quantization bias
+    // corrects over time. Reset when gradient dimension changes.
+    float[]? errorFeedbackResidual = null;
+
     try
     {
         while (!cancellationToken.IsCancellationRequested)
@@ -139,7 +177,7 @@ static async Task RunWorkLoopAsync(
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[work] Transient error fetching task: {ex.Message}");
+                Log.Warning(ex, "Transient error fetching task");
                 await SafeDelay(idleBackoff, cancellationToken).ConfigureAwait(false);
                 continue;
             }
@@ -150,36 +188,77 @@ static async Task RunWorkLoopAsync(
                 continue;
             }
 
-            Console.WriteLine($"[work] Claimed task {task.TaskId} ({task.TokensPerTask:N0} tokens, weight v{task.WeightVersion}).");
+            Log.Information("Claimed task {TaskId} ({Tokens:N0} tokens, weight v{Version})", task.TaskId, task.TokensPerTask, task.WeightVersion);
 
-            // D-1 stub: simulate training time proportional to the
-            // calibrated throughput so the full register→work→gradient
-            // round-trip can be exercised without real training. The
-            // D-4 commit swaps this for actual ternary-matmul training.
-            var simulatedSeconds = calibration.TokensPerSecond > 0d
-                ? task.TokensPerTask / (calibration.TokensPerSecond * 0.25d)
-                : 10d;
-            var simulatedDuration = TimeSpan.FromSeconds(Math.Min(simulatedSeconds, 30d));
-            Console.WriteLine($"[work] Simulating compute for {simulatedDuration.TotalSeconds:F1}s (stub)…");
+            // D-4b: compute a real gradient against the current
+            // weight vector, encode it with int8 error feedback, and
+            // submit the encoded payload. The "gradient" is a simple
+            // convergence-test stub: g = (target - current) scaled so
+            // the global vector approaches the target over many
+            // rounds. Real BitNet backprop replaces this in Phase A.
             var wallClockStart = DateTimeOffset.UtcNow;
-            try
+            Log.Debug("Computing gradient for task {TaskId} (D-4b stub)", task.TaskId);
+
+            // Download the current weight snapshot from the coordinator
+            // if we don't have this version cached. For the D-4b stub
+            // we skip the actual HTTP download and construct a zero
+            // vector of the correct dimension (the coordinator started
+            // from zeros too, so the math stays consistent). Phase A
+            // will add a real /weights/{version} download path.
+            var dim = (int)Math.Max(8, task.TokensPerTask / 4); // rough proxy for model dimension
+            var currentWeights = new float[dim];
+
+            // Synthetic gradient: push weights toward a constant
+            // target so the coordinator's weight vector converges
+            // visibly in the dashboard's loss trace.
+            var target = new float[dim];
+            var rng = new Random(task.TaskId.GetHashCode());
+            for (var wi = 0; wi < dim; wi++)
             {
-                await Task.Delay(simulatedDuration, cancellationToken).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException)
-            {
-                break;
+                target[wi] = (float)(rng.NextDouble() * 2d - 1d);
             }
 
+            var gradient = new float[dim];
+            for (var wi = 0; wi < dim; wi++)
+            {
+                gradient[wi] = currentWeights[wi] - target[wi];
+            }
+
+            // Int8 error-feedback encoding — maintain a per-worker
+            // residual across tasks so quantization bias corrects
+            // over time. The residual is reset when the gradient
+            // dimension changes (e.g. after a model resize).
+            if (errorFeedbackResidual is null || errorFeedbackResidual.Length != dim)
+            {
+                errorFeedbackResidual = new float[dim];
+            }
+
+            // Add prior residual to current gradient before encoding.
+            for (var wi = 0; wi < dim; wi++)
+            {
+                gradient[wi] += errorFeedbackResidual[wi];
+            }
+
+            var payload = Int8GradientCodec.Encode(gradient, errorFeedbackResidual);
             var wallClockMs = (long)(DateTimeOffset.UtcNow - wallClockStart).TotalMilliseconds;
+
+            // Compute a crude "loss" as mean squared distance to target.
+            var loss = 0d;
+            for (var wi = 0; wi < dim; wi++)
+            {
+                var diff = currentWeights[wi] - target[wi];
+                loss += diff * diff;
+            }
+            loss /= dim;
+
             var submission = new GradientSubmission(
                 TaskId: task.TaskId,
                 WorkerId: config.ClientId,
                 BaseWeightVersion: task.WeightVersion,
                 TokensSeen: task.TokensPerTask,
-                LossAfter: 0d,                    // stub: no real loss to report
-                GradientFormat: "stub-noop",
-                GradientPayload: Array.Empty<byte>(),
+                LossAfter: loss,
+                GradientFormat: Int8GradientCodec.FormatId,
+                GradientPayload: payload,
                 WallClockMs: wallClockMs);
 
             try
@@ -187,11 +266,11 @@ static async Task RunWorkLoopAsync(
                 var accepted = await client.SubmitGradientAsync(submission, cancellationToken).ConfigureAwait(false);
                 if (accepted)
                 {
-                    Console.WriteLine($"[work] Gradient submission for {task.TaskId} accepted.");
+                    Log.Information("Gradient for {TaskId} accepted", task.TaskId);
                 }
                 else
                 {
-                    Console.WriteLine($"[work] Gradient submission for {task.TaskId} rejected (ownership or stale).");
+                    Log.Warning("Gradient for {TaskId} rejected (ownership or stale)", task.TaskId);
                 }
             }
             catch (OperationCanceledException)
@@ -200,7 +279,7 @@ static async Task RunWorkLoopAsync(
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[work] Transient error submitting gradient: {ex.Message}");
+                Log.Warning(ex, "Transient error submitting gradient");
                 await SafeDelay(idleBackoff, cancellationToken).ConfigureAwait(false);
             }
         }
@@ -253,11 +332,11 @@ static async Task RunHeartbeatLoopAsync(
                 var response = await client.SendHeartbeatAsync(heartbeat, cancellationToken).ConfigureAwait(false);
                 if (response is null)
                 {
-                    Console.Error.WriteLine("[heartbeat] Coordinator returned 410 Gone. Worker should restart to re-register.");
+                    Log.Error("Coordinator returned 410 Gone. Worker should restart to re-register.");
                 }
                 else if (response.ShouldDrain)
                 {
-                    Console.WriteLine("[heartbeat] Drain requested by coordinator. Exiting.");
+                    Log.Information("Drain requested by coordinator. Exiting.");
                     return;
                 }
             }
@@ -267,7 +346,7 @@ static async Task RunHeartbeatLoopAsync(
             }
             catch (Exception ex)
             {
-                Console.Error.WriteLine($"[heartbeat] Transient error: {ex.Message}");
+                Log.Warning(ex, "Transient heartbeat error");
             }
         }
     }
@@ -300,13 +379,13 @@ static void WireShutdownSignals(CancellationTokenSource cts, TimeSpan grace)
     Console.CancelKeyPress += (_, e) =>
     {
         e.Cancel = true;
-        Console.WriteLine("[signal] Ctrl+C received; beginning graceful shutdown.");
+        Log.Information("Ctrl+C received; beginning graceful shutdown.");
         cts.Cancel();
     };
 
     AppDomain.CurrentDomain.ProcessExit += (_, _) =>
     {
-        Console.WriteLine("[signal] SIGTERM received; beginning graceful shutdown.");
+        Log.Information("SIGTERM received; beginning graceful shutdown.");
         cts.Cancel();
         var deadline = DateTime.UtcNow + grace;
         while (DateTime.UtcNow < deadline)

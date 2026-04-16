@@ -253,6 +253,19 @@ internal sealed class CoordinatorClient : IDisposable
         return false; // Unreachable; EnsureSuccessStatusCode throws.
     }
 
+    /// <summary>
+    /// Low-level send for the log sink that needs to attach its
+    /// own Authorization header and body. Exposes the raw
+    /// <see cref="HttpResponseMessage"/> so the caller can handle
+    /// status codes however it pleases.
+    /// </summary>
+    internal async Task<HttpResponseMessage> SendRawAsync(
+        HttpRequestMessage request,
+        CancellationToken cancellationToken = default)
+    {
+        return await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
+    }
+
     public void Dispose()
     {
         _tokenLock.Dispose();

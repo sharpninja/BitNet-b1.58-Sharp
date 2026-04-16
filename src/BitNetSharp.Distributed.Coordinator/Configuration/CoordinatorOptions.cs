@@ -112,6 +112,18 @@ public sealed class CoordinatorOptions
     public long MaxStalenessSteps { get; set; } = 10;
 
     /// <summary>
+    /// Number of days to retain <c>gradient_events</c> telemetry
+    /// rows before the hourly prune service deletes them.
+    /// </summary>
+    public int TelemetryRetentionDays { get; set; } = 7;
+
+    /// <summary>
+    /// Number of days to retain <c>worker_logs</c> rows before the
+    /// hourly prune service deletes them.
+    /// </summary>
+    public int LogRetentionDays { get; set; } = 3;
+
+    /// <summary>
     /// List of OAuth 2.0 client-credentials clients that are allowed
     /// to authenticate as workers. Populated from environment at
     /// startup (see class remarks for env-var naming). Add one entry

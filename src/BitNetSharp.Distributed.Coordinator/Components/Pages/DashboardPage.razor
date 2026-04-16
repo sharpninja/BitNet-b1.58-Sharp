@@ -1,19 +1,18 @@
 @page "/admin/dashboard"
 @attribute [Authorize(Policy = "AdminPolicy")]
+@rendermode RenderMode.InteractiveServer
 @using BitNetSharp.Distributed.Coordinator.Cqrs.Queries
 @using BitNetSharp.Distributed.Coordinator.Persistence
 @using BitNetSharp.Distributed.Coordinator.ViewModels
 @inject DashboardPageViewModel ViewModel
 @inject NavigationManager Navigation
-
-<HeadContent>
-    <meta http-equiv="refresh" content="5" />
-</HeadContent>
+@implements IDisposable
 
 <h2>Fleet dashboard</h2>
 <p style="color:#999; font-size:12px;">
-    Auto-refreshes every 5 seconds. Window for the recent
-    rollups is the last 15 minutes of gradient submissions.
+    Live via SignalR — refreshes every 5 seconds without full page
+    reload. Recent rollups cover the last 15 minutes of gradient
+    submissions.
 </p>
 
 @if (!string.IsNullOrWhiteSpace(ViewModel.LastError))
@@ -163,8 +162,34 @@ else
 }
 
 @code {
+    private System.Threading.Timer? _refreshTimer;
+
     protected override async Task OnInitializedAsync()
     {
         await ViewModel.LoadAsync();
+
+        // Auto-refresh via a background timer every 5 seconds. The
+        // InvokeAsync + StateHasChanged combo pushes the diff over
+        // the SignalR circuit so only changed DOM elements repaint.
+        _refreshTimer = new System.Threading.Timer(async _ =>
+        {
+            try
+            {
+                await InvokeAsync(async () =>
+                {
+                    await ViewModel.LoadAsync();
+                    StateHasChanged();
+                });
+            }
+            catch
+            {
+                // Timer callback errors must not crash the circuit.
+            }
+        }, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    }
+
+    public void Dispose()
+    {
+        _refreshTimer?.Dispose();
     }
 }

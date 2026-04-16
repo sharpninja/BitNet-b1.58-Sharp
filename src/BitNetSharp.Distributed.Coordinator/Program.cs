@@ -255,7 +255,8 @@ builder.Services.AddAuthorization(options =>
     });
 });
 
-builder.Services.AddRazorComponents();
+builder.Services.AddRazorComponents()
+    .AddInteractiveServerComponents();
 
 // CQRS dispatcher + assembly scan so every ICommandHandler /
 // IQueryHandler implemented in the coordinator assembly is
@@ -278,6 +279,10 @@ builder.Services.AddTransient<LogViewerPageViewModel>();
 // Hosted service that transitions stale workers to Gone and
 // recycles timed-out task assignments back to Pending.
 builder.Services.AddHostedService<StaleSweeperService>();
+
+// Hourly prune service deletes old telemetry and log rows so the
+// SQLite database does not grow without bound.
+builder.Services.AddHostedService<TelemetryPruneService>();
 
 var app = builder.Build();
 
@@ -502,7 +507,8 @@ app.MapGet("/weights/{version:long}", (
 }).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
 
 // ── Admin Blazor UI (cookie + OIDC) ───────────────────────────────
-app.MapRazorComponents<App>();
+app.MapRazorComponents<App>()
+    .AddInteractiveServerRenderMode();
 
 // ── Account/Login POST handler ────────────────────────────────────
 // Receives the login form submission from Components/Pages/LoginPage.razor,
