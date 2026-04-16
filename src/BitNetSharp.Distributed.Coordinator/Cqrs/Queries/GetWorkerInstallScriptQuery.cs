@@ -132,6 +132,7 @@ public sealed class GetWorkerInstallScriptQueryHandler
         sb.AppendLine("if command -v docker >/dev/null 2>&1; then");
         sb.AppendLine("    echo '[installer] Using Docker worker image.'");
         sb.AppendLine("    exec docker run --rm \\");
+        sb.AppendLine("        --pull=always \\");
         sb.AppendLine("        --name \"bitnet-worker-$BITNET_CLIENT_ID\" \\");
         sb.AppendLine("        --read-only --tmpfs /tmp:size=64m,mode=1777 \\");
         sb.AppendLine("        --cap-drop ALL --security-opt no-new-privileges \\");
@@ -197,6 +198,7 @@ public sealed class GetWorkerInstallScriptQueryHandler
         sb.AppendLine("if ($docker) {");
         sb.AppendLine("    Write-Host '[installer] Using Docker worker image.'");
         sb.AppendLine("    & docker run --rm `");
+        sb.AppendLine("        --pull=always `");
         sb.AppendLine("        --name \"bitnet-worker-$($env:BITNET_CLIENT_ID)\" `");
         sb.AppendLine("        --read-only --tmpfs /tmp:size=64m,mode=1777 `");
         sb.AppendLine("        --cap-drop ALL --security-opt no-new-privileges `");
