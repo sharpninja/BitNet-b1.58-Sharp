@@ -478,6 +478,44 @@ WHERE t.state = 'Assigned'
     }
 
     /// <summary>
+    /// Counts Assigned tasks whose lease deadline has passed AND whose
+    /// owning worker's heartbeat is also stale (older than
+    /// <paramref name="staleAfter"/>). The companion counter to
+    /// <see cref="CountSoftExpiredButAlive"/>: both share the deadline
+    /// predicate, but this one fires when the worker has gone silent —
+    /// a genuine stuck/dead signal the operator should act on
+    /// (restart container, check node health).
+    ///
+    /// <para>
+    /// Also counts Assigned tasks whose <c>assigned_to</c> worker id
+    /// has no row in <c>workers</c> at all, since that means the
+    /// coordinator lost track of the worker entirely.
+    /// </para>
+    /// </summary>
+    public int CountStuckDead(TimeSpan staleAfter)
+    {
+        if (staleAfter <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(staleAfter), "Stale threshold must be positive.");
+        }
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+SELECT COUNT(1)
+FROM tasks t
+LEFT JOIN workers w ON t.assigned_to = w.worker_id
+WHERE t.state = 'Assigned'
+  AND t.deadline_at IS NOT NULL
+  AND t.deadline_at < $now
+  AND (w.worker_id IS NULL OR w.last_heartbeat < $cutoff);";
+        var nowUnix = _time.GetUtcNow().ToUnixTimeSeconds();
+        var cutoff = _time.GetUtcNow().Subtract(staleAfter).ToUnixTimeSeconds();
+        cmd.Parameters.AddWithValue("$now", nowUnix);
+        cmd.Parameters.AddWithValue("$cutoff", cutoff);
+        var result = cmd.ExecuteScalar();
+        return result is null or DBNull ? 0 : Convert.ToInt32(result, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
     /// Returns the count of tasks currently in the given state. Handy
     /// for <c>/status</c> dashboards and smoke tests.
     /// </summary>

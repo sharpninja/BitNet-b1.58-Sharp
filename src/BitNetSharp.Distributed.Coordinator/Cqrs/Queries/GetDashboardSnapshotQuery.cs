@@ -43,7 +43,13 @@ public sealed record DashboardSnapshot(
 /// still sending heartbeats — a "slow but alive" signal distinct from a
 /// stuck worker whose heartbeat is also stale.
 /// </summary>
-public sealed record TaskCounts(int Pending, int Assigned, int Done, int Failed, int SoftExpiredButAlive);
+public sealed record TaskCounts(
+    int Pending,
+    int Assigned,
+    int Done,
+    int Failed,
+    int SoftExpiredButAlive,
+    int StuckDead);
 
 public sealed record WorkerCounts(int Configured, int Active, int Draining, int Gone);
 
@@ -147,7 +153,8 @@ public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboar
             Assigned:            _workQueue.CountByState(WorkTaskState.Assigned),
             Done:                _workQueue.CountByState(WorkTaskState.Done),
             Failed:              _workQueue.CountByState(WorkTaskState.Failed),
-            SoftExpiredButAlive: _workQueue.CountSoftExpiredButAlive(staleAfter));
+            SoftExpiredButAlive: _workQueue.CountSoftExpiredButAlive(staleAfter),
+            StuckDead:           _workQueue.CountStuckDead(staleAfter));
 
         var active   = _workerStore.CountByState(WorkerState.Active);
         var draining = _workerStore.CountByState(WorkerState.Draining);

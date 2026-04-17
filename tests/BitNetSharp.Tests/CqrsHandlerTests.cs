@@ -799,6 +799,70 @@ public sealed class CqrsHandlerTests : IDisposable
     }
 
     [Fact]
+    public void CountStuckDead_counts_assigned_past_deadline_with_stale_heartbeat()
+    {
+        UpsertWorker("worker-a", _time.GetUtcNow());
+        _queueStore.EnqueuePending(NewPendingTask("sd-1"));
+        _queueStore.TryClaimNextPending("worker-a", TimeSpan.FromSeconds(30));
+
+        // Advance past both the 30-s lease and the 300-s stale threshold.
+        _time.Advance(TimeSpan.FromSeconds(600));
+
+        Assert.Equal(1, _queueStore.CountStuckDead(TimeSpan.FromSeconds(300)));
+    }
+
+    [Fact]
+    public void CountStuckDead_ignores_tasks_whose_worker_still_heartbeats()
+    {
+        UpsertWorker("worker-a", _time.GetUtcNow());
+        _queueStore.EnqueuePending(NewPendingTask("sd-2"));
+        _queueStore.TryClaimNextPending("worker-a", TimeSpan.FromSeconds(30));
+
+        _time.Advance(TimeSpan.FromSeconds(600));
+        _workerStore.TouchHeartbeat("worker-a");
+
+        Assert.Equal(0, _queueStore.CountStuckDead(TimeSpan.FromSeconds(300)));
+    }
+
+    [Fact]
+    public void CountStuckDead_counts_tasks_whose_worker_row_is_missing()
+    {
+        // Task is Assigned to a worker_id that never registered.
+        _queueStore.EnqueuePending(NewPendingTask("sd-orphan"));
+        _queueStore.TryClaimNextPending("ghost-worker", TimeSpan.FromSeconds(30));
+
+        _time.Advance(TimeSpan.FromSeconds(600));
+
+        Assert.Equal(1, _queueStore.CountStuckDead(TimeSpan.FromSeconds(300)));
+    }
+
+    [Fact]
+    public async Task GetDashboardSnapshot_surfaces_stuck_dead_count()
+    {
+        UpsertWorker("worker-a", _time.GetUtcNow());
+        _queueStore.EnqueuePending(NewPendingTask("d-stuck"));
+        _queueStore.TryClaimNextPending("worker-a", TimeSpan.FromSeconds(30));
+
+        _time.Advance(TimeSpan.FromSeconds(600));
+        // Worker does NOT heartbeat → stuck-dead.
+
+        var handler = new GetDashboardSnapshotQueryHandler(
+            _queueStore,
+            _workerStore,
+            _telemetry,
+            _weightApplication,
+            _options,
+            _time);
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(new GetDashboardSnapshotQuery(), context);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(1, result.Value!.Tasks.StuckDead);
+        Assert.Equal(0, result.Value.Tasks.SoftExpiredButAlive);
+    }
+
+    [Fact]
     public async Task GetDashboardSnapshot_surfaces_soft_expired_alive_count()
     {
         UpsertWorker("worker-a", _time.GetUtcNow());
