@@ -42,11 +42,15 @@ the detailed plans in `distributed-training.md`,
 | Stage | Status | Notes |
 |---|---|---|
 | `generate-corpus` CLI | ✅ | `TruckMateCorpusGenerator`, deterministic seed=42 |
-| Text shards (`corpus/*.txt`) | ✅ | 10 shards × 5K examples |
-| `tokenize-corpus` CLI | ✅ | `WordLevelTokenizer`, vocab=5,174 |
-| Binary shards (`corpus/tokenized/*.bin`) | ✅ | int32 LE |
-| Corpus manifest | ✅ | `corpus/manifest.json` |
+| v1 text shards (`corpus/truckmate-v1-*.txt`) | ✅ | 10 shards × 5K examples |
+| **v2 text shards (`corpus/truckmate-v2-*.txt`)** | ✅ | **20 shards × 10K examples, deployed 2026-04-17** |
+| `tokenize-corpus` CLI | ✅ | `WordLevelTokenizer`, vocab pinned at 5,174 |
+| v1 binary shards (`corpus/tokenized/truckmate-v1-*.bin`) | ✅ | int32 LE, ~1.83M tokens total |
+| **v2 binary shards (`corpus/tokenized/truckmate-v2-*.bin`)** | ✅ | **int32 LE, 7.47M tokens total (~4× v1)** |
+| Corpus manifests | ✅ | `manifest.truckmate-v1.json`, `manifest.truckmate-v2.json` |
+| `vocab.v1.json` backup | ✅ | Preserved; rollback path intact |
 | Corpus scope doc | ✅ | `docs/training-corpus-scope.md` |
+| Scaling plan v1.0 doc | ✅ | `docs/scaling-truckmate-corpus-v1.0.md` |
 | Real-ASR trace ingestion | ⚪ | Deferred — requires PII scrubbing workstream |
 | Multi-turn corpus | ⚪ | Deferred — new generator needed |
 
@@ -185,7 +189,8 @@ signal, not backfilled stubs.
 
 ### Further horizon (not sequenced)
 
-- Corpus-v2 scale (200K+ examples) to unlock `truckmate-large`.
+- ~~Corpus-v2 scale (200K+ examples) to unlock `truckmate-large`.~~ ✅ Done 2026-04-17.
+- `seed-real-tasks --shard-prefix truckmate-v2` flag to target v2 shards in seeding. Currently seeds fall back to legacy behavior.
 - Real-ASR-trace ingestion with PII scrubbing.
 - Multi-turn corpus generator.
 - Per-worker GPU support (currently CPU-only in containers).

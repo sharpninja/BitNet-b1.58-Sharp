@@ -81,9 +81,12 @@ function Resolve-RemoteDataRoot {
     Invoke-Command -ComputerName $Host -ScriptBlock {
         $regKey = 'HKLM:\SYSTEM\CurrentControlSet\Services\BitNetCoordinator'
         $env = (Get-ItemProperty -Path $regKey -Name Environment -ErrorAction SilentlyContinue).Environment
-        $dbLine = $env | Where-Object { $_ -match '^BITNET_COORDINATOR_DatabasePath=' }
+        # ASP.NET Core config keys use double-underscore notation:
+        # Coordinator__DatabasePath. Legacy BITNET_COORDINATOR_DatabasePath
+        # also supported as fallback.
+        $dbLine = $env | Where-Object { $_ -match '^(Coordinator__DatabasePath|BITNET_COORDINATOR_DatabasePath)=' }
         if (-not $dbLine) { return $null }
-        $dbPath = $dbLine -replace '^BITNET_COORDINATOR_DatabasePath=', ''
+        $dbPath = $dbLine -replace '^(Coordinator__DatabasePath|BITNET_COORDINATOR_DatabasePath)=', ''
         return (Split-Path -Parent $dbPath)
     }
 }
