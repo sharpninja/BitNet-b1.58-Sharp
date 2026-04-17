@@ -315,6 +315,24 @@ WHERE state = 'Assigned'
     }
 
     /// <summary>
+    /// Deletes pending tasks whose shard_id begins with the given
+    /// literal prefix. Used by the <c>purge-shards</c> CLI to remove
+    /// an abandoned corpus (e.g. v1) from the queue while leaving
+    /// in-flight Assigned rows alone.
+    /// </summary>
+    public int DeletePendingByShardPrefix(string shardPrefix)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(shardPrefix);
+        lock (_writeGate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "DELETE FROM tasks WHERE state = 'Pending' AND shard_id LIKE $prefix;";
+            cmd.Parameters.AddWithValue("$prefix", shardPrefix + "%");
+            return cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>
     /// Returns one entry per worker that currently owns an Assigned
     /// task. Keyed by <c>assigned_to</c>; value carries the task id and
     /// the UTC instant the claim landed. Used by the dashboard's

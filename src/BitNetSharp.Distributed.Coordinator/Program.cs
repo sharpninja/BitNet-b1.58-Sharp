@@ -102,6 +102,11 @@ if (args.Length > 0 && string.Equals(args[0], "purge-telemetry", StringCompariso
     return PurgeTelemetryCommandLine(args);
 }
 
+if (args.Length > 0 && string.Equals(args[0], "purge-shards", StringComparison.OrdinalIgnoreCase))
+{
+    return PurgeShardsCommandLine(args);
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Running under Windows Service Control Manager sets the current
@@ -1217,6 +1222,56 @@ static int PurgePendingCommandLine(string[] args)
     catch (Exception ex)
     {
         Console.Error.WriteLine($"purge-pending failed: {ex}");
+        return 1;
+    }
+}
+
+/// <summary>
+/// Deletes pending tasks whose shard_id starts with the given
+/// prefix. Use to retire an older corpus (e.g. v1) without touching
+/// Assigned rows that a worker may still be computing. Service must
+/// be stopped so the write doesn't race active claims.
+/// </summary>
+static int PurgeShardsCommandLine(string[] args)
+{
+    if (args.Length < 2 || string.IsNullOrWhiteSpace(args[1]))
+    {
+        Console.Error.WriteLine("usage: purge-shards <shard-prefix>  (e.g. purge-shards truckmate-shard)");
+        return 2;
+    }
+
+    var prefix = args[1];
+
+    try
+    {
+        var config = new ConfigurationBuilder()
+            .SetBasePath(System.IO.Path.GetDirectoryName(typeof(Program).Assembly.Location) ?? ".")
+            .AddJsonFile("appsettings.json", optional: true)
+            .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}.json", optional: true)
+            .AddEnvironmentVariables()
+            .Build();
+
+        var coordinator = new CoordinatorOptions();
+        config.GetSection(CoordinatorOptions.SectionName).Bind(coordinator);
+        if (string.IsNullOrWhiteSpace(coordinator.DatabasePath))
+        {
+            Console.Error.WriteLine("Coordinator:DatabasePath is not set.");
+            return 2;
+        }
+
+        using var store = new SqliteWorkQueueStore($"Data Source={coordinator.DatabasePath}", TimeProvider.System);
+        var deleted = store.DeletePendingByShardPrefix(prefix);
+        Console.WriteLine($"purge-shards: deleted {deleted} Pending rows with shard_id LIKE '{prefix}%'");
+        return 0;
+    }
+    catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 5)
+    {
+        Console.Error.WriteLine($"purge-shards: database locked — stop the BitNetCoordinator service first. ({ex.Message})");
+        return 2;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"purge-shards failed: {ex}");
         return 1;
     }
 }
