@@ -67,40 +67,24 @@ try
 
     using var client = new CoordinatorClient(config);
 
-    Log.Information("Registering with coordinator at {Url} as worker id {WorkerId}…",
-        config.CoordinatorUrl, config.WorkerId);
-    var registration = await TryRegisterAsync(client, config, report, cts.Token).ConfigureAwait(false);
+    // Hand the client to the Serilog sink immediately so log batches
+    // can flow as soon as auth is valid. The sink only ships when it
+    // holds a non-null client; the initial registration supervisor
+    // may take multiple retries on a cold coordinator.
+    coordinatorSink.SetClient(client);
 
-    if (registration is not null)
-    {
-        // Hand the client to the Serilog sink so it can start
-        // shipping log batches to the coordinator. Auth headers are
-        // attached by the client itself so the sink does not need
-        // to touch tokens or secrets.
-        coordinatorSink.SetClient(client);
-
-        Log.Information("Accepted as worker {WorkerId}. Initial weight version {Version}. Task size {Tokens:N0} tokens. Heartbeat {Heartbeat}s.",
-            registration.WorkerId,
-            registration.InitialWeightVersion,
-            registration.RecommendedTokensPerTask,
-            registration.HeartbeatIntervalSeconds);
-    }
-    else
-    {
-        Log.Warning("Coordinator unreachable — entering local-only mode. Health beacon still running.");
-    }
+    var gate = new RegistrationGate();
 
     Log.Information("Local beacon path: {BeaconPath}. Interval: {Interval}s.",
         config.HealthBeaconPath, config.HeartbeatInterval.TotalSeconds);
 
-    var heartbeatTask = RunHeartbeatLoopAsync(client, config, beacon, registration is not null, cts.Token);
-    var workTask = registration is not null
-        ? RunWorkLoopAsync(client, config, report, cts.Token)
-        : Task.CompletedTask;
+    var supervisorTask = RunRegistrationSupervisorAsync(client, config, report, gate, cts.Token);
+    var heartbeatTask  = RunHeartbeatLoopAsync(client, config, beacon, gate, cts.Token);
+    var workTask       = RunWorkLoopAsync(client, config, gate, cts.Token);
 
-    await Task.WhenAll(heartbeatTask, workTask).ConfigureAwait(false);
+    await Task.WhenAll(supervisorTask, heartbeatTask, workTask).ConfigureAwait(false);
 
-    Log.Information("Heartbeat + work loops exited cleanly. Goodbye.");
+    Log.Information("Supervisor + heartbeat + work loops exited cleanly. Goodbye.");
     return 0;
 }
 catch (InvalidOperationException configError)
@@ -118,7 +102,70 @@ finally
     await Log.CloseAndFlushAsync().ConfigureAwait(false);
 }
 
-static async Task<WorkerRegistrationResponse?> TryRegisterAsync(
+static async Task RunRegistrationSupervisorAsync(
+    CoordinatorClient client,
+    WorkerConfig config,
+    CapabilityReport report,
+    RegistrationGate gate,
+    CancellationToken cancellationToken)
+{
+    // Exponential backoff so a cold-booted worker hammering a dead
+    // coordinator escalates quickly from "try again in 2 s" to
+    // "try again in 30 s" without ever giving up. When registration
+    // finally succeeds the backoff resets to the floor so the NEXT
+    // outage starts from a fresh 2 s retry again.
+    var minDelay = TimeSpan.FromSeconds(2);
+    var maxDelay = TimeSpan.FromSeconds(30);
+    var delay    = minDelay;
+
+    try
+    {
+        while (!cancellationToken.IsCancellationRequested)
+        {
+            if (!gate.IsRegistered)
+            {
+                Log.Information(
+                    "Registering with coordinator at {Url} as worker {WorkerId}…",
+                    config.CoordinatorUrl,
+                    config.WorkerId);
+
+                var registration = await TryRegisterOnceAsync(client, config, report, cancellationToken)
+                    .ConfigureAwait(false);
+
+                if (registration is not null)
+                {
+                    gate.MarkRegistered();
+                    delay = minDelay;
+                    Log.Information(
+                        "Accepted as worker {WorkerId}. Weight v{Version}. Task size {Tokens:N0}. Heartbeat {Heartbeat}s.",
+                        registration.WorkerId,
+                        registration.InitialWeightVersion,
+                        registration.RecommendedTokensPerTask,
+                        registration.HeartbeatIntervalSeconds);
+                }
+                else
+                {
+                    Log.Warning(
+                        "Registration attempt failed. Retrying in {Delay:F0}s (coordinator may be restarting).",
+                        delay.TotalSeconds);
+                    await SafeDelay(delay, cancellationToken).ConfigureAwait(false);
+                    delay = TimeSpan.FromSeconds(Math.Min(maxDelay.TotalSeconds, delay.TotalSeconds * 1.5d));
+                    continue;
+                }
+            }
+
+            // Registered — park until a loss signal arrives.
+            await gate.WaitForLossAsync(cancellationToken).ConfigureAwait(false);
+            Log.Warning("Registration lost; re-registering.");
+        }
+    }
+    catch (OperationCanceledException)
+    {
+        // Expected on graceful shutdown.
+    }
+}
+
+static async Task<WorkerRegistrationResponse?> TryRegisterOnceAsync(
     CoordinatorClient client,
     WorkerConfig config,
     CapabilityReport report,
@@ -140,9 +187,16 @@ static async Task<WorkerRegistrationResponse?> TryRegisterAsync(
     {
         return await client.RegisterAsync(payload, cancellationToken).ConfigureAwait(false);
     }
+    catch (OperationCanceledException)
+    {
+        throw;
+    }
     catch (Exception ex)
     {
-        Log.Error(ex, "Failed to register with coordinator");
+        // Do not log a full stack trace every retry — the supervisor
+        // will try again shortly and the spam obscures the real
+        // recovery moment. Single-line INFO is enough.
+        Log.Warning("Register failed: {Message}", ex.Message);
         return null;
     }
 }
@@ -150,7 +204,7 @@ static async Task<WorkerRegistrationResponse?> TryRegisterAsync(
 static async Task RunWorkLoopAsync(
     CoordinatorClient client,
     WorkerConfig config,
-    CapabilityReport calibration,
+    RegistrationGate gate,
     CancellationToken cancellationToken)
 {
     // Idle backoff when the queue is empty so a worker does not hammer
@@ -174,14 +228,30 @@ static async Task RunWorkLoopAsync(
     float[]? cachedWeights = null;
     long cachedWeightsVersion = -1;
 
+    // Counter for consecutive /work failures. After too many in a
+    // row we flip the registration gate to Lost so the supervisor
+    // re-registers; this recovers from the case where the
+    // coordinator comes back with a wiped worker registry.
+    var consecutiveWorkFailures = 0;
+    const int FailuresBeforeMarkingLost = 5;
+
     try
     {
         while (!cancellationToken.IsCancellationRequested)
         {
+            // Park the work loop while the gate says we are not
+            // registered; the supervisor drives re-registration.
+            if (!gate.IsRegistered)
+            {
+                await SafeDelay(TimeSpan.FromSeconds(1), cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
             WorkTaskAssignment? task;
             try
             {
                 task = await client.TryClaimWorkAsync(cancellationToken).ConfigureAwait(false);
+                consecutiveWorkFailures = 0;
             }
             catch (OperationCanceledException)
             {
@@ -189,7 +259,19 @@ static async Task RunWorkLoopAsync(
             }
             catch (Exception ex)
             {
-                Log.Warning(ex, "Transient error fetching task");
+                consecutiveWorkFailures++;
+                Log.Warning(
+                    "Transient error fetching task ({Count}/{Limit}): {Message}",
+                    consecutiveWorkFailures,
+                    FailuresBeforeMarkingLost,
+                    ex.Message);
+                if (consecutiveWorkFailures >= FailuresBeforeMarkingLost)
+                {
+                    Log.Warning("Coordinator unreachable for {Count} polls — flipping to unregistered so supervisor re-registers.",
+                        consecutiveWorkFailures);
+                    gate.MarkLost();
+                    consecutiveWorkFailures = 0;
+                }
                 await SafeDelay(idleBackoff, cancellationToken).ConfigureAwait(false);
                 continue;
             }
@@ -354,7 +436,7 @@ static async Task RunHeartbeatLoopAsync(
     CoordinatorClient client,
     WorkerConfig config,
     HealthBeacon beacon,
-    bool registered,
+    RegistrationGate gate,
     CancellationToken cancellationToken)
 {
     using var timer = new PeriodicTimer(config.HeartbeatInterval);
@@ -364,8 +446,10 @@ static async Task RunHeartbeatLoopAsync(
         {
             beacon.Touch();
 
-            if (!registered)
+            if (!gate.IsRegistered)
             {
+                // Supervisor owns registration; heartbeat is a no-op
+                // while we wait for it to land.
                 continue;
             }
 
@@ -380,7 +464,11 @@ static async Task RunHeartbeatLoopAsync(
                 var response = await client.SendHeartbeatAsync(heartbeat, cancellationToken).ConfigureAwait(false);
                 if (response is null)
                 {
-                    Log.Error("Coordinator returned 410 Gone. Worker should restart to re-register.");
+                    // 410 Gone — the coordinator wiped the row, e.g.
+                    // because it restarted with an empty registry.
+                    // Flip the gate so the supervisor re-registers.
+                    Log.Warning("Coordinator returned 410 Gone. Re-registering.");
+                    gate.MarkLost();
                 }
                 else if (response.ShouldDrain)
                 {
@@ -394,7 +482,10 @@ static async Task RunHeartbeatLoopAsync(
             }
             catch (Exception ex)
             {
-                Log.Warning(ex, "Transient heartbeat error");
+                // Network-level heartbeat errors are common during a
+                // coordinator restart; the work loop's failure
+                // counter will flip the gate if they persist.
+                Log.Warning("Transient heartbeat error: {Message}", ex.Message);
             }
         }
     }

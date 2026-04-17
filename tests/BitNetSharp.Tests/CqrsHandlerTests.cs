@@ -528,6 +528,109 @@ public sealed class CqrsHandlerTests : IDisposable
         Assert.Equal(0, result.Value.Failed);
     }
 
+    // ── GetDashboardSnapshotQuery ───────────────────────────────────
+
+    [Fact]
+    public async Task GetDashboardSnapshot_reports_progress_and_eta_from_live_window()
+    {
+        _workerStore.Upsert(new WorkerRecord(
+            WorkerId: "worker-alpha",
+            Name: "alpha",
+            CpuThreads: 4,
+            TokensPerSecond: 1000d,
+            RecommendedTokensPerTask: 150_016L,
+            ProcessArchitecture: "X64",
+            OsDescription: "TestOS",
+            RegisteredAtUtc: _time.GetUtcNow(),
+            LastHeartbeatUtc: _time.GetUtcNow(),
+            State: WorkerState.Active));
+
+        // Queue: 3 pending + 1 assigned + 2 done.
+        _queueStore.EnqueuePending(NewPendingTask("d-1"));
+        _queueStore.EnqueuePending(NewPendingTask("d-2"));
+        _queueStore.EnqueuePending(NewPendingTask("d-3"));
+        _queueStore.EnqueuePending(NewPendingTask("d-4"));
+        var done1 = _queueStore.TryClaimNextPending("worker-alpha", TimeSpan.FromMinutes(10));
+        _queueStore.MarkCompleted(done1!.TaskId, "worker-alpha");
+        var done2 = _queueStore.TryClaimNextPending("worker-alpha", TimeSpan.FromMinutes(10));
+        _queueStore.MarkCompleted(done2!.TaskId, "worker-alpha");
+        _queueStore.TryClaimNextPending("worker-alpha", TimeSpan.FromMinutes(10)); // leaves one Assigned
+
+        // Two telemetry events inside the 1-min live window so the
+        // ETA has a real rate to divide by.
+        _telemetry.RecordAccepted("worker-alpha", "d-1", 4096, 500, 0, 0.1f, 2, 1.0d);
+        _telemetry.RecordAccepted("worker-alpha", "d-2", 4096, 500, 0, 0.1f, 3, 0.9d);
+
+        var handler = new GetDashboardSnapshotQueryHandler(
+            _queueStore,
+            _workerStore,
+            _telemetry,
+            _weightApplication,
+            _time);
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(new GetDashboardSnapshotQuery(), context);
+
+        Assert.True(result.IsSuccess);
+        var snap = result.Value!;
+
+        Assert.Equal(4, snap.Progress.TotalTasks);
+        Assert.Equal(2, snap.Progress.CompletedTasks);
+        Assert.Equal(2, snap.Progress.RemainingTasks);
+        Assert.InRange(snap.Progress.PercentComplete, 0.49d, 0.51d);
+
+        // tasks/s over the 60 s live window = 2 / 60.
+        Assert.InRange(snap.Progress.TasksPerSecondLive, 0.032d, 0.034d);
+        Assert.NotNull(snap.Progress.EtaSeconds);
+        Assert.NotNull(snap.Progress.EtaUtc);
+
+        // Live window aggregate surfaces on the snapshot.
+        Assert.Equal(2, snap.LiveGlobalTelemetry.TasksCompleted);
+    }
+
+    [Fact]
+    public async Task GetDashboardSnapshot_populates_per_worker_live_columns()
+    {
+        _workerStore.Upsert(new WorkerRecord(
+            WorkerId: "worker-alpha",
+            Name: "alpha",
+            CpuThreads: 4,
+            TokensPerSecond: 1000d,
+            RecommendedTokensPerTask: 150_016L,
+            ProcessArchitecture: "X64",
+            OsDescription: "TestOS",
+            RegisteredAtUtc: _time.GetUtcNow(),
+            LastHeartbeatUtc: _time.GetUtcNow(),
+            State: WorkerState.Active));
+
+        _queueStore.EnqueuePending(NewPendingTask("live-1"));
+        var claimed = _queueStore.TryClaimNextPending("worker-alpha", TimeSpan.FromMinutes(10));
+        Assert.NotNull(claimed);
+
+        _telemetry.RecordAccepted("worker-alpha", "live-1", 4096, 500, 0, 0.1f, 2, 1.0d);
+
+        var handler = new GetDashboardSnapshotQueryHandler(
+            _queueStore,
+            _workerStore,
+            _telemetry,
+            _weightApplication,
+            _time);
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(new GetDashboardSnapshotQuery(), context);
+
+        Assert.True(result.IsSuccess);
+        var row = Assert.Single(result.Value!.WorkerRows);
+        Assert.Equal("worker-alpha", row.ClientId);
+        Assert.Equal(1, row.LiveTasksCompleted);
+        Assert.Equal(4096L, row.LiveTokensSeen);
+        Assert.True(row.LiveTokensPerSecond > 0d);
+        // Because the task is Assigned and live, CurrentTaskId should surface.
+        Assert.Equal("live-1", row.CurrentTaskId);
+        Assert.NotNull(row.CurrentTaskStartedUtc);
+        Assert.NotNull(row.SecondsOnCurrentTask);
+    }
+
     [Fact]
     public async Task EnqueueTasks_defaults_stride_to_tokens_per_task()
     {

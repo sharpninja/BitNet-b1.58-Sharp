@@ -4,15 +4,24 @@
 # worker secrets, stores them in the service's Environment registry
 # key (REG_MULTI_SZ), and starts the service.
 #
+# Pass -NoStart to install + populate env but leave the service in
+# Stopped state (manual start via sc.exe start BitNetCoordinator).
+#
 # Requires elevated privileges on PAYTON-DESKTOP (sc.exe + registry
 # writes under HKLM\SYSTEM\CurrentControlSet\Services). The
 # remoteadmin user on PAYTON-DESKTOP has admin rights by design.
+
+param(
+    [switch]$NoStart,
+    [switch]$SkipGitPull
+)
 
 $ErrorActionPreference = 'Stop'
 
 function New-Secret {
     $bytes = New-Object byte[] 32
-    [System.Security.Cryptography.RandomNumberGenerator]::Fill($bytes)
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try { $rng.GetBytes($bytes) } finally { $rng.Dispose() }
     return [Convert]::ToBase64String($bytes).Replace('+','-').Replace('/','_').TrimEnd('=')
 }
 
@@ -46,7 +55,7 @@ Write-Host "  admin password : $adminPassword"
 $remote = Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
     param(
         $serviceName, $port, $apiKey,
-        $adminUser, $adminPass, $baseUrl)
+        $adminUser, $adminPass, $baseUrl, $skipStart, $skipPull)
 
     $ErrorActionPreference = 'Stop'
 
@@ -84,7 +93,9 @@ $remote = Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
 
     # ── 3. Pull latest source + rebuild Release ──────────────────
     Set-Location 'F:\GitHub\BitNet-b1.58-Sharp'
-    $pull = (git fetch origin 2>&1) + "`n" + (git reset --hard origin/main 2>&1)
+    if (-not $skipPull) {
+        $pull = (git fetch origin 2>&1) + "`n" + (git reset --hard origin/main 2>&1)
+    }
     $head = (git rev-parse --short HEAD).Trim()
 
     $buildOut = & dotnet build 'src/BitNetSharp.Distributed.Coordinator/BitNetSharp.Distributed.Coordinator.csproj' -c Release -v:minimal 2>&1
@@ -154,13 +165,17 @@ $remote = Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
         }
     } catch { Write-Warning "firewall: $_" }
 
-    # ── 7. Start the service ────────────────────────────────────
-    & sc.exe start $serviceName | Out-Null
-    Start-Sleep -Seconds 4
+    # ── 7. Start the service (skipped when -NoStart) ────────────
+    if (-not $skipStart) {
+        & sc.exe start $serviceName | Out-Null
+        Start-Sleep -Seconds 4
+    }
 
     $svc = Get-Service -Name $serviceName -ErrorAction SilentlyContinue
-    $listen = Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue |
-              Select-Object -First 1 LocalAddress, LocalPort, OwningProcess
+    $listen = if ($skipStart) { $null } else {
+        Get-NetTCPConnection -State Listen -LocalPort $port -ErrorAction SilentlyContinue |
+            Select-Object -First 1 LocalAddress, LocalPort, OwningProcess
+    }
 
     [PSCustomObject]@{
         GitHead     = $head
@@ -169,7 +184,7 @@ $remote = Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
         Status      = if ($svc) { $svc.Status.ToString() } else { 'missing' }
         Listener    = $listen
     }
-} -ArgumentList $serviceName, $coordinatorPort, $workerApiKey, $adminUsername, $adminPassword, $baseUrl
+} -ArgumentList $serviceName, $coordinatorPort, $workerApiKey, $adminUsername, $adminPassword, $baseUrl, $NoStart.IsPresent, $SkipGitPull.IsPresent
 
 Write-Host ''
 Write-Host '── Service install result ────────────────────────────────────'

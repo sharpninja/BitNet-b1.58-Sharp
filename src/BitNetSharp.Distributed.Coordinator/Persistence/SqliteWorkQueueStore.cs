@@ -274,6 +274,42 @@ WHERE state = 'Assigned'
     }
 
     /// <summary>
+    /// Returns one entry per worker that currently owns an Assigned
+    /// task. Keyed by <c>assigned_to</c>; value carries the task id and
+    /// the UTC instant the claim landed. Used by the dashboard's
+    /// per-worker live view so each row can show which task is in
+    /// flight and how long it has been running.
+    /// </summary>
+    public IReadOnlyDictionary<string, AssignedTaskInfo> ListAssignedByWorker()
+    {
+        var results = new Dictionary<string, AssignedTaskInfo>(StringComparer.Ordinal);
+        using var cmd = _connection.CreateCommand();
+        // A worker may technically have more than one Assigned row if
+        // a lease got extended manually; show the most recently
+        // assigned one.
+        cmd.CommandText = @"
+SELECT assigned_to, task_id, assigned_at
+FROM tasks
+WHERE state = 'Assigned' AND assigned_to IS NOT NULL
+ORDER BY assigned_at DESC;";
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            var clientId = reader.GetString(0);
+            if (results.ContainsKey(clientId))
+            {
+                continue;
+            }
+            var taskId = reader.GetString(1);
+            var assignedAt = reader.IsDBNull(2)
+                ? (DateTimeOffset?)null
+                : DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(2));
+            results[clientId] = new AssignedTaskInfo(taskId, assignedAt);
+        }
+        return results;
+    }
+
+    /// <summary>
     /// Returns the count of tasks currently in the given state. Handy
     /// for <c>/status</c> dashboards and smoke tests.
     /// </summary>
@@ -344,3 +380,9 @@ FROM tasks WHERE task_id = $task_id;";
         _connection.Dispose();
     }
 }
+
+/// <summary>
+/// A snapshot of the task a worker currently holds an Assigned lease
+/// on. Used by the dashboard to render per-worker live progress.
+/// </summary>
+public sealed record AssignedTaskInfo(string TaskId, DateTimeOffset? AssignedAtUtc);

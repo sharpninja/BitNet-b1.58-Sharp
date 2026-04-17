@@ -10,9 +10,9 @@
 
 <h2>Fleet dashboard</h2>
 <p style="color:#999; font-size:12px;">
-    Live via SignalR — refreshes every 5 seconds without full page
-    reload. Recent rollups cover the last 15 minutes of gradient
-    submissions.
+    Auto-refresh every 2 s over the InteractiveServer circuit — only
+    changed cells repaint. "Live" numbers roll up the last 1 min;
+    "Recent" numbers roll up the last 15 min.
 </p>
 
 @if (!string.IsNullOrWhiteSpace(ViewModel.LastError))
@@ -27,6 +27,37 @@
 else
 {
     var s = ViewModel.Snapshot;
+    var pct = s.Progress.PercentComplete * 100d;
+    <section style="margin-top:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:baseline;">
+            <strong>Overall progress</strong>
+            <span style="color:#aaa; font-family:ui-monospace,monospace;">
+                @s.Progress.CompletedTasks.ToString("N0") / @s.Progress.TotalTasks.ToString("N0") done
+                — @pct.ToString("F1")%
+            </span>
+        </div>
+        <div style="background:#222; border:1px solid #333; height:18px; margin-top:4px; position:relative;">
+            <div style="background:#4caf50; height:100%; width:@(pct.ToString("F2"))%;"></div>
+        </div>
+        <div style="display:flex; gap:16px; flex-wrap:wrap; margin-top:8px; font-size:12px; color:#bbb;">
+            <span>Live rate: <strong>@s.Progress.TasksPerSecondLive.ToString("F2")</strong> tasks/s</span>
+            <span>Live tokens: <strong>@s.Progress.TokensPerSecondLive.ToString("N0")</strong> tok/s</span>
+            <span>Remaining: <strong>@s.Progress.RemainingTasks.ToString("N0")</strong></span>
+            <span>ETA:
+                @if (s.Progress.EtaSeconds is { } eta)
+                {
+                    <strong>@FormatDuration(eta)</strong>
+
+                    <text> (</text>@s.Progress.EtaUtc!.Value.ToString("u")<text>)</text>
+                }
+                else
+                {
+                    <em style="color:#888;">idle</em>
+                }
+            </span>
+        </div>
+    </section>
+
     <section style="display:flex; gap:16px; flex-wrap:wrap; margin-top:12px;">
         <div class="card">
             <div class="card-label">Weight version</div>
@@ -110,11 +141,13 @@ else
                     <th>State</th>
                     <th>Threads</th>
                     <th>Baseline tok/s</th>
-                    <th>Rec. tok/task</th>
-                    <th>Last heartbeat</th>
-                    <th>Recent tasks</th>
-                    <th>Recent tokens</th>
+                    <th>Live tok/s</th>
+                    <th>Live tasks (1m)</th>
+                    <th>Current task</th>
+                    <th>On task</th>
+                    <th>Recent tasks (15m)</th>
                     <th>Avg staleness</th>
+                    <th>Last heartbeat</th>
                     <th>Actions</th>
                 </tr>
             </thead>
@@ -127,11 +160,22 @@ else
                         <td class="@(row.State == WorkerState.Active ? "ok" : row.State == WorkerState.Gone ? "warn" : "")">@row.State</td>
                         <td>@row.CpuThreads</td>
                         <td>@row.TokensPerSecond.ToString("N0")</td>
-                        <td>@row.RecommendedTokensPerTask.ToString("N0")</td>
-                        <td>@row.LastHeartbeatUtc.ToString("u")</td>
+                        <td><strong>@row.LiveTokensPerSecond.ToString("N0")</strong></td>
+                        <td>@row.LiveTasksCompleted</td>
+                        <td>
+                            @if (row.CurrentTaskId is { } cur)
+                            {
+                                <span style="font-family:ui-monospace,monospace; font-size:11px;">@cur.Substring(0, Math.Min(8, cur.Length))…</span>
+                            }
+                            else
+                            {
+                                <em style="color:#888;">idle</em>
+                            }
+                        </td>
+                        <td>@(row.SecondsOnCurrentTask is { } secs ? FormatDuration(secs) : "—")</td>
                         <td>@row.RecentTasksCompleted</td>
-                        <td>@row.RecentTokensSeen.ToString("N0")</td>
                         <td>@row.RecentAverageStaleness.ToString("F2")</td>
+                        <td>@row.LastHeartbeatUtc.ToString("u")</td>
                         <td style="display:flex; gap:6px;">
                             <form method="post" action="@($"/admin/workers/{row.ClientId}/drain?redirect=/admin/dashboard")" style="margin:0;">
                                 <button class="btn" type="submit">Drain</button>
@@ -165,9 +209,10 @@ else
     {
         await ViewModel.LoadAsync();
 
-        // Auto-refresh via a background timer every 5 seconds. The
+        // Auto-refresh via a background timer every 2 seconds. The
         // InvokeAsync + StateHasChanged combo pushes the diff over
-        // the SignalR circuit so only changed DOM elements repaint.
+        // the InteractiveServer circuit so only changed DOM elements
+        // repaint.
         _refreshTimer = new System.Threading.Timer(async _ =>
         {
             try
@@ -182,11 +227,29 @@ else
             {
                 // Timer callback errors must not crash the circuit.
             }
-        }, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+        }, null, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
     }
 
     public void Dispose()
     {
         _refreshTimer?.Dispose();
+    }
+
+    private static string FormatDuration(double seconds)
+    {
+        if (double.IsNaN(seconds) || double.IsInfinity(seconds) || seconds < 0d)
+        {
+            return "—";
+        }
+        var span = TimeSpan.FromSeconds(seconds);
+        if (span.TotalHours >= 1d)
+        {
+            return $"{(int)span.TotalHours}h {span.Minutes}m";
+        }
+        if (span.TotalMinutes >= 1d)
+        {
+            return $"{(int)span.TotalMinutes}m {span.Seconds}s";
+        }
+        return $"{span.TotalSeconds:F1}s";
     }
 }

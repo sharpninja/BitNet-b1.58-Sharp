@@ -11,9 +11,10 @@ namespace BitNetSharp.Distributed.Coordinator.Cqrs.Queries;
 /// <summary>
 /// Query that assembles every piece of data the admin dashboard
 /// page needs into a single <see cref="DashboardSnapshot"/>.
-/// Called on every page load so the operator sees current state;
-/// a D-5 follow-up upgrade will swap the page to Blazor
-/// interactive-server render for real-time streaming.
+/// Called on every page refresh so the operator sees current state.
+/// Two rollup windows are computed: a long "Recent" window (15 min)
+/// for stable averages, and a short "Live" window (1 min) for
+/// responsive throughput / ETA numbers.
 /// </summary>
 public sealed class GetDashboardSnapshotQuery : IQuery<DashboardSnapshot>
 {
@@ -29,6 +30,8 @@ public sealed record DashboardSnapshot(
     TaskCounts Tasks,
     WorkerCounts Workers,
     GlobalTelemetryAggregate RecentGlobalTelemetry,
+    GlobalTelemetryAggregate LiveGlobalTelemetry,
+    FleetProgress Progress,
     IReadOnlyList<DashboardWorkerRow> WorkerRows,
     DateTimeOffset GeneratedAtUtc);
 
@@ -37,9 +40,35 @@ public sealed record TaskCounts(int Pending, int Assigned, int Done, int Failed)
 public sealed record WorkerCounts(int Configured, int Active, int Draining, int Gone);
 
 /// <summary>
+/// Fleet-level progress + ETA indicators computed from the short
+/// "Live" window so the dashboard reflects the current completion
+/// rate instead of a long trailing average.
+/// </summary>
+/// <param name="TotalTasks">Pending + Assigned + Done + Failed.</param>
+/// <param name="CompletedTasks">Done (does not include Failed).</param>
+/// <param name="RemainingTasks">Pending + Assigned.</param>
+/// <param name="PercentComplete">0..1 ratio, or 0 when TotalTasks = 0.</param>
+/// <param name="TasksPerSecondLive">Tasks completed / LiveWindowSeconds over the short window.</param>
+/// <param name="TokensPerSecondLive">Tokens seen / LiveWindowSeconds over the short window.</param>
+/// <param name="EtaSeconds">RemainingTasks / TasksPerSecondLive; null when the live throughput is zero.</param>
+/// <param name="EtaUtc">GeneratedAt + EtaSeconds; null when ETA is unknown.</param>
+/// <param name="LiveWindowSeconds">Width of the short window used for the live rates.</param>
+public sealed record FleetProgress(
+    int TotalTasks,
+    int CompletedTasks,
+    int RemainingTasks,
+    double PercentComplete,
+    double TasksPerSecondLive,
+    double TokensPerSecondLive,
+    double? EtaSeconds,
+    DateTimeOffset? EtaUtc,
+    double LiveWindowSeconds);
+
+/// <summary>
 /// One row on the dashboard's worker table. Combines the static
-/// registry info (id, name, cpu threads) with the recent telemetry
-/// rollup for that worker.
+/// registry info (id, name, cpu threads) with the 15-min recent
+/// telemetry rollup and a 1-min live rollup so the dashboard can
+/// show both smoothed averages and up-to-the-second throughput.
 /// </summary>
 public sealed record DashboardWorkerRow(
     string ClientId,
@@ -55,12 +84,22 @@ public sealed record DashboardWorkerRow(
     long RecentWallClockMs,
     double RecentAverageStaleness,
     double RecentAverageLossAfter,
-    DateTimeOffset? LastEventUtc);
+    DateTimeOffset? LastEventUtc,
+    long LiveTasksCompleted,
+    long LiveTokensSeen,
+    double LiveTokensPerSecond,
+    double LiveAverageStaleness,
+    string? CurrentTaskId,
+    DateTimeOffset? CurrentTaskStartedUtc,
+    double? SecondsOnCurrentTask);
 
 public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboardSnapshotQuery, DashboardSnapshot>
 {
-    /// <summary>Time window used by the dashboard's rollup aggregates.</summary>
+    /// <summary>Time window used for smoothed per-worker averages.</summary>
     public static readonly TimeSpan RecentWindow = TimeSpan.FromMinutes(15);
+
+    /// <summary>Short window driving the progress/ETA and live tok/s columns.</summary>
+    public static readonly TimeSpan LiveWindow = TimeSpan.FromMinutes(1);
 
     private readonly SqliteWorkQueueStore _workQueue;
     private readonly SqliteWorkerRegistryStore _workerStore;
@@ -87,7 +126,8 @@ public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboar
         CallContext context)
     {
         var now = _time.GetUtcNow();
-        var windowStart = now - RecentWindow;
+        var recentStart = now - RecentWindow;
+        var liveStart = now - LiveWindow;
 
         var taskCounts = new TaskCounts(
             Pending:  _workQueue.CountByState(WorkTaskState.Pending),
@@ -106,14 +146,35 @@ public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboar
             Draining:   draining,
             Gone:       gone);
 
-        var globalTelemetry = _telemetry.AggregateGlobal(windowStart);
-        var perWorker = _telemetry.AggregateByWorker(windowStart);
-        var byClient = perWorker.ToDictionary(entry => entry.ClientId, StringComparer.Ordinal);
+        var recentGlobal = _telemetry.AggregateGlobal(recentStart);
+        var liveGlobal   = _telemetry.AggregateGlobal(liveStart);
+        var recentByWorker = _telemetry.AggregateByWorker(recentStart);
+        var liveByWorker   = _telemetry.AggregateByWorker(liveStart);
+        var recentByClient = recentByWorker.ToDictionary(entry => entry.ClientId, StringComparer.Ordinal);
+        var liveByClient   = liveByWorker.ToDictionary(entry => entry.ClientId, StringComparer.Ordinal);
+        var currentByClient = _workQueue.ListAssignedByWorker();
+
+        var liveWindowSeconds = LiveWindow.TotalSeconds;
+        var progress = BuildFleetProgress(taskCounts, liveGlobal, liveWindowSeconds, now);
 
         var rows = _workerStore.ListAll()
             .Select(w =>
             {
-                byClient.TryGetValue(w.WorkerId, out var telemetry);
+                recentByClient.TryGetValue(w.WorkerId, out var recent);
+                liveByClient.TryGetValue(w.WorkerId, out var live);
+                currentByClient.TryGetValue(w.WorkerId, out var current);
+
+                var liveTokens = live?.TokensSeen ?? 0L;
+                var liveTokPerSec = liveWindowSeconds > 0d
+                    ? liveTokens / liveWindowSeconds
+                    : 0d;
+
+                double? secondsOnTask = null;
+                if (current is { AssignedAtUtc: { } assignedAt })
+                {
+                    secondsOnTask = Math.Max(0d, (now - assignedAt).TotalSeconds);
+                }
+
                 return new DashboardWorkerRow(
                     ClientId:               w.WorkerId,
                     Name:                   w.Name,
@@ -123,12 +184,19 @@ public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboar
                     RecommendedTokensPerTask: w.RecommendedTokensPerTask,
                     RegisteredAtUtc:        w.RegisteredAtUtc,
                     LastHeartbeatUtc:       w.LastHeartbeatUtc,
-                    RecentTasksCompleted:   telemetry?.TasksCompleted ?? 0,
-                    RecentTokensSeen:       telemetry?.TokensSeen ?? 0,
-                    RecentWallClockMs:      telemetry?.WallClockMs ?? 0,
-                    RecentAverageStaleness: telemetry?.AverageStaleness ?? 0d,
-                    RecentAverageLossAfter: telemetry?.AverageLossAfter ?? 0d,
-                    LastEventUtc:           telemetry?.LastEventUtc);
+                    RecentTasksCompleted:   recent?.TasksCompleted ?? 0,
+                    RecentTokensSeen:       recent?.TokensSeen ?? 0,
+                    RecentWallClockMs:      recent?.WallClockMs ?? 0,
+                    RecentAverageStaleness: recent?.AverageStaleness ?? 0d,
+                    RecentAverageLossAfter: recent?.AverageLossAfter ?? 0d,
+                    LastEventUtc:           recent?.LastEventUtc,
+                    LiveTasksCompleted:     live?.TasksCompleted ?? 0,
+                    LiveTokensSeen:         liveTokens,
+                    LiveTokensPerSecond:    liveTokPerSec,
+                    LiveAverageStaleness:   live?.AverageStaleness ?? 0d,
+                    CurrentTaskId:          current?.TaskId,
+                    CurrentTaskStartedUtc:  current?.AssignedAtUtc,
+                    SecondsOnCurrentTask:   secondsOnTask);
             })
             // Sort by most recent activity first: prefer telemetry
             // LastEventUtc (real work) and fall back to heartbeat so
@@ -138,14 +206,53 @@ public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboar
             .ToList();
 
         var snapshot = new DashboardSnapshot(
-            CurrentWeightVersion: _weights.CurrentVersion,
-            WeightDimension:      _weights.Dimension,
-            Tasks:                taskCounts,
-            Workers:              workerCounts,
-            RecentGlobalTelemetry: globalTelemetry,
-            WorkerRows:           rows,
-            GeneratedAtUtc:       now);
+            CurrentWeightVersion:  _weights.CurrentVersion,
+            WeightDimension:       _weights.Dimension,
+            Tasks:                 taskCounts,
+            Workers:               workerCounts,
+            RecentGlobalTelemetry: recentGlobal,
+            LiveGlobalTelemetry:   liveGlobal,
+            Progress:              progress,
+            WorkerRows:            rows,
+            GeneratedAtUtc:        now);
 
         return Task.FromResult(Result<DashboardSnapshot>.Success(snapshot));
+    }
+
+    private static FleetProgress BuildFleetProgress(
+        TaskCounts tasks,
+        GlobalTelemetryAggregate live,
+        double liveWindowSeconds,
+        DateTimeOffset now)
+    {
+        var total = tasks.Pending + tasks.Assigned + tasks.Done + tasks.Failed;
+        var completed = tasks.Done;
+        var remaining = tasks.Pending + tasks.Assigned;
+        var percent = total > 0 ? (double)completed / total : 0d;
+
+        var tasksPerSec = liveWindowSeconds > 0d
+            ? live.TasksCompleted / liveWindowSeconds
+            : 0d;
+        var tokensPerSec = liveWindowSeconds > 0d
+            ? live.TokensSeen / liveWindowSeconds
+            : 0d;
+
+        double? etaSeconds = tasksPerSec > 0d && remaining > 0
+            ? remaining / tasksPerSec
+            : (double?)null;
+        DateTimeOffset? etaUtc = etaSeconds.HasValue
+            ? now.AddSeconds(etaSeconds.Value)
+            : (DateTimeOffset?)null;
+
+        return new FleetProgress(
+            TotalTasks:          total,
+            CompletedTasks:      completed,
+            RemainingTasks:      remaining,
+            PercentComplete:     percent,
+            TasksPerSecondLive:  tasksPerSec,
+            TokensPerSecondLive: tokensPerSec,
+            EtaSeconds:          etaSeconds,
+            EtaUtc:              etaUtc,
+            LiveWindowSeconds:   liveWindowSeconds);
     }
 }

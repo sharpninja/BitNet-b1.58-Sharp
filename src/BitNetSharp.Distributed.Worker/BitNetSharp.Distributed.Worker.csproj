@@ -23,6 +23,7 @@
   <ItemGroup>
     <ProjectReference Include="..\BitNetSharp.Core\BitNetSharp.Core.csproj" />
     <ProjectReference Include="..\BitNetSharp.Distributed.Contracts\BitNetSharp.Distributed.Contracts.csproj" />
+    <InternalsVisibleTo Include="BitNetSharp.Tests" />
   </ItemGroup>
 
   <ItemGroup>
