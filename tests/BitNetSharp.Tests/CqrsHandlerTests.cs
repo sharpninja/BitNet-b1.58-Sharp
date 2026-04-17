@@ -1,5 +1,6 @@
 #if NET10_0_OR_GREATER
 using System;
+using System.Buffers.Binary;
 using System.IO;
 using System.Threading.Tasks;
 using BitNetSharp.Distributed.Contracts;
@@ -401,6 +402,48 @@ public sealed class CqrsHandlerTests : IDisposable
     }
 
     [Fact]
+    public async Task SubmitGradient_rejects_non_finite_decoded_elements()
+    {
+        _queueStore.EnqueuePending(NewPendingTask("task-nan"));
+        _queueStore.TryClaimNextPending("worker-alpha", TimeSpan.FromMinutes(10));
+
+        // Codec guards scale finite/non-negative (Int8GradientCodec.cs:169)
+        // but decoded = quant * scale can still overflow to +/-Infinity
+        // when scale is finite-but-huge. Craft a payload with scale=1e38
+        // and max-quant bytes so every decoded element overflows.
+        var count = _weightApplication.Dimension;
+        var payload = new byte[Int8GradientCodec.HeaderSize + count];
+        var span = payload.AsSpan();
+        BinaryPrimitives.WriteUInt32LittleEndian(span[..4], Int8GradientCodec.Magic);
+        BinaryPrimitives.WriteInt32LittleEndian(span.Slice(4, 4), count);
+        BinaryPrimitives.WriteSingleLittleEndian(span.Slice(8, 4), 1e38f);
+        for (var i = 0; i < count; i++)
+        {
+            payload[Int8GradientCodec.HeaderSize + i] = unchecked((byte)(sbyte)127);
+        }
+
+        var handler = BuildGradientHandler();
+        var command = new SubmitGradientCommand(
+            "worker-alpha",
+            new GradientSubmission(
+                TaskId: "task-nan",
+                WorkerId: "worker-alpha",
+                BaseWeightVersion: 1,
+                TokensSeen: 0,
+                LossAfter: 0,
+                GradientFormat: Int8GradientCodec.FormatId,
+                GradientPayload: payload,
+                WallClockMs: 0));
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(command, context);
+
+        Assert.True(result.IsFailure);
+        Assert.Contains(SubmitGradientCommandHandler.InvalidNumericCode, result.Error);
+        Assert.Equal(0, _queueStore.CountByState(WorkTaskState.Done));
+    }
+
+    [Fact]
     public async Task SubmitGradient_rejects_unknown_format()
     {
         _queueStore.EnqueuePending(NewPendingTask("task-unknown-fmt"));
@@ -605,6 +648,7 @@ public sealed class CqrsHandlerTests : IDisposable
             _workerStore,
             _telemetry,
             _weightApplication,
+            new PruneHealth(),
             _options,
             _time);
 
@@ -654,6 +698,7 @@ public sealed class CqrsHandlerTests : IDisposable
             _workerStore,
             _telemetry,
             _weightApplication,
+            new PruneHealth(),
             _options,
             _time);
 
@@ -886,6 +931,7 @@ public sealed class CqrsHandlerTests : IDisposable
             _workerStore,
             _telemetry,
             _weightApplication,
+            new PruneHealth(),
             _options,
             _time);
 
@@ -912,6 +958,7 @@ public sealed class CqrsHandlerTests : IDisposable
             _workerStore,
             _telemetry,
             _weightApplication,
+            new PruneHealth(),
             _options,
             _time);
 

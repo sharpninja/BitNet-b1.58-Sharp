@@ -140,6 +140,41 @@ public sealed class FileSystemWeightStoreTests : IDisposable
     }
 
     [Fact]
+    public void Orphan_bin_without_sidecar_is_not_visible_to_readers()
+    {
+        // Simulates a crash with the OLD ordering (rename bin, then
+        // write sha). Directly drop a .bin file with no sidecar and
+        // confirm TryGetManifest + TryOpenReadStream both treat the
+        // version as absent so workers don't stream a blob whose
+        // integrity we can't verify.
+        var binPath = Path.Combine(_root, "v0000000042.bin");
+        File.WriteAllBytes(binPath, new byte[] { 1, 2, 3 });
+
+        Assert.Null(_store.TryGetManifest(42));
+        Assert.Null(_store.TryOpenReadStream(42));
+    }
+
+    [Fact]
+    public void SaveVersion_recovers_when_orphan_sidecar_exists_without_bin()
+    {
+        // Simulates a crash with the NEW ordering (write sha first,
+        // then rename bin). An orphan .sha256 alone must not block
+        // the next SaveVersion for the same version from succeeding;
+        // the save overwrites the sha as part of its normal flow.
+        var binPath = Path.Combine(_root, "v0000000009.bin");
+        var shaPath = binPath + ".sha256";
+        File.WriteAllText(shaPath, "stale-hash-from-crashed-save", Encoding.ASCII);
+
+        var payload = SamplePayload(9, 128);
+        var manifest = _store.SaveVersion(9, payload);
+
+        Assert.True(File.Exists(binPath));
+        Assert.True(File.Exists(shaPath));
+        Assert.Equal(Sha256Hex(payload), manifest.Sha256Hex);
+        Assert.Equal(manifest.Sha256Hex, File.ReadAllText(shaPath, Encoding.ASCII).Trim());
+    }
+
+    [Fact]
     public void Constructor_creates_root_directory_if_missing()
     {
         var fresh = Path.Combine(_root, "sub", "fresh");

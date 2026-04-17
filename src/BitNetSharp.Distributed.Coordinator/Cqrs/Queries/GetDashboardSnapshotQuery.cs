@@ -35,6 +35,7 @@ public sealed record DashboardSnapshot(
     GlobalTelemetryAggregate LiveGlobalTelemetry,
     FleetProgress Progress,
     IReadOnlyList<DashboardWorkerRow> WorkerRows,
+    PruneHealthSnapshot PruneHealth,
     DateTimeOffset GeneratedAtUtc);
 
 /// <summary>
@@ -119,6 +120,7 @@ public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboar
     private readonly SqliteWorkerRegistryStore _workerStore;
     private readonly SqliteTelemetryStore _telemetry;
     private readonly WeightApplicationService _weights;
+    private readonly PruneHealth _pruneHealth;
     private readonly IOptionsMonitor<CoordinatorOptions> _options;
     private readonly TimeProvider _time;
 
@@ -127,6 +129,7 @@ public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboar
         SqliteWorkerRegistryStore workerStore,
         SqliteTelemetryStore telemetry,
         WeightApplicationService weights,
+        PruneHealth pruneHealth,
         IOptionsMonitor<CoordinatorOptions> options,
         TimeProvider time)
     {
@@ -134,6 +137,7 @@ public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboar
         _workerStore = workerStore;
         _telemetry = telemetry;
         _weights = weights;
+        _pruneHealth = pruneHealth;
         _options = options;
         _time = time;
     }
@@ -238,6 +242,7 @@ public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboar
             LiveGlobalTelemetry:   liveGlobal,
             Progress:              progress,
             WorkerRows:            rows,
+            PruneHealth:           _pruneHealth.Snapshot(),
             GeneratedAtUtc:        now);
 
         return Task.FromResult(Result<DashboardSnapshot>.Success(snapshot));

@@ -65,9 +65,14 @@ public sealed class FileSystemWeightStore
                     $"Weight version {version} already exists at {binPath}. Coordinator weight versions are immutable.");
             }
 
-            // Write payload atomically via a staging file then rename
-            // so a crash mid-write cannot leave a half-written version
-            // visible to /weights/{version} readers.
+            // Write payload to a staging file, then commit in an order
+            // that preserves the invariant "if .bin is visible, .sha256
+            // is too": staging bin → write .sha256 → rename .tmp to .bin
+            // last. A crash between the sha write and the bin rename
+            // leaves an orphan .sha256 with no .bin; the next save for
+            // the same version overwrites the sha during its own step,
+            // and readers see "version absent" via TryGetManifest (which
+            // requires both files).
             var stagingPath = binPath + ".tmp";
             try
             {
@@ -76,10 +81,10 @@ public sealed class FileSystemWeightStore
                     stream.Write(payload);
                 }
 
-                File.Move(stagingPath, binPath);
-
                 var hash = Sha256Hex(payload);
                 File.WriteAllText(shaPath, hash, Encoding.ASCII);
+
+                File.Move(stagingPath, binPath);
                 return new WeightVersionManifest(version, binPath, payload.Length, hash);
             }
             catch
@@ -87,6 +92,15 @@ public sealed class FileSystemWeightStore
                 if (File.Exists(stagingPath))
                 {
                     File.Delete(stagingPath);
+                }
+
+                // If we wrote the sidecar but never published the bin,
+                // clean up so a later ListVersions sweep doesn't trip
+                // over an orphan. Leaving it would also be safe (the
+                // next SaveVersion overwrites it), but tidy is better.
+                if (File.Exists(shaPath) && !File.Exists(binPath))
+                {
+                    try { File.Delete(shaPath); } catch { /* best-effort */ }
                 }
 
                 throw;

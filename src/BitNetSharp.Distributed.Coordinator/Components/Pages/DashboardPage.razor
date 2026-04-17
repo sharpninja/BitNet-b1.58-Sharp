@@ -27,6 +27,21 @@
 else
 {
     var s = ViewModel.Snapshot;
+    @if (s.PruneHealth.ConsecutiveFailures > 0)
+    {
+        <p class="warn" style="border:1px solid #a33; padding:6px 8px;">
+            <strong>Prune service unhealthy:</strong>
+            @s.PruneHealth.ConsecutiveFailures consecutive failure(s).
+            @if (!string.IsNullOrWhiteSpace(s.PruneHealth.LastFailureMessage))
+            {
+                <span> Last error: <code>@s.PruneHealth.LastFailureMessage</code></span>
+            }
+            @if (s.PruneHealth.LastFailureAtUtc is { } at)
+            {
+                <span style="color:#aaa;"> (@at.ToString("u"))</span>
+            }
+        </p>
+    }
     var pct = s.Progress.PercentComplete * 100d;
     <section style="margin-top:12px;">
         <div style="display:flex; justify-content:space-between; align-items:baseline;">
@@ -79,6 +94,12 @@ else
         <div class="card" title="Assigned tasks whose lease deadline has passed AND whose worker's heartbeat is also stale — genuinely stuck, operator action likely needed.">
             <div class="card-label">Stuck (dead)</div>
             <div class="card-value @(s.Tasks.StuckDead == 0 ? "" : "warn")">@s.Tasks.StuckDead</div>
+            @if (s.Tasks.StuckDead > 0)
+            {
+                <form method="post" action="/admin/tasks/kick-stuck-form" data-enhance="false" style="margin-top:6px;">
+                    <button type="submit" class="btn" title="Release stuck-dead Assigned tasks back to Pending">Kick</button>
+                </form>
+            }
         </div>
         <div class="card">
             <div class="card-label">Done</div>
@@ -145,7 +166,7 @@ else
             <label>Filter by state:
                 <select id="worker-filter" onchange="bitnetWorkerGrid.applyFilter(this.value)" style="padding:4px;">
                     <option value="">all</option>
-                    <option value="Active">Active</option>
+                    <option value="Active" selected>Active</option>
                     <option value="Draining">Draining</option>
                     <option value="Gone">Gone</option>
                 </select>

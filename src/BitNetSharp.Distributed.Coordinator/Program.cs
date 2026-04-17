@@ -303,7 +303,11 @@ builder.Services.AddTransient<TaskBrowserPageViewModel>();
 builder.Services.AddHostedService<StaleSweeperService>();
 
 // Hourly prune service deletes old telemetry and log rows so the
-// SQLite database does not grow without bound.
+// SQLite database does not grow without bound. PruneHealth is the
+// singleton the service writes its success/failure stats into; the
+// dashboard snapshot reads the same singleton to show a warn banner
+// when the prune loop has started failing.
+builder.Services.AddSingleton<PruneHealth>();
 builder.Services.AddHostedService<TelemetryPruneService>();
 
 var app = builder.Build();
@@ -716,6 +720,34 @@ app.MapPost("/admin/tasks/enqueue-form", async (
 
     var errorUrl = $"/admin/tasks?error={Uri.EscapeDataString(result.Error ?? "unknown")}";
     return Results.Redirect(errorUrl);
+}).RequireAuthorization("AdminPolicy").DisableAntiforgery();
+
+app.MapPost("/admin/tasks/requeue-failed-form", async (IDispatcher dispatcher) =>
+{
+    var result = await dispatcher
+        .SendAsync<RequeueFailedTasksResult>(new RequeueFailedTasksCommand())
+        .ConfigureAwait(false);
+
+    if (result.IsSuccess)
+    {
+        return Results.Redirect($"/admin/tasks?requeued={Uri.EscapeDataString(result.Value!.Requeued.ToString(System.Globalization.CultureInfo.InvariantCulture))}");
+    }
+
+    return Results.Redirect($"/admin/tasks?error={Uri.EscapeDataString(result.Error ?? "unknown")}");
+}).RequireAuthorization("AdminPolicy").DisableAntiforgery();
+
+app.MapPost("/admin/tasks/kick-stuck-form", async (IDispatcher dispatcher) =>
+{
+    var result = await dispatcher
+        .SendAsync<KickStuckTasksResult>(new KickStuckTasksCommand())
+        .ConfigureAwait(false);
+
+    if (result.IsSuccess)
+    {
+        return Results.Redirect($"/admin/dashboard?kicked={Uri.EscapeDataString(result.Value!.Kicked.ToString(System.Globalization.CultureInfo.InvariantCulture))}");
+    }
+
+    return Results.Redirect($"/admin/dashboard?error={Uri.EscapeDataString(result.Error ?? "unknown")}");
 }).RequireAuthorization("AdminPolicy").DisableAntiforgery();
 
 app.Run();

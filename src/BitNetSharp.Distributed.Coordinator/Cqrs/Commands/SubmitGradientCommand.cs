@@ -57,6 +57,9 @@ public sealed class SubmitGradientCommandHandler : ICommandHandler<SubmitGradien
     /// <summary>Returned when the gradient is too stale to apply.</summary>
     public const string StaleGradientCode = "stale_gradient";
 
+    /// <summary>Returned when the decoded gradient contains NaN or Infinity.</summary>
+    public const string InvalidNumericCode = "invalid_numeric";
+
     public SubmitGradientCommandHandler(
         SqliteWorkQueueStore workQueue,
         WeightApplicationService weights,
@@ -107,6 +110,25 @@ public sealed class SubmitGradientCommandHandler : ICommandHandler<SubmitGradien
             {
                 return Task.FromResult(Result<GradientAcceptance>.Failure(
                     $"{InvalidPayloadCode}: {decodeError}"));
+            }
+
+            // Codec guards scale finite/non-negative, but decoded = quant*scale
+            // can still overflow to +/-Infinity when scale is finite-but-huge.
+            // Reject before Apply so a broken/malicious worker cannot poison
+            // the global weight vector with non-finite deltas.
+            for (var i = 0; i < gradient.Length; i++)
+            {
+                if (!float.IsFinite(gradient[i]))
+                {
+                    _logger.LogWarning(
+                        "Rejected non-finite gradient from worker {ClientId} for task {TaskId}: element[{Index}]={Value}",
+                        command.ClientId,
+                        command.Submission.TaskId,
+                        i,
+                        gradient[i]);
+                    return Task.FromResult(Result<GradientAcceptance>.Failure(
+                        $"{InvalidNumericCode}: decoded gradient contains non-finite values (NaN/Infinity)."));
+                }
             }
 
             var apply = _weights.Apply(command.Submission.BaseWeightVersion, gradient);

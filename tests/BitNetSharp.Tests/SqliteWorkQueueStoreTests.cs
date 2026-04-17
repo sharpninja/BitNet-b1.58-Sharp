@@ -19,14 +19,16 @@ namespace BitNetSharp.Tests;
 public sealed class SqliteWorkQueueStoreTests : IDisposable
 {
     private readonly string _databasePath;
+    private readonly string _connectionString;
     private readonly FakeTimeProvider _time;
     private readonly SqliteWorkQueueStore _store;
 
     public SqliteWorkQueueStoreTests()
     {
         _databasePath = Path.Combine(Path.GetTempPath(), $"bitnet-wq-{Guid.NewGuid():N}.db");
+        _connectionString = $"Data Source={_databasePath}";
         _time = new FakeTimeProvider(new DateTimeOffset(2026, 4, 15, 17, 0, 0, TimeSpan.Zero));
-        _store = new SqliteWorkQueueStore($"Data Source={_databasePath}", _time);
+        _store = new SqliteWorkQueueStore(_connectionString, _time);
     }
 
     public void Dispose()
@@ -40,6 +42,22 @@ public sealed class SqliteWorkQueueStoreTests : IDisposable
     private static void TryDelete(string path)
     {
         try { if (File.Exists(path)) { File.Delete(path); } } catch { /* best-effort */ }
+    }
+
+    private WorkerRecord NewWorker(string workerId)
+    {
+        var now = _time.GetUtcNow();
+        return new WorkerRecord(
+            WorkerId: workerId,
+            Name: workerId,
+            CpuThreads: 4,
+            TokensPerSecond: 1000.0,
+            RecommendedTokensPerTask: 4096,
+            ProcessArchitecture: "X64",
+            OsDescription: "test",
+            RegisteredAtUtc: now,
+            LastHeartbeatUtc: now,
+            State: WorkerState.Active);
     }
 
     private WorkTaskRecord NewPendingTask(string taskId, long weightVersion = 1)
@@ -285,6 +303,103 @@ public sealed class SqliteWorkQueueStoreTests : IDisposable
         Assert.NotNull(reclaimed);
         Assert.Equal(2, reclaimed!.Attempt);
         Assert.Equal("worker-fresh", reclaimed.AssignedWorkerId);
+    }
+
+    [Fact]
+    public void RequeueFailedTasks_flips_every_failed_row_back_to_pending()
+    {
+        _store.EnqueuePending(NewPendingTask("task-fail-1"));
+        _store.EnqueuePending(NewPendingTask("task-fail-2"));
+        _store.EnqueuePending(NewPendingTask("task-done"));
+
+        // Claim ordering is by created_at,task_id ASC — drain whatever
+        // actually comes back rather than assuming the insertion order.
+        var c1 = _store.TryClaimNextPending("worker-1", TimeSpan.FromMinutes(10))!;
+        var c2 = _store.TryClaimNextPending("worker-1", TimeSpan.FromMinutes(10))!;
+        var c3 = _store.TryClaimNextPending("worker-1", TimeSpan.FromMinutes(10))!;
+        Assert.True(_store.MarkFailed(c1.TaskId, "worker-1"));
+        Assert.True(_store.MarkFailed(c2.TaskId, "worker-1"));
+        Assert.True(_store.MarkCompleted(c3.TaskId, "worker-1"));
+
+        Assert.Equal(2, _store.CountByState(WorkTaskState.Failed));
+        Assert.Equal(1, _store.CountByState(WorkTaskState.Done));
+
+        var requeued = _store.RequeueFailedTasks();
+
+        Assert.Equal(2, requeued);
+        Assert.Equal(0, _store.CountByState(WorkTaskState.Failed));
+        Assert.Equal(2, _store.CountByState(WorkTaskState.Pending));
+        Assert.Equal(1, _store.CountByState(WorkTaskState.Done));
+
+        // Requeued rows must be claimable again.
+        var claim = _store.TryClaimNextPending("worker-fresh", TimeSpan.FromMinutes(5));
+        Assert.NotNull(claim);
+    }
+
+    [Fact]
+    public void RequeueFailedTasks_is_noop_when_no_failed_rows_exist()
+    {
+        _store.EnqueuePending(NewPendingTask("task-pending-only"));
+
+        Assert.Equal(0, _store.RequeueFailedTasks());
+        Assert.Equal(1, _store.CountByState(WorkTaskState.Pending));
+    }
+
+    [Fact]
+    public void KickStuckTasks_kicks_assigned_when_worker_heartbeat_stale()
+    {
+        using var workerStore = new SqliteWorkerRegistryStore(_connectionString, _time);
+        workerStore.Upsert(NewWorker("worker-ghost"));
+
+        _store.EnqueuePending(NewPendingTask("task-stuck"));
+        _store.TryClaimNextPending("worker-ghost", TimeSpan.FromMinutes(5));
+
+        // Advance time past both the lease deadline AND the stale-worker threshold.
+        // Worker heartbeat was never refreshed so it is now stale relative to $cutoff.
+        _time.Advance(TimeSpan.FromMinutes(10));
+
+        var kicked = _store.KickStuckTasks(TimeSpan.FromSeconds(60));
+
+        Assert.Equal(1, kicked);
+        Assert.Equal(1, _store.CountByState(WorkTaskState.Pending));
+        Assert.Equal(0, _store.CountByState(WorkTaskState.Assigned));
+    }
+
+    [Fact]
+    public void KickStuckTasks_leaves_assigned_with_fresh_heartbeat_alone()
+    {
+        using var workerStore = new SqliteWorkerRegistryStore(_connectionString, _time);
+        workerStore.Upsert(NewWorker("worker-alive"));
+
+        _store.EnqueuePending(NewPendingTask("task-soft"));
+        _store.TryClaimNextPending("worker-alive", TimeSpan.FromMinutes(5));
+
+        // Advance past deadline but refresh worker heartbeat so it stays alive.
+        _time.Advance(TimeSpan.FromMinutes(6));
+        workerStore.TouchHeartbeat("worker-alive");
+
+        var kicked = _store.KickStuckTasks(TimeSpan.FromSeconds(60));
+
+        Assert.Equal(0, kicked);
+        Assert.Equal(1, _store.CountByState(WorkTaskState.Assigned));
+    }
+
+    [Fact]
+    public void KickStuckTasks_kicks_assigned_when_worker_row_missing()
+    {
+        // Ensure workers table exists (registry store creates the schema),
+        // but leave it empty — simulates a worker that was never registered
+        // or was purged after its heartbeat went stale.
+        using (var _ = new SqliteWorkerRegistryStore(_connectionString, _time)) { }
+
+        _store.EnqueuePending(NewPendingTask("task-orphan"));
+        _store.TryClaimNextPending("worker-deleted", TimeSpan.FromMinutes(5));
+        _time.Advance(TimeSpan.FromMinutes(10));
+
+        var kicked = _store.KickStuckTasks(TimeSpan.FromSeconds(60));
+
+        Assert.Equal(1, kicked);
+        Assert.Equal(1, _store.CountByState(WorkTaskState.Pending));
     }
 
     [Fact]

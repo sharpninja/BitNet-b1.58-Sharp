@@ -29,6 +29,14 @@
             </tr>
         </tbody>
     </table>
+    @if (ViewModel.Snapshot.Failed > 0)
+    {
+        <form method="post" action="/admin/tasks/requeue-failed-form" data-enhance="false" style="margin-top:8px;">
+            <button type="submit" class="btn" title="Flip every Failed task back to Pending so workers can retry it">
+                Requeue @ViewModel.Snapshot.Failed failed task(s)
+            </button>
+        </form>
+    }
 </section>
 
 @if (!string.IsNullOrWhiteSpace(ViewModel.LastEnqueueSummary))

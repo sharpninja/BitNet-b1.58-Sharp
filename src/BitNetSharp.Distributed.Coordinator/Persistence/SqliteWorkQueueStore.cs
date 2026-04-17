@@ -575,6 +575,70 @@ WHERE t.state = 'Assigned'
     }
 
     /// <summary>
+    /// Bulk-requeues every <c>Failed</c> task to <c>Pending</c>,
+    /// clearing its worker assignment + deadline + completion time
+    /// so the next dequeue cycle picks it up fresh. Exposed as an
+    /// admin action on /admin/tasks for recovering from transient
+    /// worker-side failures without re-enqueuing from scratch.
+    /// Returns the count transitioned.
+    /// </summary>
+    public int RequeueFailedTasks()
+    {
+        lock (_writeGate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+UPDATE tasks
+SET state        = 'Pending',
+    assigned_to  = NULL,
+    assigned_at  = NULL,
+    deadline_at  = NULL,
+    completed_at = NULL
+WHERE state = 'Failed';";
+            return cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>
+    /// Kicks every stuck-dead <c>Assigned</c> task back to
+    /// <c>Pending</c>. Stuck-dead = deadline past AND owning worker
+    /// missing or heartbeat stale (older than
+    /// <paramref name="staleAfter"/>). Mirrors the predicate in
+    /// <see cref="CountStuckDead"/> so the dashboard card's Kick
+    /// button releases exactly the rows the card shows. Returns the
+    /// count transitioned.
+    /// </summary>
+    public int KickStuckTasks(TimeSpan staleAfter)
+    {
+        if (staleAfter <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(staleAfter), "Stale threshold must be positive.");
+        }
+        lock (_writeGate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+UPDATE tasks
+SET state        = 'Pending',
+    assigned_to  = NULL,
+    assigned_at  = NULL,
+    deadline_at  = NULL
+WHERE state = 'Assigned'
+  AND deadline_at IS NOT NULL
+  AND deadline_at < $now
+  AND (assigned_to IS NULL
+       OR assigned_to NOT IN (
+         SELECT worker_id FROM workers WHERE last_heartbeat >= $cutoff
+       ));";
+            var nowUnix = _time.GetUtcNow().ToUnixTimeSeconds();
+            var cutoff = _time.GetUtcNow().Subtract(staleAfter).ToUnixTimeSeconds();
+            cmd.Parameters.AddWithValue("$now", nowUnix);
+            cmd.Parameters.AddWithValue("$cutoff", cutoff);
+            return cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>
     /// Returns the count of tasks currently in the given state, with
     /// an optional <paramref name="excludeLegacy"/> filter that skips
     /// rows tagged via <see cref="MarkLegacyByTaskIdPrefix"/>. Handy

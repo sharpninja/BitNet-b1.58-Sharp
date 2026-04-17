@@ -20,14 +20,20 @@ public sealed class TelemetryPruneService : BackgroundService
 {
     private readonly IOptionsMonitor<CoordinatorOptions> _options;
     private readonly ILogger<TelemetryPruneService> _logger;
+    private readonly PruneHealth _health;
+    private readonly TimeProvider _time;
     private readonly string _connectionString;
 
     public TelemetryPruneService(
         IOptionsMonitor<CoordinatorOptions> options,
-        ILogger<TelemetryPruneService> logger)
+        ILogger<TelemetryPruneService> logger,
+        PruneHealth health,
+        TimeProvider time)
     {
         _options = options;
         _logger = logger;
+        _health = health;
+        _time = time;
         var coord = options.CurrentValue;
         _connectionString = $"Data Source={coord.DatabasePath};Cache=Shared";
     }
@@ -50,9 +56,11 @@ public sealed class TelemetryPruneService : BackgroundService
             try
             {
                 PruneOnce();
+                _health.RecordSuccess(_time.GetUtcNow());
             }
             catch (Exception ex)
             {
+                _health.RecordFailure(ex, _time.GetUtcNow());
                 _logger.LogWarning(ex, "Prune iteration failed; will retry in 1 hour.");
             }
         }
