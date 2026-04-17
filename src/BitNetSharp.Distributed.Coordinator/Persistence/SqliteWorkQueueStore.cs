@@ -85,6 +85,27 @@ CREATE INDEX IF NOT EXISTS ix_tasks_state_deadline
 CREATE INDEX IF NOT EXISTS ix_tasks_assigned_to
     ON tasks(assigned_to);
 ");
+
+        // v2 migration: legacy flag so the dashboard can hide historical
+        // synthetic seed rows from the progress counter without losing
+        // them. Idempotent ALTER TABLE — existing DBs upgrade in place.
+        AddColumnIfMissing("tasks", "legacy", "INTEGER NOT NULL DEFAULT 0");
+    }
+
+    private void AddColumnIfMissing(string table, string column, string typeAndConstraints)
+    {
+        using var probe = _connection.CreateCommand();
+        probe.CommandText = $"PRAGMA table_info({table});";
+        using var reader = probe.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(1), column, StringComparison.Ordinal))
+            {
+                return;
+            }
+        }
+        reader.Close();
+        ExecuteNonQuery($"ALTER TABLE {table} ADD COLUMN {column} {typeAndConstraints};");
     }
 
     /// <summary>
@@ -554,16 +575,60 @@ WHERE t.state = 'Assigned'
     }
 
     /// <summary>
-    /// Returns the count of tasks currently in the given state. Handy
-    /// for <c>/status</c> dashboards and smoke tests.
+    /// Returns the count of tasks currently in the given state, with
+    /// an optional <paramref name="excludeLegacy"/> filter that skips
+    /// rows tagged via <see cref="MarkLegacyByTaskIdPrefix"/>. Handy
+    /// for <c>/status</c> dashboards and smoke tests. The dashboard
+    /// passes <c>excludeLegacy=true</c> so historical synthetic seed
+    /// rows don't inflate the progress counter; callers that want the
+    /// full picture (admin/task browser) keep the default.
     /// </summary>
-    public int CountByState(WorkTaskState state)
+    public int CountByState(WorkTaskState state, bool excludeLegacy = false)
     {
         using var cmd = _connection.CreateCommand();
-        cmd.CommandText = "SELECT COUNT(1) FROM tasks WHERE state = $state;";
+        cmd.CommandText = excludeLegacy
+            ? "SELECT COUNT(1) FROM tasks WHERE state = $state AND legacy = 0;"
+            : "SELECT COUNT(1) FROM tasks WHERE state = $state;";
         cmd.Parameters.AddWithValue("$state", state.ToString());
         var result = cmd.ExecuteScalar();
         return result is null or DBNull ? 0 : Convert.ToInt32(result, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Sets <c>legacy=1</c> on every task whose <c>task_id</c> starts
+    /// with the given prefix. Reversible alternative to
+    /// <see cref="DeleteByTaskIdPrefixAndState"/>: the rows survive for
+    /// audit but stop counting toward the dashboard progress bar.
+    /// Returns rows affected. Idempotent (re-running marks nothing new).
+    /// </summary>
+    public int MarkLegacyByTaskIdPrefix(string taskIdPrefix)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(taskIdPrefix);
+        lock (_writeGate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "UPDATE tasks SET legacy = 1 WHERE legacy = 0 AND task_id LIKE $prefix;";
+            cmd.Parameters.AddWithValue("$prefix", taskIdPrefix + "%");
+            return cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>
+    /// Clears the legacy flag from every row whose <c>task_id</c>
+    /// starts with the given prefix. Recovery path if
+    /// <see cref="MarkLegacyByTaskIdPrefix"/> was run with the wrong
+    /// prefix. Returns rows affected.
+    /// </summary>
+    public int UnmarkLegacyByTaskIdPrefix(string taskIdPrefix)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(taskIdPrefix);
+        lock (_writeGate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "UPDATE tasks SET legacy = 0 WHERE legacy = 1 AND task_id LIKE $prefix;";
+            cmd.Parameters.AddWithValue("$prefix", taskIdPrefix + "%");
+            return cmd.ExecuteNonQuery();
+        }
     }
 
     /// <summary>

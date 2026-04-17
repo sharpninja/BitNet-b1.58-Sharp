@@ -112,6 +112,11 @@ if (args.Length > 0 && string.Equals(args[0], "purge-legacy-seed-rows", StringCo
     return PurgeLegacySeedRowsCommandLine(args);
 }
 
+if (args.Length > 0 && string.Equals(args[0], "mark-legacy", StringComparison.OrdinalIgnoreCase))
+{
+    return MarkLegacyCommandLine(args);
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Running under Windows Service Control Manager sets the current
@@ -1383,6 +1388,69 @@ static int PurgeLegacySeedRowsCommandLine(string[] args)
     catch (Exception ex)
     {
         Console.Error.WriteLine($"purge-legacy-seed-rows failed: {ex}");
+        return 1;
+    }
+}
+
+/// <summary>
+/// Reversible counterpart to <c>purge-legacy-seed-rows</c>: tags
+/// every matching task with <c>legacy=1</c> instead of deleting.
+/// The dashboard progress bar excludes legacy rows, but the task
+/// browser still sees them. Pass <c>--unmark</c> to clear the flag
+/// back to 0 (recovery path). Default prefix is <c>task-seed-</c>.
+/// Usage:
+///   mark-legacy [--prefix NAME] [--unmark]
+/// </summary>
+static int MarkLegacyCommandLine(string[] args)
+{
+    var prefix = "task-seed-";
+    var unmark = false;
+    for (var i = 1; i < args.Length; i++)
+    {
+        if (string.Equals(args[i], "--unmark", StringComparison.OrdinalIgnoreCase))
+        {
+            unmark = true;
+        }
+        else if (string.Equals(args[i], "--prefix", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+        {
+            prefix = args[i + 1];
+            i++;
+        }
+    }
+
+    try
+    {
+        var config = new ConfigurationBuilder()
+            .SetBasePath(System.IO.Path.GetDirectoryName(typeof(Program).Assembly.Location) ?? ".")
+            .AddJsonFile("appsettings.json", optional: true)
+            .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}.json", optional: true)
+            .AddEnvironmentVariables()
+            .Build();
+
+        var coordinator = new CoordinatorOptions();
+        config.GetSection(CoordinatorOptions.SectionName).Bind(coordinator);
+        if (string.IsNullOrWhiteSpace(coordinator.DatabasePath))
+        {
+            Console.Error.WriteLine("Coordinator:DatabasePath is not set.");
+            return 2;
+        }
+
+        using var store = new SqliteWorkQueueStore($"Data Source={coordinator.DatabasePath}", TimeProvider.System);
+        var affected = unmark
+            ? store.UnmarkLegacyByTaskIdPrefix(prefix)
+            : store.MarkLegacyByTaskIdPrefix(prefix);
+        var verb = unmark ? "cleared" : "tagged";
+        Console.WriteLine($"mark-legacy: {verb} {affected} rows with task_id LIKE '{prefix}%'");
+        return 0;
+    }
+    catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 5)
+    {
+        Console.Error.WriteLine($"mark-legacy: database locked — stop the BitNetCoordinator service first. ({ex.Message})");
+        return 2;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"mark-legacy failed: {ex}");
         return 1;
     }
 }

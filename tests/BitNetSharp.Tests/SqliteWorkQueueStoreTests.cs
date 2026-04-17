@@ -92,6 +92,39 @@ public sealed class SqliteWorkQueueStoreTests : IDisposable
     }
 
     [Fact]
+    public void MarkLegacyByTaskIdPrefix_excludes_rows_from_excludeLegacy_count()
+    {
+        _store.EnqueuePending(NewPendingTask("task-seed-a"));
+        _store.EnqueuePending(NewPendingTask("task-real-1"));
+
+        var marked = _store.MarkLegacyByTaskIdPrefix("task-seed-");
+
+        Assert.Equal(1, marked);
+        Assert.Equal(2, _store.CountByState(WorkTaskState.Pending));
+        Assert.Equal(1, _store.CountByState(WorkTaskState.Pending, excludeLegacy: true));
+    }
+
+    [Fact]
+    public void MarkLegacyByTaskIdPrefix_is_idempotent()
+    {
+        _store.EnqueuePending(NewPendingTask("task-seed-a"));
+        Assert.Equal(1, _store.MarkLegacyByTaskIdPrefix("task-seed-"));
+        // Re-running marks nothing — the WHERE legacy=0 guard skips already-tagged rows.
+        Assert.Equal(0, _store.MarkLegacyByTaskIdPrefix("task-seed-"));
+    }
+
+    [Fact]
+    public void UnmarkLegacyByTaskIdPrefix_restores_row_to_counter()
+    {
+        _store.EnqueuePending(NewPendingTask("task-seed-a"));
+        _store.MarkLegacyByTaskIdPrefix("task-seed-");
+        Assert.Equal(0, _store.CountByState(WorkTaskState.Pending, excludeLegacy: true));
+
+        Assert.Equal(1, _store.UnmarkLegacyByTaskIdPrefix("task-seed-"));
+        Assert.Equal(1, _store.CountByState(WorkTaskState.Pending, excludeLegacy: true));
+    }
+
+    [Fact]
     public void DeleteByTaskIdPrefixAndState_removes_matching_rows_only()
     {
         _store.EnqueuePending(NewPendingTask("task-seed-a"));

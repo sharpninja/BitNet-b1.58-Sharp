@@ -194,12 +194,20 @@ paths.
 clean. ✅
 
 ### P4 — Legacy `task-seed-*` rows
-**Status:** ⚪ product decision pending.
-**Plan:** Either hard-delete 1,605 synthetic Done rows so the
-dashboard progress reflects real training only, or tag them with a
-`legacy=1` column and exclude from the headline counter.
+**Status:** ✅ tooling shipped — product picks which knob to pull.
+**Options now available:**
+- `purge-legacy-seed-rows` CLI: dry-run by default; `--yes` hard-deletes
+  all `task-seed-*` Done rows. Irreversible.
+- `mark-legacy` CLI: tags matching rows with `legacy=1`. Dashboard
+  progress counter filters them out via `CountByState(..,
+  excludeLegacy: true)`; rows survive for audit. `mark-legacy --unmark`
+  recovers. Reversible.
 **Acceptance:** dashboard progress bar tracks real-corpus training
-signal, not backfilled stubs.
+signal once operator runs either CLI.
+**Files:** `SqliteWorkQueueStore.CountByTaskIdPrefixAndState`,
+`DeleteByTaskIdPrefixAndState`, `MarkLegacyByTaskIdPrefix`,
+`UnmarkLegacyByTaskIdPrefix`, `CountByState(state, excludeLegacy)`;
+`Program.cs` (`purge-legacy-seed-rows`, `mark-legacy` subcommands).
 
 ### Further horizon (not sequenced)
 

@@ -149,10 +149,13 @@ public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboar
         var staleAfterSeconds = Math.Max(1, _options.CurrentValue.StaleWorkerThresholdSeconds);
         var staleAfter = TimeSpan.FromSeconds(staleAfterSeconds);
         var taskCounts = new TaskCounts(
-            Pending:             _workQueue.CountByState(WorkTaskState.Pending),
-            Assigned:            _workQueue.CountByState(WorkTaskState.Assigned),
-            Done:                _workQueue.CountByState(WorkTaskState.Done),
-            Failed:              _workQueue.CountByState(WorkTaskState.Failed),
+            // excludeLegacy=true so the headline progress bar tracks
+            // real-corpus training signal; synthetic rows tagged via
+            // mark-legacy CLI survive for audit but stop counting.
+            Pending:             _workQueue.CountByState(WorkTaskState.Pending, excludeLegacy: true),
+            Assigned:            _workQueue.CountByState(WorkTaskState.Assigned, excludeLegacy: true),
+            Done:                _workQueue.CountByState(WorkTaskState.Done, excludeLegacy: true),
+            Failed:              _workQueue.CountByState(WorkTaskState.Failed, excludeLegacy: true),
             SoftExpiredButAlive: _workQueue.CountSoftExpiredButAlive(staleAfter),
             StuckDead:           _workQueue.CountStuckDead(staleAfter));
 
