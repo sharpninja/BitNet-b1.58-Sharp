@@ -87,6 +87,11 @@ if (args.Length > 0 && string.Equals(args[0], "dump-events", StringComparison.Or
     return DumpEventsCommandLine(args);
 }
 
+if (args.Length > 0 && string.Equals(args[0], "purge-pending", StringComparison.OrdinalIgnoreCase))
+{
+    return PurgePendingCommandLine(args);
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Running under Windows Service Control Manager sets the current
@@ -1061,7 +1066,10 @@ static int SeedRealTasksCommandLine(string[] args)
                     ShardOffset: offset,
                     ShardLength: bytesPerTask,
                     TokensPerTask: tokensPerTask,
-                    KLocalSteps: 4,
+                    // 1 local step keeps task wall-clock near the 10-minute
+                    // target. K=4 caused 40-min tasks that outran lease
+                    // calibration and loop-rejected on ownership expiry.
+                    KLocalSteps: 1,
                     HyperparametersJson: "{}",
                     State: WorkTaskState.Pending,
                     AssignedWorkerId: null,
@@ -1139,6 +1147,62 @@ static int DumpEventsCommandLine(string[] args)
     catch (Exception ex)
     {
         Console.Error.WriteLine($"dump-events failed: {ex}");
+        return 1;
+    }
+}
+
+/// <summary>
+/// Deletes rows in the work queue whose state matches one of the
+/// args (default: <c>Pending</c>). Coordinator must be stopped first
+/// or the write will race the service's own writes — returns 2 if
+/// the DB is locked.
+/// </summary>
+static int PurgePendingCommandLine(string[] args)
+{
+    try
+    {
+        // Parse states. No args => Pending only. --all-queued => Pending+Assigned.
+        var states = new List<WorkTaskState> { WorkTaskState.Pending };
+        for (var i = 1; i < args.Length; i++)
+        {
+            if (string.Equals(args[i], "--all-queued", StringComparison.OrdinalIgnoreCase))
+            {
+                states = new List<WorkTaskState> { WorkTaskState.Pending, WorkTaskState.Assigned };
+            }
+            else if (string.Equals(args[i], "--include-assigned", StringComparison.OrdinalIgnoreCase))
+            {
+                if (!states.Contains(WorkTaskState.Assigned)) states.Add(WorkTaskState.Assigned);
+            }
+        }
+
+        var config = new ConfigurationBuilder()
+            .SetBasePath(System.IO.Path.GetDirectoryName(typeof(Program).Assembly.Location) ?? ".")
+            .AddJsonFile("appsettings.json", optional: true)
+            .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}.json", optional: true)
+            .AddEnvironmentVariables()
+            .Build();
+
+        var coordinator = new CoordinatorOptions();
+        config.GetSection(CoordinatorOptions.SectionName).Bind(coordinator);
+        if (string.IsNullOrWhiteSpace(coordinator.DatabasePath))
+        {
+            Console.Error.WriteLine("Coordinator:DatabasePath is not set.");
+            return 2;
+        }
+
+        using var store = new SqliteWorkQueueStore($"Data Source={coordinator.DatabasePath}", TimeProvider.System);
+        var deleted = store.DeleteByStates(states);
+        Console.WriteLine($"purge-pending: deleted {deleted} rows in states [{string.Join(", ", states)}]");
+        return 0;
+    }
+    catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 5)
+    {
+        Console.Error.WriteLine($"purge-pending: database locked — stop the BitNetCoordinator service first. ({ex.Message})");
+        return 2;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"purge-pending failed: {ex}");
         return 1;
     }
 }

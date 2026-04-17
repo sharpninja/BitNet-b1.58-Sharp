@@ -290,6 +290,31 @@ WHERE state = 'Assigned'
     }
 
     /// <summary>
+    /// Deletes every row in the given states. Returns rows affected.
+    /// Admin/CLI use — wipes seeded but never-picked-up tasks when
+    /// the seed parameters themselves were wrong (e.g. KLocalSteps
+    /// mis-set) without touching completed history.
+    /// </summary>
+    public int DeleteByStates(IReadOnlyList<WorkTaskState> states)
+    {
+        ArgumentNullException.ThrowIfNull(states);
+        if (states.Count == 0) return 0;
+        lock (_writeGate)
+        {
+            using var cmd = _connection.CreateCommand();
+            var placeholders = new List<string>(states.Count);
+            for (var i = 0; i < states.Count; i++)
+            {
+                var p = $"$s{i}";
+                placeholders.Add(p);
+                cmd.Parameters.AddWithValue(p, states[i].ToString());
+            }
+            cmd.CommandText = $"DELETE FROM tasks WHERE state IN ({string.Join(",", placeholders)});";
+            return cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>
     /// Returns one entry per worker that currently owns an Assigned
     /// task. Keyed by <c>assigned_to</c>; value carries the task id and
     /// the UTC instant the claim landed. Used by the dashboard's
