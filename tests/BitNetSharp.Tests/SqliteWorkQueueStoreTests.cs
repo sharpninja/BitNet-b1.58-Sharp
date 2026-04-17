@@ -74,6 +74,42 @@ public sealed class SqliteWorkQueueStoreTests : IDisposable
     }
 
     [Fact]
+    public void CountByTaskIdPrefixAndState_matches_prefix_only()
+    {
+        _store.EnqueuePending(NewPendingTask("task-seed-a"));
+        _store.EnqueuePending(NewPendingTask("task-seed-b"));
+        _store.EnqueuePending(NewPendingTask("task-real-1"));
+        // Drive seed-a and real-1 to Done.
+        var c1 = _store.TryClaimNextPending("w", TimeSpan.FromMinutes(10));
+        _store.MarkCompleted(c1!.TaskId, "w");
+        var c2 = _store.TryClaimNextPending("w", TimeSpan.FromMinutes(10));
+        _store.MarkCompleted(c2!.TaskId, "w");
+        var c3 = _store.TryClaimNextPending("w", TimeSpan.FromMinutes(10));
+        _store.MarkCompleted(c3!.TaskId, "w");
+
+        Assert.Equal(2, _store.CountByTaskIdPrefixAndState("task-seed-", WorkTaskState.Done));
+        Assert.Equal(0, _store.CountByTaskIdPrefixAndState("task-seed-", WorkTaskState.Pending));
+    }
+
+    [Fact]
+    public void DeleteByTaskIdPrefixAndState_removes_matching_rows_only()
+    {
+        _store.EnqueuePending(NewPendingTask("task-seed-a"));
+        _store.EnqueuePending(NewPendingTask("task-real-1"));
+        var c1 = _store.TryClaimNextPending("w", TimeSpan.FromMinutes(10));
+        _store.MarkCompleted(c1!.TaskId, "w");
+        var c2 = _store.TryClaimNextPending("w", TimeSpan.FromMinutes(10));
+        _store.MarkCompleted(c2!.TaskId, "w");
+
+        var deleted = _store.DeleteByTaskIdPrefixAndState("task-seed-", WorkTaskState.Done);
+
+        Assert.Equal(1, deleted);
+        Assert.Equal(1, _store.CountByState(WorkTaskState.Done));
+        Assert.NotNull(_store.GetById("task-real-1"));
+        Assert.Null(_store.GetById("task-seed-a"));
+    }
+
+    [Fact]
     public void EnqueuePending_rejects_non_pending_task()
     {
         var brokenTask = NewPendingTask("task-002") with { State = WorkTaskState.Done };

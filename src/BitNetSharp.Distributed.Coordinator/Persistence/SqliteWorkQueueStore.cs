@@ -315,6 +315,44 @@ WHERE state = 'Assigned'
     }
 
     /// <summary>
+    /// Counts tasks whose <c>task_id</c> begins with the given literal
+    /// prefix and which are in <paramref name="state"/>. Companion to
+    /// <see cref="DeleteByTaskIdPrefixAndState"/>: lets a destructive
+    /// CLI show a dry-run count before the user authorises the delete.
+    /// </summary>
+    public int CountByTaskIdPrefixAndState(string taskIdPrefix, WorkTaskState state)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(taskIdPrefix);
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT COUNT(1) FROM tasks WHERE state = $state AND task_id LIKE $prefix;";
+        cmd.Parameters.AddWithValue("$state", state.ToString());
+        cmd.Parameters.AddWithValue("$prefix", taskIdPrefix + "%");
+        var result = cmd.ExecuteScalar();
+        return result is null or DBNull ? 0 : Convert.ToInt32(result, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
+    /// Deletes tasks whose <c>task_id</c> begins with the given literal
+    /// prefix AND are in the given lifecycle state. Used by the
+    /// <c>purge-legacy-seed-rows</c> CLI to remove the historical
+    /// <c>task-seed-*</c> synthetic Done rows so the dashboard progress
+    /// bar tracks real-corpus training signal only. Returns rows
+    /// affected.
+    /// </summary>
+    public int DeleteByTaskIdPrefixAndState(string taskIdPrefix, WorkTaskState state)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(taskIdPrefix);
+        lock (_writeGate)
+        {
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = "DELETE FROM tasks WHERE state = $state AND task_id LIKE $prefix;";
+            cmd.Parameters.AddWithValue("$state", state.ToString());
+            cmd.Parameters.AddWithValue("$prefix", taskIdPrefix + "%");
+            return cmd.ExecuteNonQuery();
+        }
+    }
+
+    /// <summary>
     /// Deletes pending tasks whose shard_id begins with the given
     /// literal prefix. Used by the <c>purge-shards</c> CLI to remove
     /// an abandoned corpus (e.g. v1) from the queue while leaving

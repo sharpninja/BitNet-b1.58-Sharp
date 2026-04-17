@@ -107,6 +107,11 @@ if (args.Length > 0 && string.Equals(args[0], "purge-shards", StringComparison.O
     return PurgeShardsCommandLine(args);
 }
 
+if (args.Length > 0 && string.Equals(args[0], "purge-legacy-seed-rows", StringComparison.OrdinalIgnoreCase))
+{
+    return PurgeLegacySeedRowsCommandLine(args);
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Running under Windows Service Control Manager sets the current
@@ -1310,6 +1315,74 @@ static int PurgeShardsCommandLine(string[] args)
     catch (Exception ex)
     {
         Console.Error.WriteLine($"purge-shards failed: {ex}");
+        return 1;
+    }
+}
+
+/// <summary>
+/// Hard-deletes the legacy synthetic <c>task-seed-*</c> Done rows so
+/// the dashboard progress bar reflects real-corpus training only.
+/// Defaults to dry-run — prints the match count without deleting.
+/// Pass <c>--yes</c> to actually delete. Optionally pass a custom
+/// <c>--prefix</c> (default <c>task-seed-</c>). Service must be
+/// stopped first because the write holds the DB lock.
+/// </summary>
+static int PurgeLegacySeedRowsCommandLine(string[] args)
+{
+    var prefix = "task-seed-";
+    var confirm = false;
+    for (var i = 1; i < args.Length; i++)
+    {
+        if (string.Equals(args[i], "--yes", StringComparison.OrdinalIgnoreCase))
+        {
+            confirm = true;
+        }
+        else if (string.Equals(args[i], "--prefix", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+        {
+            prefix = args[i + 1];
+            i++;
+        }
+    }
+
+    try
+    {
+        var config = new ConfigurationBuilder()
+            .SetBasePath(System.IO.Path.GetDirectoryName(typeof(Program).Assembly.Location) ?? ".")
+            .AddJsonFile("appsettings.json", optional: true)
+            .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}.json", optional: true)
+            .AddEnvironmentVariables()
+            .Build();
+
+        var coordinator = new CoordinatorOptions();
+        config.GetSection(CoordinatorOptions.SectionName).Bind(coordinator);
+        if (string.IsNullOrWhiteSpace(coordinator.DatabasePath))
+        {
+            Console.Error.WriteLine("Coordinator:DatabasePath is not set.");
+            return 2;
+        }
+
+        using var store = new SqliteWorkQueueStore($"Data Source={coordinator.DatabasePath}", TimeProvider.System);
+        var matches = store.CountByTaskIdPrefixAndState(prefix, WorkTaskState.Done);
+
+        if (!confirm)
+        {
+            Console.WriteLine($"purge-legacy-seed-rows (dry-run): {matches} Done rows match task_id LIKE '{prefix}%'");
+            Console.WriteLine("Re-run with --yes to actually delete.");
+            return 0;
+        }
+
+        var deleted = store.DeleteByTaskIdPrefixAndState(prefix, WorkTaskState.Done);
+        Console.WriteLine($"purge-legacy-seed-rows: deleted {deleted} Done rows with task_id LIKE '{prefix}%'");
+        return 0;
+    }
+    catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 5)
+    {
+        Console.Error.WriteLine($"purge-legacy-seed-rows: database locked — stop the BitNetCoordinator service first. ({ex.Message})");
+        return 2;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"purge-legacy-seed-rows failed: {ex}");
         return 1;
     }
 }
