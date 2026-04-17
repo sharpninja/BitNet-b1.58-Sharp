@@ -166,6 +166,14 @@ static async Task RunWorkLoopAsync(
     // corrects over time. Reset when gradient dimension changes.
     float[]? errorFeedbackResidual = null;
 
+    // Cached copy of the global weight vector keyed by version so a
+    // worker that runs 20 consecutive tasks against the same weight
+    // version downloads the blob exactly once. The dimension of the
+    // cached array determines the gradient dimension the worker
+    // produces — crucial to match the coordinator or /gradient 400s.
+    float[]? cachedWeights = null;
+    long cachedWeightsVersion = -1;
+
     try
     {
         while (!cancellationToken.IsCancellationRequested)
@@ -204,13 +212,49 @@ static async Task RunWorkLoopAsync(
             Log.Debug("Computing gradient for task {TaskId} (D-4b stub)", task.TaskId);
 
             // Download the current weight snapshot from the coordinator
-            // if we don't have this version cached. For the D-4b stub
-            // we skip the actual HTTP download and construct a zero
-            // vector of the correct dimension (the coordinator started
-            // from zeros too, so the math stays consistent). Phase A
-            // will add a real /weights/{version} download path.
-            var dim = (int)Math.Max(8, task.TokensPerTask / 4); // rough proxy for model dimension
-            var currentWeights = new float[dim];
+            // when the task's WeightVersion differs from what we have
+            // cached. Decoding the blob gives us the authoritative
+            // dimension so the encoded gradient shape matches what the
+            // coordinator expects in its /gradient handler.
+            if (cachedWeights is null || cachedWeightsVersion != task.WeightVersion)
+            {
+                try
+                {
+                    var blob = await client
+                        .DownloadWeightsAsync(task.WeightUrl, cancellationToken)
+                        .ConfigureAwait(false);
+                    if (!WeightBlobCodec.TryDecode(blob, out var blobVersion, out var weights, out var decodeErr))
+                    {
+                        Log.Warning(
+                            "Weight blob at {Url} failed to decode: {Err}. Skipping task.",
+                            task.WeightUrl,
+                            decodeErr);
+                        await SafeDelay(idleBackoff, cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    cachedWeights = weights;
+                    cachedWeightsVersion = blobVersion;
+                    Log.Information(
+                        "Downloaded weight version {Version} ({Dim:N0} elements) from {Url}",
+                        blobVersion,
+                        weights.Length,
+                        task.WeightUrl);
+                }
+                catch (OperationCanceledException)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Log.Warning(ex, "Transient error downloading weights");
+                    await SafeDelay(idleBackoff, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+            }
+
+            var dim = cachedWeights.Length;
+            var currentWeights = cachedWeights;
 
             // Synthetic gradient: push weights toward a constant
             // target so the coordinator's weight vector converges

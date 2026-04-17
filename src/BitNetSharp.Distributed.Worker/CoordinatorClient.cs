@@ -159,7 +159,9 @@ internal sealed class CoordinatorClient : IDisposable
     /// the submission due to ownership mismatch (403) or because the
     /// task was already recycled (409). Throws on any other non-2xx
     /// status so transient failures bubble up to the caller's
-    /// retry/backoff logic.
+    /// retry/backoff logic; the response body is included in the
+    /// exception message so operators can diagnose 400s without
+    /// needing to attach a network sniffer to the worker container.
     /// </summary>
     public async Task<bool> SubmitGradientAsync(
         GradientSubmission submission,
@@ -182,8 +184,40 @@ internal sealed class CoordinatorClient : IDisposable
             return false;
         }
 
+        var body = string.Empty;
+        try
+        {
+            body = await response.Content.ReadAsStringAsync(cancellationToken).ConfigureAwait(false);
+        }
+        catch
+        {
+            // Best effort — we still want to throw with status code.
+        }
+
+        throw new HttpRequestException(
+            $"Gradient submission rejected by coordinator: {(int)response.StatusCode} {response.ReasonPhrase}. Body: {body}");
+    }
+
+    /// <summary>
+    /// GETs a weight blob from the absolute URL provided on a
+    /// <see cref="WorkTaskAssignment"/>. Returns the raw bytes so the
+    /// caller can hand them to
+    /// <see cref="WeightBlobCodec.TryDecode(System.ReadOnlySpan{byte}, out long, out float[], out string?)"/>.
+    /// Throws on non-2xx responses.
+    /// </summary>
+    public async Task<byte[]> DownloadWeightsAsync(
+        string weightUrl,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(weightUrl);
+
+        using var response = await _http
+            .GetAsync(weightUrl, cancellationToken)
+            .ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
-        return false; // Unreachable; EnsureSuccessStatusCode throws.
+        return await response.Content
+            .ReadAsByteArrayAsync(cancellationToken)
+            .ConfigureAwait(false);
     }
 
     /// <summary>
