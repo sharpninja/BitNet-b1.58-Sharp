@@ -699,9 +699,41 @@ static int GenerateCorpusCommandLine(string[] args)
     try
     {
         var count = 50_000;
+        var seed = 42;
+        var poolVersion = CorpusPoolVersion.V1;
+        var manifestName = "truckmate-v1";
+        var examplesPerShard = 5_000;
+
         if (args.Length > 1 && int.TryParse(args[1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsedCount) && parsedCount > 0)
         {
             count = parsedCount;
+        }
+
+        for (var i = 2; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "--seed" when i + 1 < args.Length:
+                    if (int.TryParse(args[++i], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsedSeed))
+                    {
+                        seed = parsedSeed;
+                    }
+                    break;
+                case "--pool" when i + 1 < args.Length:
+                    poolVersion = args[++i].Equals("v2", StringComparison.OrdinalIgnoreCase)
+                        ? CorpusPoolVersion.V2
+                        : CorpusPoolVersion.V1;
+                    break;
+                case "--name" when i + 1 < args.Length:
+                    manifestName = args[++i];
+                    break;
+                case "--examples-per-shard" when i + 1 < args.Length:
+                    if (int.TryParse(args[++i], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsedEps) && parsedEps > 0)
+                    {
+                        examplesPerShard = parsedEps;
+                    }
+                    break;
+            }
         }
 
         var config = new ConfigurationBuilder()
@@ -718,8 +750,8 @@ static int GenerateCorpusCommandLine(string[] args)
             System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(coordinator.DatabasePath)) ?? ".",
             "corpus");
 
-        Console.WriteLine($"Generating {count} Truck Mate training examples into {corpusDir}…");
-        var manifest = TruckMateCorpusGenerator.Generate(corpusDir, count);
+        Console.WriteLine($"Generating {count} Truck Mate training examples into {corpusDir} (seed={seed}, pool={poolVersion}, name={manifestName})…");
+        var manifest = TruckMateCorpusGenerator.Generate(corpusDir, count, examplesPerShard, seed, poolVersion, manifestName);
 
         Console.WriteLine($"Generated {manifest.TotalExamples} examples across {manifest.Shards.Count} shards.");
         foreach (var shard in manifest.Shards)
@@ -727,7 +759,7 @@ static int GenerateCorpusCommandLine(string[] args)
             Console.WriteLine($"  {shard.ShardId}: {shard.ExampleCount} examples, {shard.SizeBytes:N0} bytes");
         }
 
-        Console.WriteLine($"Manifest saved to {System.IO.Path.Combine(corpusDir, "manifest.json")}");
+        Console.WriteLine($"Manifest saved to {System.IO.Path.Combine(corpusDir, $"manifest.{manifestName}.json")}");
         return 0;
     }
     catch (Exception ex)
@@ -739,12 +771,20 @@ static int GenerateCorpusCommandLine(string[] args)
 
 static int TokenizeCorpusCommandLine(string[] args)
 {
+    const int TokenizerVocabCap = 5174;
     try
     {
-        var maxVocab = 8000;
+        var maxVocab = TokenizerVocabCap;
+        string? shardPrefix = null;
+
         if (args.Length > 1 && int.TryParse(args[1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsedVocab) && parsedVocab > 100)
         {
             maxVocab = parsedVocab;
+        }
+
+        if (args.Length > 2 && !args[2].StartsWith("-", StringComparison.Ordinal))
+        {
+            shardPrefix = args[2];
         }
 
         var config = new ConfigurationBuilder()
@@ -763,17 +803,18 @@ static int TokenizeCorpusCommandLine(string[] args)
         var tokenizedDir = System.IO.Path.Combine(corpusDir, "tokenized");
         Directory.CreateDirectory(tokenizedDir);
 
-        var shardFiles = Directory.GetFiles(corpusDir, "*.txt")
+        var pattern = shardPrefix is null ? "*.txt" : $"{shardPrefix}-*.txt";
+        var shardFiles = Directory.GetFiles(corpusDir, pattern)
             .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
             .ToArray();
 
         if (shardFiles.Length == 0)
         {
-            Console.Error.WriteLine($"No .txt shard files found in {corpusDir}. Run generate-corpus first.");
+            Console.Error.WriteLine($"No .txt shard files matching '{pattern}' found in {corpusDir}. Run generate-corpus first.");
             return 2;
         }
 
-        Console.WriteLine($"Training tokenizer on {shardFiles.Length} shards (maxVocab={maxVocab})…");
+        Console.WriteLine($"Training tokenizer on {shardFiles.Length} shards (maxVocab={maxVocab}, pattern={pattern})…");
 
         IEnumerable<string> AllLines()
         {
@@ -790,7 +831,23 @@ static int TokenizeCorpusCommandLine(string[] args)
         }
 
         var tokenizer = WordLevelTokenizer.TrainFromCorpus(AllLines(), maxVocab);
+
+        if (tokenizer.VocabSize > TokenizerVocabCap)
+        {
+            Console.Error.WriteLine($"Vocab size {tokenizer.VocabSize} exceeds cap {TokenizerVocabCap}; aborting to preserve weight compatibility.");
+            return 3;
+        }
+
         var vocabPath = System.IO.Path.Combine(tokenizedDir, "vocab.json");
+        if (shardPrefix is not null && File.Exists(vocabPath))
+        {
+            var backup = System.IO.Path.Combine(tokenizedDir, "vocab.v1.json");
+            if (!File.Exists(backup))
+            {
+                File.Copy(vocabPath, backup);
+                Console.WriteLine($"Backed up existing vocab to {backup}");
+            }
+        }
         tokenizer.SaveToFile(vocabPath);
         Console.WriteLine($"Vocabulary: {tokenizer.VocabSize} tokens → {vocabPath}");
 

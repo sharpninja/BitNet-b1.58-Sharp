@@ -7,9 +7,13 @@ namespace BitNetSharp.Distributed.Contracts;
 ///
 /// <para>
 /// Parameter counts assume VocabSize = 5174 (the word-level
-/// tokenizer trained on the 50K Truck Mate synthetic corpus).
-/// Actual counts will be slightly different if the vocab size
-/// changes after retraining the tokenizer on a larger corpus.
+/// tokenizer trained on the Truck Mate synthetic corpus). The
+/// vocab is pinned at 5174 across corpus versions — both the
+/// 50K <c>truckmate-v1</c> and the 200K <c>truckmate-v2</c>
+/// corpora train the tokenizer at the same cap so previously
+/// serialized weights remain shape-compatible. Retraining at a
+/// different cap will change the flat-parameter length and
+/// force a global weight-version hard-reset.
 /// </para>
 ///
 /// <para>
@@ -75,8 +79,9 @@ public static class TruckMateModelPresets
 
     /// <summary>
     /// ~121M parameters. Target scale from the original requirement.
-    /// Requires more training data to avoid overfitting on the 50K
-    /// corpus; use after scaling the corpus to 200K+ examples.
+    /// Trained on <c>truckmate-v2</c> (200K examples, vocab-compatible
+    /// with <c>truckmate-v1</c>) to avoid overfitting the 50K v1
+    /// corpus surface.
     ///
     ///   dim=768, hidden=3072, layers=12, heads=12, seq=256
     /// </summary>

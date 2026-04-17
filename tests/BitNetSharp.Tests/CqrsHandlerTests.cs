@@ -168,7 +168,7 @@ public sealed class CqrsHandlerTests : IDisposable
     [Fact]
     public async Task ClaimNextTask_returns_null_when_queue_is_empty()
     {
-        var handler = new ClaimNextTaskCommandHandler(_queueStore, _options, _weightApplication, _time);
+        var handler = new ClaimNextTaskCommandHandler(_queueStore, _options, _weightApplication, _telemetry, _time);
 
         using var context = new CallContext();
         var result = await handler.HandleAsync(new ClaimNextTaskCommand("worker-alpha"), context);
@@ -182,7 +182,7 @@ public sealed class CqrsHandlerTests : IDisposable
     {
         _queueStore.EnqueuePending(NewPendingTask("task-123"));
 
-        var handler = new ClaimNextTaskCommandHandler(_queueStore, _options, _weightApplication, _time);
+        var handler = new ClaimNextTaskCommandHandler(_queueStore, _options, _weightApplication, _telemetry, _time);
 
         using var context = new CallContext();
         var result = await handler.HandleAsync(new ClaimNextTaskCommand("worker-alpha"), context);

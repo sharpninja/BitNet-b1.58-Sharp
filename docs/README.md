@@ -41,4 +41,5 @@ dotnet test BitNet-b1.58-Sharp.slnx
 - [Training and visualization](training-and-visualization.md)
 - [Distributed training (coordinator + workers)](distributed-training.md)
 - [Training corpus scope and sources](training-corpus-scope.md)
+- [Scaling TruckMate corpus v1.0 (v1 → v2)](scaling-truckmate-corpus-v1.0.md)
 - [State of completion and remaining work](state-of-completion.md)
