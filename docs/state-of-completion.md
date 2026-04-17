@@ -215,7 +215,7 @@ signal once operator runs either CLI.
 - ~~Corpus-v2 scale (200K+ examples) to unlock `truckmate-large`.~~ ✅ Done 2026-04-17.
 - ~~`seed-real-tasks --shard-prefix truckmate-v2` flag to target v2 shards in seeding.~~ ✅ Landed in commit `12da06f`; `scripts/Generate-TruckMateCorpusV2.ps1` wires it for auto-seed.
 - ~~Automated nightly telemetry prune (`D-5` in the full impl plan).~~ ✅ `TelemetryPruneService` runs hourly, deletes `gradient_events` + `worker_logs` older than `TelemetryRetentionDays` / `LogRetentionDays`.
-- Real-ASR-trace ingestion with PII scrubbing.
+- ~~Real-ASR-trace ingestion with PII scrubbing.~~ Superseded 2026-04-17 by `SonnetAsrCorpusGenerator` (commit `07f39f1`): Sonnet synthesizes ASR-noisy `[USER]`/`[INTENT]` lines into `asr-v1-` shards via `generate-asr-corpus` CLI. No real audio or PII to scrub.
 - ~~Multi-turn corpus generator.~~ ✅ Landed 2026-04-17 in commit `a7453b9` (Option Z: reuse `[USER]`/`[INTENT]` as turn separators; `MultiTurnCorpusGenerator` + `generate-multiturn-corpus` CLI; vocab-pin 5174 preserved).
 - ~~Per-worker GPU support.~~ Dropped 2026-04-17 — BitNet ternary hot path is already `sbyte × sbyte → int32` CPU SIMD; no off-the-shelf ternary CUDA kernel and roundtrip cost > win.
 - Ops hardening bundle (Track C) landed 2026-04-17 in commit `eee4c03`: NaN/Inf gradient guard, sidecar-before-rename, Failed-task requeue, stuck-task kick, PruneHealth counter + dashboard banner.
