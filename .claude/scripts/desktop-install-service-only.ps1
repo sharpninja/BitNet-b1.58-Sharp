@@ -1,6 +1,5 @@
 param(
-    [string]$WorkerClientId     = 'worker-legion2-d2',
-    [string]$WorkerClientSecret,
+    [string]$WorkerApiKey,
     [string]$AdminUsername      = 'admin-d2',
     [string]$AdminPassword,
     [int]$Port = 5000
@@ -14,8 +13,8 @@ function New-Secret {
     return [Convert]::ToBase64String($bytes).Replace('+','-').Replace('/','_').TrimEnd('=')
 }
 
-if (-not $WorkerClientSecret) { $WorkerClientSecret = New-Secret }
-if (-not $AdminPassword)      { $AdminPassword      = New-Secret }
+if (-not $WorkerApiKey)  { $WorkerApiKey  = New-Secret }
+if (-not $AdminPassword) { $AdminPassword = New-Secret }
 
 $desktopIp = (Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
     Get-NetIPAddress -AddressFamily IPv4 `
@@ -28,14 +27,13 @@ $desktopIp = (Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
 $baseUrl = "http://${desktopIp}:$Port"
 
 Write-Host "Installing service on PAYTON-DESKTOP:"
-Write-Host "  base url             : $baseUrl"
-Write-Host "  worker client id     : $WorkerClientId"
-Write-Host "  worker client secret : $WorkerClientSecret"
-Write-Host "  admin username       : $AdminUsername"
-Write-Host "  admin password       : $AdminPassword"
+Write-Host "  base url        : $baseUrl"
+Write-Host "  worker api key  : $WorkerApiKey"
+Write-Host "  admin username  : $AdminUsername"
+Write-Host "  admin password  : $AdminPassword"
 
 $result = Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
-    param($port, $clientId, $clientSecret, $adminUser, $adminPass, $baseUrl)
+    param($port, $apiKey, $adminUser, $adminPass, $baseUrl)
 
     $ErrorActionPreference = 'Stop'
     $serviceName = 'BitNetCoordinator'
@@ -75,12 +73,9 @@ $result = Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
         "Coordinator__StaleWorkerThresholdSeconds=120"
         "Coordinator__TargetTaskDurationSeconds=60"
         "Coordinator__FullStepEfficiency=0.25"
-        "Coordinator__AccessTokenLifetimeSeconds=3600"
         "Coordinator__Admin__Username=$adminUser"
         "Coordinator__Admin__Password=$adminPass"
-        "Coordinator__WorkerClients__0__ClientId=$clientId"
-        "Coordinator__WorkerClients__0__ClientSecret=$clientSecret"
-        "Coordinator__WorkerClients__0__DisplayName=Legion2 D-2"
+        "Coordinator__WorkerApiKey=$apiKey"
     )
     New-ItemProperty -Path $regKey -Name 'Environment' -PropertyType MultiString -Value $envStrings -Force | Out-Null
 
@@ -101,16 +96,15 @@ $result = Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
         ServiceName = $serviceName
         Status      = $svc.Status.ToString()
     }
-} -ArgumentList $Port, $WorkerClientId, $WorkerClientSecret, $AdminUsername, $AdminPassword, $baseUrl
+} -ArgumentList $Port, $WorkerApiKey, $AdminUsername, $AdminPassword, $baseUrl
 
 Write-Host ''
 $result | Format-List | Out-String | Write-Host
 
 [PSCustomObject]@{
-    BaseUrl            = $baseUrl
-    WorkerClientId     = $WorkerClientId
-    WorkerClientSecret = $WorkerClientSecret
-    AdminUsername      = $AdminUsername
-    AdminPassword      = $AdminPassword
-    ServiceStatus      = $result.Status
+    BaseUrl       = $baseUrl
+    WorkerApiKey  = $WorkerApiKey
+    AdminUsername = $AdminUsername
+    AdminPassword = $AdminPassword
+    ServiceStatus = $result.Status
 }

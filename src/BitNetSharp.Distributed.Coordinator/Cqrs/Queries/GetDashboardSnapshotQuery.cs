@@ -2,11 +2,9 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
-using BitNetSharp.Distributed.Coordinator.Configuration;
 using BitNetSharp.Distributed.Coordinator.Persistence;
 using BitNetSharp.Distributed.Coordinator.Services;
 using McpServer.Cqrs;
-using Microsoft.Extensions.Options;
 
 namespace BitNetSharp.Distributed.Coordinator.Cqrs.Queries;
 
@@ -68,7 +66,6 @@ public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboar
     private readonly SqliteWorkerRegistryStore _workerStore;
     private readonly SqliteTelemetryStore _telemetry;
     private readonly WeightApplicationService _weights;
-    private readonly IOptionsMonitor<CoordinatorOptions> _options;
     private readonly TimeProvider _time;
 
     public GetDashboardSnapshotQueryHandler(
@@ -76,14 +73,12 @@ public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboar
         SqliteWorkerRegistryStore workerStore,
         SqliteTelemetryStore telemetry,
         WeightApplicationService weights,
-        IOptionsMonitor<CoordinatorOptions> options,
         TimeProvider time)
     {
         _workQueue = workQueue;
         _workerStore = workerStore;
         _telemetry = telemetry;
         _weights = weights;
-        _options = options;
         _time = time;
     }
 
@@ -100,11 +95,16 @@ public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboar
             Done:     _workQueue.CountByState(WorkTaskState.Done),
             Failed:   _workQueue.CountByState(WorkTaskState.Failed));
 
+        var active   = _workerStore.CountByState(WorkerState.Active);
+        var draining = _workerStore.CountByState(WorkerState.Draining);
+        var gone     = _workerStore.CountByState(WorkerState.Gone);
+        // Shared-key model: no pre-provisioned client list. "Configured"
+        // now means "ever-registered" — sum of all known worker rows.
         var workerCounts = new WorkerCounts(
-            Configured: _options.CurrentValue.WorkerClients.Count,
-            Active:     _workerStore.CountByState(WorkerState.Active),
-            Draining:   _workerStore.CountByState(WorkerState.Draining),
-            Gone:       _workerStore.CountByState(WorkerState.Gone));
+            Configured: active + draining + gone,
+            Active:     active,
+            Draining:   draining,
+            Gone:       gone);
 
         var globalTelemetry = _telemetry.AggregateGlobal(windowStart);
         var perWorker = _telemetry.AggregateByWorker(windowStart);

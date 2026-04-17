@@ -3,7 +3,6 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net.Http;
-using System.Net.Http.Headers;
 using System.Net.Http.Json;
 using System.Threading.Tasks;
 using BitNetSharp.Distributed.Contracts;
@@ -16,16 +15,19 @@ namespace BitNetSharp.Distributed.Worker;
 /// <summary>
 /// Serilog periodic-batching sink that ships structured log events
 /// to the coordinator's <c>POST /logs</c> endpoint as a
-/// <see cref="LogBatch"/>. Authenticates with the same JWT the
-/// worker uses for /register and /work, so it piggybacks on the
-/// already-established trust relationship.
+/// <see cref="LogBatch"/>. Piggybacks on the shared
+/// <see cref="CoordinatorClient"/> so the X-Api-Key + X-Worker-Id
+/// headers the sink relies on are applied by the client's
+/// default-request-header configuration — the sink itself never
+/// touches credentials.
 ///
 /// <para>
-/// The sink is wired up early — before the worker has authenticated —
-/// so it buffers silently until <see cref="SetClient"/> is called
-/// with a live <see cref="CoordinatorClient"/>. Any log events
-/// emitted before that point are dropped (they still go to the
-/// parallel console sink).
+/// The sink is wired up early — before the worker has called
+/// <c>/register</c> — so it buffers silently until
+/// <see cref="SetClient"/> is called with a live
+/// <see cref="CoordinatorClient"/>. Any log events emitted before
+/// that point are dropped (they still go to the parallel console
+/// sink).
 /// </para>
 ///
 /// <para>
@@ -53,9 +55,8 @@ internal sealed class CoordinatorLogSink : IBatchedLogEventSink, IDisposable
     }
 
     /// <summary>
-    /// Called by the worker's startup path once the JWT has been
-    /// obtained. All batches emitted before this call are silently
-    /// dropped.
+    /// Called by the worker's startup path once registration succeeds.
+    /// All batches emitted before this call are silently dropped.
     /// </summary>
     public void SetClient(CoordinatorClient client)
     {
@@ -72,14 +73,13 @@ internal sealed class CoordinatorLogSink : IBatchedLogEventSink, IDisposable
         }
         try
         {
-            var token = await client.GetAccessTokenAsync().ConfigureAwait(false);
             using var request = new HttpRequestMessage(HttpMethod.Post, "logs")
             {
                 Content = JsonContent.Create(new LogBatch(entries))
             };
-            request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-            // Fire-and-forget on the HTTP layer; the periodic batching
-            // infrastructure handles retries via the next batch.
+            // No explicit auth header needed — the CoordinatorClient's
+            // default request headers (X-Api-Key + X-Worker-Id) are
+            // applied to every outbound request, including this one.
             await client.SendRawAsync(request).ConfigureAwait(false);
         }
         catch

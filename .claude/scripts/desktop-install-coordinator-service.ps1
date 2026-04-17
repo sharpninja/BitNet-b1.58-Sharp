@@ -19,9 +19,8 @@ function New-Secret {
 $serviceName        = 'BitNetCoordinator'
 $coordinatorPort    = 5000
 
-# Resolve the IPv4 address Duende + JwtBearer should use for iss.
-# Using the hostname lets Windows pick IPv6 first which does not
-# route over the LAN cleanly; pin to the routable IPv4 instead.
+# Resolve the routable IPv4. Windows prefers IPv6 first which does
+# not route cleanly over the LAN; pin to IPv4.
 $desktopIp = (Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
     Get-NetIPAddress -AddressFamily IPv4 `
         -InterfaceAlias 'Ethernet*','Wi-Fi*' `
@@ -34,21 +33,19 @@ if (-not $desktopIp) {
     throw 'Could not resolve PAYTON-DESKTOP LAN IPv4 address.'
 }
 
-$baseUrl            = "http://${desktopIp}:$coordinatorPort"
-$workerClientId     = 'worker-legion2-d2'
-$workerClientSecret = New-Secret
-$adminUsername      = 'admin-d2'
-$adminPassword      = New-Secret
+$baseUrl       = "http://${desktopIp}:$coordinatorPort"
+$workerApiKey  = New-Secret
+$adminUsername = 'admin-d2'
+$adminPassword = New-Secret
 
 Write-Host "Installing $serviceName on PAYTON-DESKTOP bound to $baseUrl"
-Write-Host "  worker client id     : $workerClientId"
-Write-Host "  worker client secret : $workerClientSecret"
-Write-Host "  admin username       : $adminUsername"
-Write-Host "  admin password       : $adminPassword"
+Write-Host "  worker api key : $workerApiKey"
+Write-Host "  admin username : $adminUsername"
+Write-Host "  admin password : $adminPassword"
 
 $remote = Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
     param(
-        $serviceName, $port, $clientId, $clientSecret,
+        $serviceName, $port, $apiKey,
         $adminUser, $adminPass, $baseUrl)
 
     $ErrorActionPreference = 'Stop'
@@ -128,12 +125,9 @@ $remote = Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
         "Coordinator__StaleWorkerThresholdSeconds=120"
         "Coordinator__TargetTaskDurationSeconds=60"
         "Coordinator__FullStepEfficiency=0.25"
-        "Coordinator__AccessTokenLifetimeSeconds=3600"
         "Coordinator__Admin__Username=$adminUser"
         "Coordinator__Admin__Password=$adminPass"
-        "Coordinator__WorkerClients__0__ClientId=$clientId"
-        "Coordinator__WorkerClients__0__ClientSecret=$clientSecret"
-        "Coordinator__WorkerClients__0__DisplayName=Legion2 D-2"
+        "Coordinator__WorkerApiKey=$apiKey"
     )
     $regKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$serviceName"
     # New-ItemProperty on a fresh service key sometimes fails with
@@ -175,18 +169,17 @@ $remote = Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
         Status      = if ($svc) { $svc.Status.ToString() } else { 'missing' }
         Listener    = $listen
     }
-} -ArgumentList $serviceName, $coordinatorPort, $workerClientId, $workerClientSecret, $adminUsername, $adminPassword, $baseUrl
+} -ArgumentList $serviceName, $coordinatorPort, $workerApiKey, $adminUsername, $adminPassword, $baseUrl
 
 Write-Host ''
 Write-Host '── Service install result ────────────────────────────────────'
 $remote | Format-List | Out-String | Write-Host
 
 [PSCustomObject]@{
-    ServiceName        = $serviceName
-    BaseUrl            = $baseUrl
-    WorkerClientId     = $workerClientId
-    WorkerClientSecret = $workerClientSecret
-    AdminUsername      = $adminUsername
-    AdminPassword      = $adminPassword
-    ServiceStatus      = $remote.Status
+    ServiceName   = $serviceName
+    BaseUrl       = $baseUrl
+    WorkerApiKey  = $workerApiKey
+    AdminUsername = $adminUsername
+    AdminPassword = $adminPassword
+    ServiceStatus = $remote.Status
 }

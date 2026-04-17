@@ -18,13 +18,13 @@ namespace BitNetSharp.Tests;
 /// WebApplicationFactory-backed smoke tests for the coordinator host.
 /// Asserts the public endpoints respond, the admin surface correctly
 /// triggers the OIDC challenge chain, and the worker surface rejects
-/// unauthenticated traffic. Full JWT + OIDC issuance tests will land
-/// once the BackchannelHttpHandler wiring for the in-process Duende
-/// discovery document is in place — see the integration blocker
-/// noted in the session log.
+/// unauthenticated traffic (and accepts a request bearing the
+/// configured shared <c>X-Api-Key</c>).
 /// </summary>
 public sealed class CoordinatorEndpointTests : IClassFixture<CoordinatorEndpointTests.CoordinatorFactory>, IDisposable
 {
+    public const string TestApiKey = "test-shared-worker-key";
+
     public sealed class CoordinatorFactory : WebApplicationFactory<CoordinatorHostMarker>
     {
         public string DatabasePath { get; } =
@@ -42,9 +42,7 @@ public sealed class CoordinatorEndpointTests : IClassFixture<CoordinatorEndpoint
                     ["Coordinator:StaleWorkerThresholdSeconds"] = "120",
                     ["Coordinator:Admin:Username"] = "admin",
                     ["Coordinator:Admin:Password"] = "super-secret-test",
-                    ["Coordinator:WorkerClients:0:ClientId"] = "test-worker",
-                    ["Coordinator:WorkerClients:0:ClientSecret"] = "test-secret",
-                    ["Coordinator:WorkerClients:0:DisplayName"] = "Test Worker"
+                    ["Coordinator:WorkerApiKey"] = TestApiKey
                 };
                 config.AddInMemoryCollection(testSettings);
             });
@@ -101,14 +99,10 @@ public sealed class CoordinatorEndpointTests : IClassFixture<CoordinatorEndpoint
         var body = await response.Content.ReadAsStringAsync();
         Assert.Contains("tasks", body);
         Assert.Contains("workers", body);
-        // The single configured worker client must show up in the
-        // /status dashboard so the operator can confirm their env
-        // vars took effect.
-        Assert.Contains("\"configured\":1", body);
     }
 
     [Fact]
-    public async Task Register_without_JWT_returns_challenge()
+    public async Task Register_without_api_key_is_rejected()
     {
         var response = await _client.PostAsJsonAsync("/register", new
         {
@@ -126,32 +120,44 @@ public sealed class CoordinatorEndpointTests : IClassFixture<CoordinatorEndpoint
             }
         });
 
-        // The WorkerPolicy requires a Bearer JWT; without one the
-        // authorization middleware either returns 401 directly or
-        // 302 redirecting to the cookie login path depending on
-        // which scheme's challenge wins. Either signals "auth needed".
-        Assert.True(
-            response.StatusCode == HttpStatusCode.Unauthorized
-            || response.StatusCode == HttpStatusCode.Redirect
-            || response.StatusCode == HttpStatusCode.Forbidden,
-            $"Expected auth challenge; got {(int)response.StatusCode} {response.StatusCode}");
+        // Missing X-Api-Key => 401 Unauthorized from the ApiKey
+        // scheme's challenge handler.
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
     [Fact]
-    public async Task Work_without_JWT_returns_challenge()
+    public async Task Work_without_api_key_is_rejected()
     {
         var response = await _client.GetAsync("/work");
-        Assert.True(
-            response.StatusCode == HttpStatusCode.Unauthorized
-            || response.StatusCode == HttpStatusCode.Redirect
-            || response.StatusCode == HttpStatusCode.Forbidden,
-            $"Expected auth challenge; got {(int)response.StatusCode} {response.StatusCode}");
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
     [Fact]
-    public async Task AdminApiKeys_without_cookie_triggers_oidc_challenge()
+    public async Task Work_with_wrong_api_key_is_rejected()
     {
-        var response = await _client.GetAsync("/admin/api-keys");
+        using var message = new HttpRequestMessage(HttpMethod.Get, "/work");
+        message.Headers.Add("X-Api-Key", "not-the-real-key");
+        message.Headers.Add("X-Worker-Id", "worker-1");
+
+        using var response = await _client.SendAsync(message);
+        Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Work_with_correct_api_key_returns_204_for_empty_queue()
+    {
+        using var message = new HttpRequestMessage(HttpMethod.Get, "/work");
+        message.Headers.Add("X-Api-Key", TestApiKey);
+        message.Headers.Add("X-Worker-Id", "worker-smoke");
+
+        using var response = await _client.SendAsync(message);
+        Assert.Equal(HttpStatusCode.NoContent, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task Admin_dashboard_without_cookie_triggers_oidc_challenge()
+    {
+        var response = await _client.GetAsync("/admin/dashboard");
 
         // The cookie + OIDC chain produces a 302 redirect to either
         // the OIDC challenge endpoint or directly to the login page.

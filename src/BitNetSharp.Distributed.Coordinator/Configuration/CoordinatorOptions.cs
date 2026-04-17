@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 
 namespace BitNetSharp.Distributed.Coordinator.Configuration;
 
@@ -7,12 +6,6 @@ namespace BitNetSharp.Distributed.Coordinator.Configuration;
 /// Strongly-typed configuration binding for the coordinator host. Bound
 /// from the <c>Coordinator:</c> section of <c>appsettings.json</c> or
 /// from environment variables at startup.
-///
-/// <para>
-/// Environment-variable convention: ASP.NET Core treats <c>__</c> as
-/// the hierarchy separator, so a client list entry looks like
-/// <c>Coordinator__WorkerClients__0__ClientId=worker-alpha</c>.
-/// </para>
 /// </summary>
 public sealed class CoordinatorOptions
 {
@@ -60,20 +53,10 @@ public sealed class CoordinatorOptions
     public double FullStepEfficiency { get; set; } = 0.25d;
 
     /// <summary>
-    /// Lifetime in seconds of the JWT access tokens issued to workers
-    /// by the identity server. Kept short so natural expiry bounds the
-    /// damage if a token is leaked; immediate invalidation is handled
-    /// by the revocation registry.
-    /// </summary>
-    public int AccessTokenLifetimeSeconds { get; set; } = 3600;
-
-    /// <summary>
     /// Public base URL at which this coordinator is reachable. The
-    /// identity server and the admin OIDC client both use this value
-    /// as the OpenID Connect issuer / authority so self-referential
-    /// discovery works. In production this is the ngrok reserved
-    /// domain; in local development it is whatever HTTPS URL Kestrel
-    /// binds to.
+    /// identity server (admin OIDC only) uses this value as the
+    /// OpenID Connect issuer / authority so self-referential
+    /// discovery works.
     /// </summary>
     public string BaseUrl { get; set; } = "https://localhost:5001";
 
@@ -131,49 +114,28 @@ public sealed class CoordinatorOptions
     public int LogRetentionDays { get; set; } = 3;
 
     /// <summary>
-    /// List of OAuth 2.0 client-credentials clients that are allowed
-    /// to authenticate as workers. Populated from environment at
-    /// startup (see class remarks for env-var naming). Add one entry
-    /// per worker machine.
+    /// Single shared API key every worker must present in the
+    /// <c>X-Api-Key</c> header to hit the worker endpoints. Set via
+    /// environment variable <c>Coordinator__WorkerApiKey</c> by the
+    /// operator. Rotating the key = edit the env var, restart the
+    /// coordinator; every worker with the old key is instantly
+    /// locked out.
     /// </summary>
-    public List<WorkerClientOptions> WorkerClients { get; set; } = new();
+    public string WorkerApiKey { get; set; } = string.Empty;
 
     /// <summary>
-    /// Credentials the <c>/admin/*</c> endpoints check with HTTP Basic
-    /// auth. The admin pages display API keys in plain text so you can
-    /// copy them to worker machines; protect them accordingly.
+    /// Credentials the admin dashboard's OIDC-backed login form
+    /// validates against. The admin pages are separate from the
+    /// worker plane; workers authenticate with the shared API key
+    /// instead.
     /// </summary>
     public AdminOptions Admin { get; set; } = new();
 }
 
 /// <summary>
-/// Configuration entry for a single OAuth 2.0 client that is allowed to
-/// authenticate as a worker via machine-to-machine login.
-/// </summary>
-public sealed class WorkerClientOptions
-{
-    /// <summary>
-    /// OAuth client_id. Doubles as the persistent worker identity in
-    /// the coordinator's <c>workers</c> table.
-    /// </summary>
-    public string ClientId { get; set; } = string.Empty;
-
-    /// <summary>
-    /// OAuth client_secret. Treated like an API key by the operator
-    /// (displayed on the admin page, copied to worker env vars).
-    /// </summary>
-    public string ClientSecret { get; set; } = string.Empty;
-
-    /// <summary>
-    /// Human-friendly label for the admin page.
-    /// </summary>
-    public string DisplayName { get; set; } = string.Empty;
-}
-
-/// <summary>
-/// Credentials for the coordinator's HTTP Basic-auth-protected admin
-/// area. Both username and password are read from environment so no
-/// secrets live in source control.
+/// Credentials for the coordinator's admin dashboard login form.
+/// Both username and password are read from environment so no secrets
+/// live in source control.
 /// </summary>
 public sealed class AdminOptions
 {

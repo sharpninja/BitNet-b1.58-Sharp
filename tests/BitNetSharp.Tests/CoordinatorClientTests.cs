@@ -1,8 +1,8 @@
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Net;
 using System.Net.Http;
-using System.Net.Http.Json;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
@@ -14,17 +14,18 @@ namespace BitNetSharp.Tests;
 
 /// <summary>
 /// Byrd-process tests for <see cref="CoordinatorClient"/> using a
-/// recording stub HttpMessageHandler so the token flow + register +
-/// heartbeat + work endpoints can be exercised without spinning up
-/// a real TestServer.
+/// recording stub HttpMessageHandler so the register + heartbeat +
+/// work + gradient endpoints can be exercised without spinning up a
+/// real TestServer. Verifies the shared X-Api-Key / X-Worker-Id
+/// headers ride on every outbound request.
 /// </summary>
 public sealed class CoordinatorClientTests
 {
     private static WorkerConfig SampleConfig() =>
         new(
             CoordinatorUrl: new Uri("https://coord.example.test/"),
-            ClientId: "worker-alpha",
-            ClientSecret: "alpha-secret",
+            ApiKey: "shared-secret-key",
+            WorkerId: "worker-alpha",
             WorkerName: "test-worker",
             CpuThreads: 4,
             HeartbeatInterval: TimeSpan.FromSeconds(30),
@@ -68,73 +69,24 @@ public sealed class CoordinatorClientTests
         return new CoordinatorClient(config, httpClient, ownsHttpClient: true);
     }
 
-    [Fact]
-    public async Task GetAccessTokenAsync_POSTs_client_credentials_and_returns_token()
+    private static void AssertAuthHeaders(HttpRequestMessage request, WorkerConfig config)
     {
-        var handler = new StubHandler();
-        handler.Enqueue(HttpStatusCode.OK, """
-        { "access_token": "tok-abc", "token_type": "Bearer", "expires_in": 3600, "scope": "bitnet-worker" }
-        """);
+        Assert.True(request.Headers.Contains(CoordinatorClient.ApiKeyHeader),
+            $"Expected {CoordinatorClient.ApiKeyHeader} header on outgoing request");
+        Assert.Equal(config.ApiKey,
+            request.Headers.GetValues(CoordinatorClient.ApiKeyHeader).Single());
 
-        using var client = CreateClient(handler, SampleConfig());
-
-        var token = await client.GetAccessTokenAsync();
-
-        Assert.Equal("tok-abc", token);
-        Assert.Single(handler.Requests);
-        var req = handler.Requests[0];
-        Assert.Equal(HttpMethod.Post, req.Method);
-        Assert.EndsWith("/connect/token", req.RequestUri!.AbsolutePath);
-        Assert.Equal("application/x-www-form-urlencoded", req.Content!.Headers.ContentType!.MediaType);
+        Assert.True(request.Headers.Contains(CoordinatorClient.WorkerIdHeader),
+            $"Expected {CoordinatorClient.WorkerIdHeader} header on outgoing request");
+        Assert.Equal(config.WorkerId,
+            request.Headers.GetValues(CoordinatorClient.WorkerIdHeader).Single());
     }
 
     [Fact]
-    public async Task GetAccessTokenAsync_is_cached_across_calls()
+    public async Task RegisterAsync_sends_api_key_and_worker_id_headers_and_deserializes_response()
     {
+        var config = SampleConfig();
         var handler = new StubHandler();
-        handler.Enqueue(HttpStatusCode.OK, """
-        { "access_token": "tok-cached", "token_type": "Bearer", "expires_in": 3600 }
-        """);
-
-        using var client = CreateClient(handler, SampleConfig());
-
-        var first  = await client.GetAccessTokenAsync();
-        var second = await client.GetAccessTokenAsync();
-
-        Assert.Equal("tok-cached", first);
-        Assert.Equal(first, second);
-        Assert.Single(handler.Requests); // second call hit the cache
-    }
-
-    [Fact]
-    public async Task InvalidateAccessToken_forces_a_refresh_on_the_next_call()
-    {
-        var handler = new StubHandler();
-        handler.Enqueue(HttpStatusCode.OK, """
-        { "access_token": "tok-one", "token_type": "Bearer", "expires_in": 3600 }
-        """);
-        handler.Enqueue(HttpStatusCode.OK, """
-        { "access_token": "tok-two", "token_type": "Bearer", "expires_in": 3600 }
-        """);
-
-        using var client = CreateClient(handler, SampleConfig());
-
-        var first = await client.GetAccessTokenAsync();
-        client.InvalidateAccessToken();
-        var second = await client.GetAccessTokenAsync();
-
-        Assert.Equal("tok-one", first);
-        Assert.Equal("tok-two", second);
-        Assert.Equal(2, handler.Requests.Count);
-    }
-
-    [Fact]
-    public async Task RegisterAsync_attaches_bearer_token_and_deserializes_response()
-    {
-        var handler = new StubHandler();
-        handler.Enqueue(HttpStatusCode.OK, """
-        { "access_token": "tok-reg", "token_type": "Bearer", "expires_in": 3600 }
-        """);
         handler.Enqueue(HttpStatusCode.OK, """
         {
           "workerId": "worker-alpha",
@@ -146,7 +98,7 @@ public sealed class CoordinatorClientTests
         }
         """);
 
-        using var client = CreateClient(handler, SampleConfig());
+        using var client = CreateClient(handler, config);
 
         var request = new WorkerRegistrationRequest(
             WorkerName: "alpha",
@@ -166,64 +118,68 @@ public sealed class CoordinatorClientTests
         Assert.Equal(42, response.InitialWeightVersion);
         Assert.Equal(150016, response.RecommendedTokensPerTask);
 
-        // Second request was /register, must have Bearer auth.
-        var registerRequest = handler.Requests[1];
-        Assert.EndsWith("/register", registerRequest.RequestUri!.AbsolutePath);
-        Assert.Equal("Bearer", registerRequest.Headers.Authorization!.Scheme);
-        Assert.Equal("tok-reg", registerRequest.Headers.Authorization.Parameter);
+        Assert.Single(handler.Requests);
+        var sent = handler.Requests[0];
+        Assert.EndsWith("/register", sent.RequestUri!.AbsolutePath);
+        Assert.Equal(HttpMethod.Post, sent.Method);
+        AssertAuthHeaders(sent, config);
+        // Ensure the old OAuth Bearer scheme is not being attached.
+        Assert.Null(sent.Headers.Authorization);
     }
 
     [Fact]
-    public async Task TryClaimWorkAsync_returns_null_on_204()
+    public async Task TryClaimWorkAsync_returns_null_on_204_and_sends_auth_headers()
     {
+        var config = SampleConfig();
         var handler = new StubHandler();
-        handler.Enqueue(HttpStatusCode.OK, """
-        { "access_token": "t", "expires_in": 3600 }
-        """);
         handler.Enqueue(HttpStatusCode.NoContent);
 
-        using var client = CreateClient(handler, SampleConfig());
+        using var client = CreateClient(handler, config);
 
         var work = await client.TryClaimWorkAsync();
 
         Assert.Null(work);
+        Assert.Single(handler.Requests);
+        var sent = handler.Requests[0];
+        Assert.EndsWith("/work", sent.RequestUri!.AbsolutePath);
+        AssertAuthHeaders(sent, config);
     }
 
     [Fact]
-    public async Task SendHeartbeatAsync_returns_null_on_410_gone()
+    public async Task SendHeartbeatAsync_returns_null_on_410_gone_and_sends_auth_headers()
     {
+        var config = SampleConfig();
         var handler = new StubHandler();
-        handler.Enqueue(HttpStatusCode.OK, """
-        { "access_token": "t", "expires_in": 3600 }
-        """);
         handler.Enqueue(HttpStatusCode.Gone);
 
-        using var client = CreateClient(handler, SampleConfig());
+        using var client = CreateClient(handler, config);
 
         var response = await client.SendHeartbeatAsync(new HeartbeatRequest(
-            WorkerId: "worker-alpha",
+            WorkerId: config.WorkerId,
             Status: "idle",
             CurrentTaskId: null,
             TokensSeenSinceLastHeartbeat: 0));
 
         Assert.Null(response);
+        Assert.Single(handler.Requests);
+        var sent = handler.Requests[0];
+        Assert.EndsWith("/heartbeat", sent.RequestUri!.AbsolutePath);
+        AssertAuthHeaders(sent, config);
     }
 
     [Fact]
     public async Task SubmitGradientAsync_returns_true_on_200()
     {
+        var config = SampleConfig();
         var handler = new StubHandler();
-        handler.Enqueue(HttpStatusCode.OK, """
-        { "access_token": "t", "expires_in": 3600 }
-        """);
         handler.Enqueue(HttpStatusCode.OK, """
         { "accepted": true, "task_id": "task-1", "worker_id": "worker-alpha" }
         """);
 
-        using var client = CreateClient(handler, SampleConfig());
+        using var client = CreateClient(handler, config);
         var submission = new GradientSubmission(
             TaskId: "task-1",
-            WorkerId: "worker-alpha",
+            WorkerId: config.WorkerId,
             BaseWeightVersion: 42,
             TokensSeen: 4096,
             LossAfter: 1.23,
@@ -233,21 +189,20 @@ public sealed class CoordinatorClientTests
 
         var accepted = await client.SubmitGradientAsync(submission);
         Assert.True(accepted);
+        AssertAuthHeaders(handler.Requests[0], config);
     }
 
     [Fact]
     public async Task SubmitGradientAsync_returns_false_on_403()
     {
+        var config = SampleConfig();
         var handler = new StubHandler();
-        handler.Enqueue(HttpStatusCode.OK, """
-        { "access_token": "t", "expires_in": 3600 }
-        """);
         handler.Enqueue(HttpStatusCode.Forbidden);
 
-        using var client = CreateClient(handler, SampleConfig());
+        using var client = CreateClient(handler, config);
         var accepted = await client.SubmitGradientAsync(new GradientSubmission(
             TaskId: "task-1",
-            WorkerId: "worker-alpha",
+            WorkerId: config.WorkerId,
             BaseWeightVersion: 42,
             TokensSeen: 0,
             LossAfter: 0,
@@ -260,16 +215,14 @@ public sealed class CoordinatorClientTests
     [Fact]
     public async Task SubmitGradientAsync_returns_false_on_409()
     {
+        var config = SampleConfig();
         var handler = new StubHandler();
-        handler.Enqueue(HttpStatusCode.OK, """
-        { "access_token": "t", "expires_in": 3600 }
-        """);
         handler.Enqueue(HttpStatusCode.Conflict);
 
-        using var client = CreateClient(handler, SampleConfig());
+        using var client = CreateClient(handler, config);
         var accepted = await client.SubmitGradientAsync(new GradientSubmission(
             TaskId: "task-1",
-            WorkerId: "worker-alpha",
+            WorkerId: config.WorkerId,
             BaseWeightVersion: 42,
             TokensSeen: 0,
             LossAfter: 0,

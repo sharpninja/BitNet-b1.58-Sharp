@@ -1,20 +1,21 @@
 # ─────────────────────────────────────────────────────────────────────────
 #  BitNetSharp.Distributed.Worker — local multi-replica dev stack.
 #
-#  For a SINGLE worker on a single machine, prefer the one-shot install
-#  script served by the coordinator's admin portal — it bakes in the
-#  client credentials and handles the hardened `docker run` for you:
+#  For a SINGLE worker on a single machine, prefer the generic install
+#  script in scripts/install-bitnet-worker.{sh,ps1}. Export the two
+#  required env vars and run it — it handles the hardened `docker run`
+#  for you:
 #
 #      # bash / Linux / macOS
-#      curl -fsSL -o bitnet-worker.sh \
-#           https://<coordinator>/admin/install/<client-id>.sh
-#      chmod +x bitnet-worker.sh && ./bitnet-worker.sh
+#      export BITNET_COORDINATOR_URL='https://<coordinator>:5001/'
+#      export BITNET_WORKER_API_KEY='<operator-set-shared-key>'
+#      ./scripts/install-bitnet-worker.sh
 #
 #      # PowerShell / Windows
-#      iwr -UseBasicParsing \
-#          https://<coordinator>/admin/install/<client-id>.ps1 `
-#          -OutFile bitnet-worker.ps1
-#      pwsh -NoProfile -ExecutionPolicy Bypass -File .\bitnet-worker.ps1
+#      $env:BITNET_COORDINATOR_URL = 'https://<coordinator>:5001/'
+#      $env:BITNET_WORKER_API_KEY  = '<operator-set-shared-key>'
+#      pwsh -NoProfile -ExecutionPolicy Bypass `
+#          -File .\scripts\install-bitnet-worker.ps1
 #
 #  Use THIS compose file when you want N replicas against the same
 #  coordinator on one host:
@@ -57,9 +58,9 @@ services:
     environment:
       # ── required ────────────────────────────────────────────────────
       BITNET_COORDINATOR_URL: ${BITNET_COORDINATOR_URL:?set BITNET_COORDINATOR_URL in .env}
-      BITNET_CLIENT_ID:       ${BITNET_CLIENT_ID:?set BITNET_CLIENT_ID in .env}
-      BITNET_CLIENT_SECRET:   ${BITNET_CLIENT_SECRET:?set BITNET_CLIENT_SECRET in .env}
+      BITNET_WORKER_API_KEY:  ${BITNET_WORKER_API_KEY:?set BITNET_WORKER_API_KEY in .env (must match Coordinator__WorkerApiKey)}
       # ── optional ────────────────────────────────────────────────────
+      BITNET_WORKER_ID:   ${BITNET_WORKER_ID:-}
       BITNET_WORKER_NAME: ${BITNET_WORKER_NAME:-}
       BITNET_CPU_THREADS: ${BITNET_CPU_THREADS:-}
       BITNET_HEARTBEAT_SECONDS: ${BITNET_HEARTBEAT_SECONDS:-30}

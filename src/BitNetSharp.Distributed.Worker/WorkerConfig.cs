@@ -9,17 +9,27 @@ namespace BitNetSharp.Distributed.Worker;
 /// on bare metal, or inside CI.
 ///
 /// <para>
-/// The worker authenticates to the coordinator using OAuth 2.0
-/// client credentials (Duende IdentityServer's machine-login flow),
-/// so each worker needs a per-machine <see cref="ClientId"/> /
-/// <see cref="ClientSecret"/> pair provisioned by the operator on
-/// the coordinator's admin page.
+/// The worker authenticates to the coordinator with a single shared
+/// API key (<see cref="ApiKey"/>) sent in the <c>X-Api-Key</c> header.
+/// The operator sets the key on the coordinator via the
+/// <c>Coordinator__WorkerApiKey</c> env var and distributes the same
+/// value to every worker via <see cref="EnvApiKey"/>. Rotating =
+/// changing the coordinator value + restarting it; every worker with
+/// the old key is locked out until redeployed with the new one.
+/// </para>
+///
+/// <para>
+/// <see cref="WorkerId"/> is the worker's self-declared id the
+/// coordinator stamps onto every request via the <c>X-Worker-Id</c>
+/// header. It is NOT a secret — it only disambiguates heartbeats,
+/// task ownership, and log lines in the coordinator's registry.
+/// Defaults to the machine hostname.
 /// </para>
 /// </summary>
 internal sealed record WorkerConfig(
     Uri CoordinatorUrl,
-    string ClientId,
-    string ClientSecret,
+    string ApiKey,
+    string WorkerId,
     string WorkerName,
     int CpuThreads,
     TimeSpan HeartbeatInterval,
@@ -28,8 +38,8 @@ internal sealed record WorkerConfig(
     string LogLevel)
 {
     public const string EnvCoordinatorUrl   = "BITNET_COORDINATOR_URL";
-    public const string EnvClientId         = "BITNET_CLIENT_ID";
-    public const string EnvClientSecret     = "BITNET_CLIENT_SECRET";
+    public const string EnvApiKey           = "BITNET_WORKER_API_KEY";
+    public const string EnvWorkerId         = "BITNET_WORKER_ID";
     public const string EnvWorkerName       = "BITNET_WORKER_NAME";
     public const string EnvCpuThreads       = "BITNET_CPU_THREADS";
     public const string EnvHeartbeatSeconds = "BITNET_HEARTBEAT_SECONDS";
@@ -53,13 +63,18 @@ internal sealed record WorkerConfig(
                 $"{EnvCoordinatorUrl} must be an absolute http(s) URL. Got '{coordinatorRaw}'.");
         }
 
-        var clientId     = RequireEnv(EnvClientId);
-        var clientSecret = RequireEnv(EnvClientSecret);
+        var apiKey = RequireEnv(EnvApiKey);
 
         var workerName = Environment.GetEnvironmentVariable(EnvWorkerName);
         if (string.IsNullOrWhiteSpace(workerName))
         {
             workerName = Environment.MachineName;
+        }
+
+        var workerId = Environment.GetEnvironmentVariable(EnvWorkerId);
+        if (string.IsNullOrWhiteSpace(workerId))
+        {
+            workerId = workerName;
         }
 
         var cpuThreads = ParsePositiveInt(EnvCpuThreads, Environment.ProcessorCount);
@@ -80,8 +95,8 @@ internal sealed record WorkerConfig(
 
         return new WorkerConfig(
             coordinatorUrl,
-            clientId,
-            clientSecret,
+            apiKey,
+            workerId,
             workerName,
             cpuThreads,
             TimeSpan.FromSeconds(heartbeatSeconds),

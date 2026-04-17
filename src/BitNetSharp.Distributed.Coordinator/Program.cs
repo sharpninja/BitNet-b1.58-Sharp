@@ -5,18 +5,17 @@ using System.Linq;
 using System.Security.Claims;
 using BitNetSharp.Distributed.Contracts;
 using BitNetSharp.Distributed.Coordinator;
+using BitNetSharp.Distributed.Coordinator.Authentication;
 using BitNetSharp.Distributed.Coordinator.Components;
 using BitNetSharp.Distributed.Coordinator.Configuration;
 using BitNetSharp.Distributed.Coordinator.Identity;
 using BitNetSharp.Distributed.Coordinator.Cqrs.Commands;
 using BitNetSharp.Distributed.Coordinator.Cqrs.Queries;
-using BitNetSharp.Distributed.Coordinator.Middleware;
 using BitNetSharp.Distributed.Coordinator.Persistence;
 using BitNetSharp.Distributed.Coordinator.Services;
 using BitNetSharp.Distributed.Coordinator.ViewModels;
 using McpServer.Cqrs;
 using Duende.IdentityServer;
-using Duende.IdentityServer.Models;
 using Duende.IdentityServer.Test;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.Cookies;
@@ -37,36 +36,32 @@ using Microsoft.IdentityModel.Protocols.OpenIdConnect;
 // ────────────────────────────────────────────────────────────────────────
 //  Single-process host serving three concerns:
 //
-//  1. Duende IdentityServer                                 (OAuth/OIDC provider)
-//     ├─ Worker machine-login (client_credentials grant)
+//  1. Duende IdentityServer                                 (OIDC provider for admin UI only)
 //     └─ Admin interactive login (authorization_code + PKCE)
 //
-//  2. Coordinator worker API                                (JWT bearer guarded)
+//  2. Coordinator worker API                                (X-Api-Key guarded)
 //     ├─ POST /register        — worker-on-startup capability handshake
-//     └─ /work /heartbeat /gradient /weights (future steps)
+//     └─ /work /heartbeat /gradient /weights /logs /corpus
 //
 //  3. Blazor admin UI                                       (cookie + OIDC guarded)
-//     ├─ GET  /admin/api-keys  — list + rotate worker secrets
+//     ├─ GET  /admin/dashboard — worker/task overview
 //     ├─ GET  /Account/Login   — login form presented by IS
 //     └─ POST /Account/Login/submit  — credential validator
 //
 //  Auth schemes stacked in this file:
-//      "Cookies"  — admin session cookie set after OIDC code exchange
+//      "Cookies"  — admin session cookie set after login
 //      "oidc"     — OpenIdConnect challenge pointing at local IS
-//      "Bearer"   — JWT validator for worker endpoints
+//      "ApiKey"   — shared X-Api-Key validator for worker endpoints
 //      "idsrv"    — Duende's own default cookie scheme for the IS UI
+//
+//  Worker auth model: single shared API key set by the operator via
+//  Coordinator__WorkerApiKey. Every worker sends the same key in the
+//  X-Api-Key header and its self-declared id in X-Worker-Id. Rotate
+//  the key = edit env var + restart coordinator => every worker is
+//  instantly disabled until redeployed with the new key.
 // ────────────────────────────────────────────────────────────────────────
 
 // ── Dev CLI subcommand: seed-tasks ──────────────────────────────
-// Allows an operator to inject N pending training tasks into the
-// coordinator's SQLite work queue without going through the admin
-// web UI. Useful for Phase D-2 smoke-test rigs and scripting.
-//
-//     dotnet BitNetSharp.Distributed.Coordinator.dll seed-tasks 10
-//
-// Reads the database path and other config from environment
-// variables / appsettings.json the same way the web host does so
-// it targets whichever DB the service uses.
 if (args.Length > 0 && string.Equals(args[0], "seed-tasks", StringComparison.OrdinalIgnoreCase))
 {
     return SeedTasksCommandLine(args);
@@ -120,12 +115,6 @@ builder.Services.AddSingleton(sp =>
 builder.Services.AddSingleton(sp =>
 {
     var coord = sp.GetRequiredService<CoordinatorOptions>();
-    var time  = sp.GetRequiredService<TimeProvider>();
-    return new SqliteClientRevocationStore(BuildConnectionString(coord), time);
-});
-builder.Services.AddSingleton(sp =>
-{
-    var coord = sp.GetRequiredService<CoordinatorOptions>();
     var weightsDir = Path.Combine(
         Path.GetDirectoryName(Path.GetFullPath(coord.DatabasePath)) ?? ".",
         "weights");
@@ -144,24 +133,7 @@ builder.Services.AddSingleton(sp =>
 });
 builder.Services.AddSingleton<WeightApplicationService>();
 
-// ── Worker client registry + Duende IdentityServer ────────────────
-// Registry is seeded lazily from IConfiguration so WebApplicationFactory
-// integration tests can inject in-memory WorkerClients via
-// ConfigureAppConfiguration and have them picked up by the registry.
-// The top-level snapshot below is ONLY used for startup-time knobs like
-// the JWT authority URL; the real client list lives behind a
-// CompositeClientStore that the Duende client lookup consults on every
-// request.
-builder.Services.AddSingleton<WorkerClientRegistry>(sp =>
-{
-    var configuration = sp.GetRequiredService<IConfiguration>();
-    var section = configuration.GetSection($"{CoordinatorOptions.SectionName}:WorkerClients");
-    var clients = section.Get<List<WorkerClientOptions>>() ?? new List<WorkerClientOptions>();
-    var registry = new WorkerClientRegistry();
-    registry.Seed(clients);
-    return registry;
-});
-
+// ── Duende IdentityServer (admin OIDC only) ───────────────────────
 var coordinatorSnapshot = builder.Configuration
     .GetSection(CoordinatorOptions.SectionName)
     .Get<CoordinatorOptions>() ?? new CoordinatorOptions();
@@ -170,7 +142,7 @@ var coordinatorBaseUrl = coordinatorSnapshot.BaseUrl.TrimEnd('/');
 // Duende TestUsers — seeded with the single admin account read from
 // CoordinatorOptions.Admin. If the admin credentials are empty at
 // startup, an empty list goes in and the login page cannot succeed;
-// operators see a log warning on first /admin/api-keys hit.
+// operators see a log warning on first /admin/dashboard hit.
 var adminTestUsers = new List<TestUser>();
 if (!string.IsNullOrWhiteSpace(coordinatorSnapshot.Admin.Username) &&
     !string.IsNullOrWhiteSpace(coordinatorSnapshot.Admin.Password))
@@ -202,9 +174,7 @@ builder.Services.AddIdentityServer(options =>
         options.UserInteraction.LoginReturnUrlParameter = "returnUrl";
     })
     .AddInMemoryIdentityResources(IdentityServerResources.IdentityResources)
-    .AddInMemoryApiScopes(IdentityServerResources.ApiScopes)
-    .AddInMemoryApiResources(IdentityServerResources.ApiResources)
-    .AddClientStore<CompositeClientStore>()
+    .AddInMemoryClients(new[] { IdentityServerResources.BuildAdminUiClient(coordinatorBaseUrl) })
     .AddTestUsers(adminTestUsers)
     .AddDeveloperSigningCredential(persistKey: false);
 
@@ -213,9 +183,9 @@ builder.Services
     .AddAuthentication(options =>
     {
         // The default scheme used by admin Blazor pages is the cookie
-        // the OIDC middleware drops after a successful code exchange.
-        // Worker endpoints opt into JWT validation explicitly via their
-        // authorization policy so the two planes do not interfere.
+        // the login form drops after a successful credential check.
+        // Worker endpoints opt into the X-Api-Key scheme explicitly via
+        // their authorization policy so the two planes do not interfere.
         options.DefaultScheme = CookieAuthenticationDefaults.AuthenticationScheme;
         options.DefaultChallengeScheme = OpenIdConnectDefaults.AuthenticationScheme;
     })
@@ -241,21 +211,27 @@ builder.Services
         options.TokenValidationParameters.NameClaimType = "name";
         options.TokenValidationParameters.RoleClaimType = "role";
     })
-    .AddJwtBearer("Bearer", options =>
-    {
-        options.Authority = coordinatorBaseUrl;
-        options.Audience = IdentityServerResources.WorkerScopeName;
-        options.RequireHttpsMetadata = false;
-        options.MapInboundClaims = false;
-    });
+    .AddScheme<ApiKeyAuthenticationOptions, ApiKeyAuthenticationHandler>(
+        ApiKeyAuthenticationHandler.SchemeName,
+        options =>
+        {
+            // Resolve the configured key lazily on each request so the
+            // IOptionsMonitor picks up env-var changes without a full
+            // restart on hosts that support config reload.
+            options.ExpectedKey = null; // wired up post-build from DI.
+        });
+
+// Post-configure the ApiKey scheme with the IOptionsMonitor<CoordinatorOptions>
+// so the handler can look up the current WorkerApiKey on every request.
+builder.Services.AddSingleton<IPostConfigureOptions<ApiKeyAuthenticationOptions>>(sp =>
+    new ApiKeyPostConfigure(sp.GetRequiredService<IOptionsMonitor<CoordinatorOptions>>()));
 
 builder.Services.AddAuthorization(options =>
 {
-    options.AddPolicy(IdentityServerResources.WorkerPolicyName, policy =>
+    options.AddPolicy(WorkerApiKeyAuth.PolicyName, policy =>
     {
-        policy.AddAuthenticationSchemes("Bearer");
+        policy.AddAuthenticationSchemes(ApiKeyAuthenticationHandler.SchemeName);
         policy.RequireAuthenticatedUser();
-        policy.RequireClaim("scope", IdentityServerResources.WorkerScopeName);
     });
 
     options.AddPolicy("AdminPolicy", policy =>
@@ -269,21 +245,14 @@ builder.Services.AddAuthorization(options =>
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
-// CQRS dispatcher + assembly scan so every ICommandHandler /
-// IQueryHandler implemented in the coordinator assembly is
-// registered automatically. ViewModels pull IDispatcher from DI
-// and dispatch through the same pipeline as the minimal API
-// endpoints, so there is one canonical way to exercise business
-// logic no matter which UI is hosting it.
+// CQRS dispatcher + assembly scan.
 builder.Services.AddCqrsDispatcher();
 builder.Services.AddCqrsHandlers(typeof(CoordinatorHostMarker).Assembly);
 
 // ViewModels are transient so each render gets a fresh instance
 // and the static-SSR lifecycle does not leak state across
 // unrelated requests.
-builder.Services.AddTransient<ApiKeysPageViewModel>();
 builder.Services.AddTransient<TasksPageViewModel>();
-builder.Services.AddTransient<InstallPageViewModel>();
 builder.Services.AddTransient<DashboardPageViewModel>();
 builder.Services.AddTransient<LogViewerPageViewModel>();
 
@@ -297,10 +266,19 @@ builder.Services.AddHostedService<TelemetryPruneService>();
 
 var app = builder.Build();
 
+// Warn at startup if the operator forgot to set the shared worker API
+// key — without it the worker endpoints will reject every request.
+var startupLogger = app.Services.GetRequiredService<ILoggerFactory>()
+    .CreateLogger("BitNetSharp.Distributed.Coordinator.Startup");
+if (string.IsNullOrWhiteSpace(app.Services.GetRequiredService<CoordinatorOptions>().WorkerApiKey))
+{
+    startupLogger.LogWarning(
+        "Coordinator:WorkerApiKey is not configured. Set the Coordinator__WorkerApiKey environment variable on the coordinator host and restart; every worker must present that same key in the X-Api-Key header.");
+}
+
 // Ensure all stores create their schema / directories on startup.
 _ = app.Services.GetRequiredService<SqliteWorkQueueStore>();
 _ = app.Services.GetRequiredService<SqliteWorkerRegistryStore>();
-_ = app.Services.GetRequiredService<SqliteClientRevocationStore>();
 _ = app.Services.GetRequiredService<FileSystemWeightStore>();
 _ = app.Services.GetRequiredService<SqliteTelemetryStore>();
 _ = app.Services.GetRequiredService<SqliteLogStore>();
@@ -313,7 +291,6 @@ app.Services.GetRequiredService<WeightApplicationService>().EnsureInitialized();
 app.UseAuthentication();
 app.UseAuthorization();
 app.UseAntiforgery();
-app.UseMiddleware<JwtRevocationMiddleware>();
 app.UseIdentityServer();
 
 // ── Unauthenticated endpoints ─────────────────────────────────────
@@ -326,8 +303,7 @@ app.MapGet("/health", () => Results.Ok(new
 
 app.MapGet("/status", (
     SqliteWorkQueueStore workQueue,
-    SqliteWorkerRegistryStore workerRegistryStore,
-    WorkerClientRegistry clientRegistry) =>
+    SqliteWorkerRegistryStore workerRegistryStore) =>
 {
     return Results.Ok(new
     {
@@ -340,7 +316,6 @@ app.MapGet("/status", (
         },
         workers = new
         {
-            configured = clientRegistry.Count,
             active     = workerRegistryStore.CountByState(WorkerState.Active),
             draining   = workerRegistryStore.CountByState(WorkerState.Draining),
             gone       = workerRegistryStore.CountByState(WorkerState.Gone)
@@ -349,10 +324,11 @@ app.MapGet("/status", (
     });
 }).AllowAnonymous();
 
-// ── Worker endpoints (JWT-protected) ──────────────────────────────
-// Every handler below is a thin pass-through: pull the authenticated
-// client_id claim off the JWT, build the CQRS command, dispatch it,
-// map Result<T> to HTTP. No business logic in the endpoint layer.
+// ── Worker endpoints (X-Api-Key-protected) ────────────────────────
+// Every handler below is a thin pass-through: pull the calling
+// worker's self-declared id off the X-Worker-Id header (surfaced as
+// the "client_id" claim by the auth handler), build the CQRS
+// command, dispatch it, map Result<T> to HTTP.
 
 app.MapPost("/register", async (
     [FromBody] WorkerRegistrationRequest request,
@@ -369,7 +345,7 @@ app.MapPost("/register", async (
         : Results.Json(
             new ErrorResponse("register_failed", result.Error ?? "unknown"),
             statusCode: StatusCodes.Status400BadRequest);
-}).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
+}).RequireAuthorization(WorkerApiKeyAuth.PolicyName);
 
 // ── /work — claim the next pending task for this worker ──────────
 app.MapGet("/work", async (
@@ -391,7 +367,7 @@ app.MapGet("/work", async (
     return result.Value is null
         ? Results.StatusCode(StatusCodes.Status204NoContent)
         : Results.Ok(result.Value);
-}).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
+}).RequireAuthorization(WorkerApiKeyAuth.PolicyName);
 
 // ── /heartbeat — worker pings the coordinator periodically ───────
 app.MapPost("/heartbeat", async (
@@ -419,12 +395,9 @@ app.MapPost("/heartbeat", async (
     return Results.Json(
         new ErrorResponse("heartbeat_failed", result.Error ?? "unknown"),
         statusCode: StatusCodes.Status400BadRequest);
-}).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
+}).RequireAuthorization(WorkerApiKeyAuth.PolicyName);
 
 // ── /gradient — worker reports task completion ──────────────────
-// D-1 stub: validates ownership, marks the task Done, does NOT yet
-// apply the gradient to the global weights. Phase D-4 introduces the
-// gradient decoder + weight updater.
 app.MapPost("/gradient", async (
     [FromBody] GradientSubmission submission,
     HttpContext http,
@@ -443,7 +416,7 @@ app.MapPost("/gradient", async (
     if (result.Error == SubmitGradientCommandHandler.WorkerMismatchCode)
     {
         return Results.Json(
-            new ErrorResponse("worker_mismatch", "Gradient workerId must match the JWT client_id."),
+            new ErrorResponse("worker_mismatch", "Gradient workerId must match the X-Worker-Id header."),
             statusCode: StatusCodes.Status403Forbidden);
     }
 
@@ -457,12 +430,9 @@ app.MapPost("/gradient", async (
     return Results.Json(
         new ErrorResponse("gradient_failed", result.Error ?? "unknown"),
         statusCode: StatusCodes.Status400BadRequest);
-}).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
+}).RequireAuthorization(WorkerApiKeyAuth.PolicyName);
 
 // ── /logs — structured log ingestion from workers ────────────────
-// Workers batch log entries and POST them as a LogBatch. The
-// coordinator stamps the authenticated client_id on every entry
-// so a compromised worker cannot impersonate another's logs.
 app.MapPost("/logs", (
     [FromBody] LogBatch batch,
     HttpContext http,
@@ -488,12 +458,9 @@ app.MapPost("/logs", (
 
     var ingested = logStore.InsertBatch(clientId, rows);
     return Results.Ok(new { ingested });
-}).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
+}).RequireAuthorization(WorkerApiKeyAuth.PolicyName);
 
 // ── /corpus/{shardId} — streams a corpus shard to the worker ─────
-// Workers download shard data before computing gradients against it.
-// The coordinator serves shards from the corpus directory as plain
-// text with optional byte-range support.
 app.MapGet("/corpus/{shardId}", (
     string shardId,
     CoordinatorOptions options) =>
@@ -514,7 +481,7 @@ app.MapGet("/corpus/{shardId}", (
         contentType: "text/plain; charset=utf-8",
         fileDownloadName: $"{shardId}.txt",
         enableRangeProcessing: true);
-}).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
+}).RequireAuthorization(WorkerApiKeyAuth.PolicyName);
 
 // ── /weights/{version} — streams a weight blob to the worker ─────
 app.MapGet("/weights/{version:long}", (
@@ -542,18 +509,13 @@ app.MapGet("/weights/{version:long}", (
         contentType: "application/octet-stream",
         fileDownloadName: $"bitnet-weights-v{version}.bin",
         enableRangeProcessing: true);
-}).RequireAuthorization(IdentityServerResources.WorkerPolicyName);
+}).RequireAuthorization(WorkerApiKeyAuth.PolicyName);
 
 // ── Admin Blazor UI (cookie + OIDC) ───────────────────────────────
 app.MapRazorComponents<App>()
     .AddInteractiveServerRenderMode();
 
 // ── Account/Login POST handler ────────────────────────────────────
-// Receives the login form submission from Components/Pages/LoginPage.razor,
-// validates the credentials against Duende's TestUserStore, signs in
-// on the "idsrv" cookie so the in-progress /connect/authorize
-// request can resume, and redirects the browser back to the caller's
-// returnUrl — which is the Duende authorize continuation URL.
 app.MapPost("/Account/Login/submit", async (
     [FromForm] string username,
     [FromForm] string password,
@@ -563,16 +525,12 @@ app.MapPost("/Account/Login/submit", async (
 {
     if (!users.ValidateCredentials(username, password))
     {
-        var safeReturn = string.IsNullOrWhiteSpace(returnUrl) ? "/admin/api-keys" : returnUrl;
+        var safeReturn = string.IsNullOrWhiteSpace(returnUrl) ? "/admin/dashboard" : returnUrl;
         return Results.Redirect(
             $"/Account/Login?error={Uri.EscapeDataString("Invalid credentials")}&returnUrl={Uri.EscapeDataString(safeReturn)}");
     }
 
     var user = users.FindByUsername(username);
-    // Use the full ClaimTypes URIs so RequireRole("admin") in the
-    // AdminPolicy matches. The short "role" string doesn't map to
-    // ClaimTypes.Role automatically outside of JwtBearer which has
-    // its own mapping table.
     var claims = new List<Claim>
     {
         new(ClaimTypes.Name, user.Username),
@@ -582,18 +540,9 @@ app.MapPost("/Account/Login/submit", async (
         new("sub", user.SubjectId)
     };
 
-    // Sign in on the Duende IS cookie so /connect/authorize works
-    // for any future OIDC interactions.
     var idsrvPrincipal = new ClaimsPrincipal(new ClaimsIdentity(claims, IdentityServerConstants.DefaultCookieAuthenticationScheme));
     await http.SignInAsync(IdentityServerConstants.DefaultCookieAuthenticationScheme, idsrvPrincipal);
 
-    // ALSO sign in on the application's own Cookies scheme so the
-    // admin dashboard and other [Authorize(Policy="AdminPolicy")]
-    // pages work immediately without a self-referential OIDC code
-    // exchange redirect chain. The login form IS the authentication
-    // event — there is no security benefit to forcing the browser
-    // through /connect/authorize → /signin-oidc just to set a
-    // second cookie.
     var cookiesPrincipal = new ClaimsPrincipal(new ClaimsIdentity(claims, CookieAuthenticationDefaults.AuthenticationScheme));
     await http.SignInAsync(CookieAuthenticationDefaults.AuthenticationScheme, cookiesPrincipal);
 
@@ -601,15 +550,7 @@ app.MapPost("/Account/Login/submit", async (
     return Results.Redirect(redirect);
 }).DisableAntiforgery();
 
-// ── Admin rotate endpoint (cookie auth) ───────────────────────────
-// Thin pass-through: no business logic lives here, it dispatches a
-// RotateClientSecretCommand through the CQRS pipeline and maps the
-// result to HTTP. Same handler is reachable from ViewModel / tests /
-// scripts.
-// Admin action: bulk-enqueue a run of pending tasks. Takes the
-// usual shard parameters plus a count and fans out a single
-// EnqueueTasksCommand to the handler. Used to seed a training
-// run from curl / scripts.
+// Admin action: bulk-enqueue a run of pending tasks.
 app.MapPost("/admin/tasks/enqueue", async (
     [FromBody] EnqueueTasksCommand command,
     IDispatcher dispatcher) =>
@@ -625,10 +566,7 @@ app.MapPost("/admin/tasks/enqueue", async (
             statusCode: StatusCodes.Status400BadRequest);
 }).RequireAuthorization("AdminPolicy").DisableAntiforgery();
 
-// Admin dashboard: mark worker Draining or Gone. Both endpoints
-// accept a POST with no body, dispatch the CQRS
-// MarkWorkerStateCommand, and redirect back to the dashboard so
-// the new state shows up on the next render.
+// Admin dashboard: mark worker Draining or Gone.
 app.MapPost("/admin/workers/{workerId}/drain", async (
     string workerId,
     [FromQuery] string? redirect,
@@ -673,8 +611,7 @@ app.MapPost("/admin/workers/{workerId}/gone", async (
 
 // Form-post shim so the /admin/tasks Razor page's HTML form can
 // submit urlencoded data and get a redirect-back instead of the
-// JSON 200 response. Accepts the same parameters as the JSON
-// endpoint above.
+// JSON 200 response.
 app.MapPost("/admin/tasks/enqueue-form", async (
     [FromForm] string shardId,
     [FromForm] long startOffset,
@@ -709,196 +646,12 @@ app.MapPost("/admin/tasks/enqueue-form", async (
     return Results.Redirect(errorUrl);
 }).RequireAuthorization("AdminPolicy").DisableAntiforgery();
 
-// ── Admin add-client endpoint (cookie auth) ───────────────────────
-// Registers a brand-new worker OAuth client at runtime, echoing the
-// generated plaintext secret back through a redirect query string
-// so the ApiKeys page can highlight it exactly like a rotation.
-// Accepts a form-urlencoded POST from the new-client form on
-// /admin/api-keys.
-app.MapPost("/admin/clients", async (
-    [FromForm] string clientId,
-    [FromForm] string? displayName,
-    IDispatcher dispatcher) =>
-{
-    var result = await dispatcher
-        .SendAsync<AddWorkerClientResult>(new AddWorkerClientCommand(clientId, displayName))
-        .ConfigureAwait(false);
-
-    if (!result.IsSuccess)
-    {
-        var errorUrl = $"/admin/api-keys?error={Uri.EscapeDataString(result.Error ?? "unknown")}";
-        return Results.Redirect(errorUrl);
-    }
-
-    var addedUrl = $"/admin/api-keys?added={Uri.EscapeDataString(result.Value!.ClientId)}";
-    return Results.Redirect(addedUrl);
-}).RequireAuthorization("AdminPolicy").DisableAntiforgery();
-
-app.MapPost("/admin/rotate/{clientId}", async (
-    string clientId,
-    [FromQuery] string? redirect,
-    IDispatcher dispatcher) =>
-{
-    var result = await dispatcher
-        .SendAsync<RotationResult>(new RotateClientSecretCommand(clientId))
-        .ConfigureAwait(false);
-
-    if (!result.IsSuccess)
-    {
-        return Results.Json(
-            new ErrorResponse("rotate_failed", result.Error ?? "Rotate command failed."),
-            statusCode: StatusCodes.Status404NotFound);
-    }
-
-    var rotation = result.Value!;
-    if (!string.IsNullOrWhiteSpace(redirect))
-    {
-        var separator = redirect.Contains('?') ? '&' : '?';
-        var target = $"{redirect}{separator}rotated={Uri.EscapeDataString(rotation.ClientId)}";
-        return Results.Redirect(target);
-    }
-
-    return Results.Ok(new
-    {
-        client_id  = rotation.ClientId,
-        new_secret = rotation.NewSecret,
-        revoked_at = rotation.RevokedAtUtc
-    });
-}).RequireAuthorization("AdminPolicy").DisableAntiforgery();
-
-// ── Admin install-script download endpoints ───────────────────────
-// Serve the per-client bash + PowerShell install scripts rendered by
-// GetWorkerInstallScriptQuery as downloadable files. The admin
-// /admin/install Razor page links operators here so they can grab a
-// ready-to-run script instead of copy-pasting from the browser.
-// Scripts embed the plain-text client secret, so both endpoints stay
-// behind AdminPolicy.
-app.MapGet("/admin/install/{clientId}.sh", async (
-    string clientId,
-    IDispatcher dispatcher) =>
-{
-    var result = await dispatcher
-        .QueryAsync<InstallScriptResult>(new GetWorkerInstallScriptQuery(clientId, InstallShell.Bash))
-        .ConfigureAwait(false);
-
-    return result.IsSuccess
-        ? Results.File(
-            System.Text.Encoding.UTF8.GetBytes(result.Value!.Content),
-            result.Value!.ContentType,
-            result.Value!.Filename)
-        : Results.Json(
-            new ErrorResponse("install_script_failed", result.Error ?? "unknown"),
-            statusCode: StatusCodes.Status404NotFound);
-}).RequireAuthorization("AdminPolicy");
-
-app.MapGet("/admin/install/{clientId}.ps1", async (
-    string clientId,
-    IDispatcher dispatcher) =>
-{
-    var result = await dispatcher
-        .QueryAsync<InstallScriptResult>(new GetWorkerInstallScriptQuery(clientId, InstallShell.PowerShell))
-        .ConfigureAwait(false);
-
-    return result.IsSuccess
-        ? Results.File(
-            System.Text.Encoding.UTF8.GetBytes(result.Value!.Content),
-            result.Value!.ContentType,
-            result.Value!.Filename)
-        : Results.Json(
-            new ErrorResponse("install_script_failed", result.Error ?? "unknown"),
-            statusCode: StatusCodes.Status404NotFound);
-}).RequireAuthorization("AdminPolicy");
-
-// ── Anonymous install-script download (gated by client secret) ─────
-// The rendered script already embeds the plain-text client secret,
-// so knowledge of the secret is equivalent to being allowed to
-// download it. These routes let an operator fetch the script with a
-// single `curl`/`iwr` on a remote worker machine without needing
-// admin cookies:
-//
-//     curl -fsSL "https://<coord>/install/<client>.sh?k=<secret>" -o bitnet-worker.sh
-//
-// The secret is validated with a constant-time compare against
-// WorkerClientRegistry; rotating the secret via /admin/rotate
-// invalidates any previously-shared download URL.
-static IResult HandleAnonymousInstallDownload(
-    string clientId,
-    string? k,
-    InstallShell shell,
-    BitNetSharp.Distributed.Coordinator.Identity.WorkerClientRegistry registry,
-    IDispatcher dispatcher)
-{
-    if (string.IsNullOrEmpty(k))
-    {
-        return Results.Json(
-            new ErrorResponse("missing_key", "Query parameter 'k' (client secret) is required."),
-            statusCode: StatusCodes.Status401Unauthorized);
-    }
-
-    var entry = registry.Find(clientId);
-    if (entry is null)
-    {
-        return Results.Json(
-            new ErrorResponse("unknown_client", $"Unknown worker client '{clientId}'."),
-            statusCode: StatusCodes.Status404NotFound);
-    }
-
-    var expected = System.Text.Encoding.UTF8.GetBytes(entry.PlainTextSecret);
-    var actual   = System.Text.Encoding.UTF8.GetBytes(k);
-    if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(expected, actual))
-    {
-        return Results.Json(
-            new ErrorResponse("bad_key", "Invalid client secret."),
-            statusCode: StatusCodes.Status401Unauthorized);
-    }
-
-    var result = dispatcher
-        .QueryAsync<InstallScriptResult>(new GetWorkerInstallScriptQuery(clientId, shell))
-        .GetAwaiter()
-        .GetResult();
-
-    return result.IsSuccess
-        ? Results.File(
-            System.Text.Encoding.UTF8.GetBytes(result.Value!.Content),
-            result.Value!.ContentType,
-            result.Value!.Filename)
-        : Results.Json(
-            new ErrorResponse("install_script_failed", result.Error ?? "unknown"),
-            statusCode: StatusCodes.Status500InternalServerError);
-}
-
-app.MapGet("/install/{clientId}.sh", (
-    string clientId,
-    [FromQuery] string? k,
-    BitNetSharp.Distributed.Coordinator.Identity.WorkerClientRegistry registry,
-    IDispatcher dispatcher) =>
-    HandleAnonymousInstallDownload(clientId, k, InstallShell.Bash, registry, dispatcher))
-    .AllowAnonymous();
-
-app.MapGet("/install/{clientId}.ps1", (
-    string clientId,
-    [FromQuery] string? k,
-    BitNetSharp.Distributed.Coordinator.Identity.WorkerClientRegistry registry,
-    IDispatcher dispatcher) =>
-    HandleAnonymousInstallDownload(clientId, k, InstallShell.PowerShell, registry, dispatcher))
-    .AllowAnonymous();
-
 app.Run();
 return 0;
 
 static string BuildConnectionString(CoordinatorOptions coord) =>
     $"Data Source={coord.DatabasePath};Cache=Shared";
 
-/// <summary>
-/// Generates the Truck Mate synthetic training corpus and writes
-/// it as sharded text files + a manifest.json into the corpus
-/// directory alongside the coordinator's database.
-///
-///     dotnet BitNetSharp.Distributed.Coordinator.dll generate-corpus [count]
-///
-/// Default count is 50,000 examples. The corpus is written to the
-/// same parent directory as DatabasePath/corpus/.
-/// </summary>
 static int GenerateCorpusCommandLine(string[] args)
 {
     try
@@ -942,15 +695,6 @@ static int GenerateCorpusCommandLine(string[] args)
     }
 }
 
-/// <summary>
-/// Trains a word-level tokenizer on the text corpus shards, writes
-/// the vocabulary as vocab.json, and pre-tokenizes every shard into
-/// binary int32 files workers can consume directly. Invoked as:
-///
-///     dotnet BitNetSharp.Distributed.Coordinator.dll tokenize-corpus [maxVocab]
-///
-/// Default maxVocab = 8000.
-/// </summary>
 static int TokenizeCorpusCommandLine(string[] args)
 {
     try
@@ -977,7 +721,6 @@ static int TokenizeCorpusCommandLine(string[] args)
         var tokenizedDir = System.IO.Path.Combine(corpusDir, "tokenized");
         Directory.CreateDirectory(tokenizedDir);
 
-        // Collect all text shard files
         var shardFiles = Directory.GetFiles(corpusDir, "*.txt")
             .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -990,7 +733,6 @@ static int TokenizeCorpusCommandLine(string[] args)
 
         Console.WriteLine($"Training tokenizer on {shardFiles.Length} shards (maxVocab={maxVocab})…");
 
-        // Stream all lines for tokenizer training
         IEnumerable<string> AllLines()
         {
             foreach (var file in shardFiles)
@@ -1010,7 +752,6 @@ static int TokenizeCorpusCommandLine(string[] args)
         tokenizer.SaveToFile(vocabPath);
         Console.WriteLine($"Vocabulary: {tokenizer.VocabSize} tokens → {vocabPath}");
 
-        // Pre-tokenize each shard into a binary int32 file
         long totalTokens = 0;
         foreach (var shardFile in shardFiles)
         {
@@ -1046,12 +787,6 @@ static int TokenizeCorpusCommandLine(string[] args)
     }
 }
 
-/// <summary>
-/// Seeds pending training tasks into the coordinator's SQLite work
-/// queue from the CLI. Invoked when <c>args[0] == "seed-tasks"</c>
-/// so it runs before the web host is constructed and exits
-/// immediately after the insert loop completes.
-/// </summary>
 static int SeedTasksCommandLine(string[] args)
 {
     try
@@ -1062,8 +797,6 @@ static int SeedTasksCommandLine(string[] args)
             count = parsedCount;
         }
 
-        // Mirror the web host's configuration pipeline so this
-        // command targets the same database file the service uses.
         var config = new ConfigurationBuilder()
             .SetBasePath(System.IO.Path.GetDirectoryName(typeof(Program).Assembly.Location) ?? ".")
             .AddJsonFile("appsettings.json", optional: true)
@@ -1138,4 +871,36 @@ namespace BitNetSharp.Distributed.Coordinator
     /// type in the coordinator assembly works.
     /// </summary>
     public sealed class CoordinatorHostMarker;
+
+    /// <summary>
+    /// Authorization-policy name applied to every protected worker
+    /// endpoint. Centralized here so tests, middleware, and the host
+    /// share the same string.
+    /// </summary>
+    public static class WorkerApiKeyAuth
+    {
+        public const string PolicyName = "WorkerApiKeyPolicy";
+    }
+
+    /// <summary>
+    /// Wires the <see cref="Authentication.ApiKeyAuthenticationOptions.ExpectedKey"/>
+    /// factory to the live <see cref="CoordinatorOptions"/> snapshot.
+    /// Kept as a class so DI can resolve its dependency chain after
+    /// the auth scheme is registered.
+    /// </summary>
+    internal sealed class ApiKeyPostConfigure :
+        IPostConfigureOptions<Authentication.ApiKeyAuthenticationOptions>
+    {
+        private readonly IOptionsMonitor<CoordinatorOptions> _coordinator;
+
+        public ApiKeyPostConfigure(IOptionsMonitor<CoordinatorOptions> coordinator)
+        {
+            _coordinator = coordinator;
+        }
+
+        public void PostConfigure(string? name, Authentication.ApiKeyAuthenticationOptions options)
+        {
+            options.ExpectedKey = () => _coordinator.CurrentValue.WorkerApiKey;
+        }
+    }
 }

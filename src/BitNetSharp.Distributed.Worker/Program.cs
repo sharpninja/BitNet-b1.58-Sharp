@@ -16,19 +16,20 @@ using Serilog.Sinks.PeriodicBatching;
 //    1. Read WorkerConfig from environment variables.
 //    2. Run the startup BenchmarkDotNet calibration to measure
 //       throughput.
-//    3. Build a CoordinatorClient, request a JWT access token from
-//       the coordinator's Duende IdentityServer via OAuth 2.0
-//       client credentials, and POST /register with the
-//       CapabilityReport.
+//    3. Build a CoordinatorClient (which seeds the X-Api-Key +
+//       X-Worker-Id request headers from the env config) and POST
+//       /register with the CapabilityReport.
 //    4. Log the coordinator's recommended task size.
 //    5. Enter the heartbeat loop: every tick, touch the local
 //       health beacon and POST a heartbeat to the coordinator so
 //       the server-side sweeper keeps us Active.
 //    6. Handle SIGTERM / SIGINT gracefully.
 //
-//  Task execution (/work poll, gradient compute, /gradient POST)
-//  lands in a subsequent step — the D-1 skeleton proves the auth +
-//  register + heartbeat round-trip works end-to-end first.
+//  Worker auth = single shared API key set by the operator on the
+//  coordinator via `Coordinator__WorkerApiKey` env var. Every worker
+//  presents the same key in `X-Api-Key`; a rotate = change the env
+//  var + restart coordinator and every worker with the old key is
+//  locked out instantly.
 // ────────────────────────────────────────────────────────────────────────
 
 // ── Serilog bootstrap ─────────────────────────────────────────────
@@ -66,13 +67,16 @@ try
 
     using var client = new CoordinatorClient(config);
 
-    Log.Information("Requesting JWT from {Url}connect/token…", config.CoordinatorUrl);
+    Log.Information("Registering with coordinator at {Url} as worker id {WorkerId}…",
+        config.CoordinatorUrl, config.WorkerId);
     var registration = await TryRegisterAsync(client, config, report, cts.Token).ConfigureAwait(false);
 
     if (registration is not null)
     {
-        // Hand the authenticated client to the Serilog sink so it
-        // can start shipping log batches to the coordinator.
+        // Hand the client to the Serilog sink so it can start
+        // shipping log batches to the coordinator. Auth headers are
+        // attached by the client itself so the sink does not need
+        // to touch tokens or secrets.
         coordinatorSink.SetClient(client);
 
         Log.Information("Accepted as worker {WorkerId}. Initial weight version {Version}. Task size {Tokens:N0} tokens. Heartbeat {Heartbeat}s.",
@@ -122,7 +126,7 @@ static async Task<WorkerRegistrationResponse?> TryRegisterAsync(
 {
     var payload = new WorkerRegistrationRequest(
         WorkerName: config.WorkerName,
-        EnrollmentKey: string.Empty, // OAuth flow does not use enrollment key; field kept on DTO for forward compat.
+        EnrollmentKey: string.Empty, // Shared-key flow does not use enrollment key; field kept on DTO for forward compat.
         ProcessArchitecture: RuntimeInformation.ProcessArchitecture.ToString(),
         OsDescription: RuntimeInformation.OSDescription,
         Capability: new WorkerCapabilityDto(
@@ -253,7 +257,7 @@ static async Task RunWorkLoopAsync(
 
             var submission = new GradientSubmission(
                 TaskId: task.TaskId,
-                WorkerId: config.ClientId,
+                WorkerId: config.WorkerId,
                 BaseWeightVersion: task.WeightVersion,
                 TokensSeen: task.TokensPerTask,
                 LossAfter: loss,
@@ -324,7 +328,7 @@ static async Task RunHeartbeatLoopAsync(
             try
             {
                 var heartbeat = new HeartbeatRequest(
-                    WorkerId: config.ClientId,
+                    WorkerId: config.WorkerId,
                     Status: "idle",
                     CurrentTaskId: null,
                     TokensSeenSinceLastHeartbeat: 0);
@@ -364,7 +368,7 @@ static void PrintBanner(WorkerConfig config)
     Console.WriteLine("───────────────────────────────────────────────────────────────");
     Console.WriteLine(string.Create(culture, $" worker name         : {config.WorkerName}"));
     Console.WriteLine(string.Create(culture, $" coordinator         : {config.CoordinatorUrl}"));
-    Console.WriteLine(string.Create(culture, $" client id           : {config.ClientId}"));
+    Console.WriteLine(string.Create(culture, $" worker id           : {config.WorkerId}"));
     Console.WriteLine(string.Create(culture, $" cpu threads         : {config.CpuThreads}"));
     Console.WriteLine(string.Create(culture, $" process architecture: {RuntimeInformation.ProcessArchitecture}"));
     Console.WriteLine(string.Create(culture, $" os description      : {RuntimeInformation.OSDescription}"));

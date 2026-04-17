@@ -1,9 +1,6 @@
 using System;
-using System.Collections.Generic;
 using System.Net.Http;
-using System.Net.Http.Headers;
 using System.Net.Http.Json;
-using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using BitNetSharp.Distributed.Contracts;
@@ -13,11 +10,19 @@ namespace BitNetSharp.Distributed.Worker;
 /// <summary>
 /// Thin HTTP client wrapper that talks to the BitNet coordinator's
 /// REST surface on behalf of the worker. Owns a long-lived
-/// <see cref="HttpClient"/>, fetches JWT access tokens via OAuth 2.0
-/// client credentials against the coordinator's Duende
-/// IdentityServer, and presents convenience methods for the worker
-/// lifecycle: register, heartbeat, try-claim-work, and
-/// submit-gradient.
+/// <see cref="HttpClient"/> pre-loaded with the shared
+/// <c>X-Api-Key</c> and <c>X-Worker-Id</c> request headers, and
+/// presents convenience methods for the worker lifecycle: register,
+/// heartbeat, try-claim-work, and submit-gradient.
+///
+/// <para>
+/// Authentication is a single shared API key set by the operator on
+/// the coordinator via the <c>Coordinator__WorkerApiKey</c> env var.
+/// Every worker sends the same key — there is no token exchange,
+/// no refresh, no rotation protocol. When the operator rotates the
+/// key on the coordinator and restarts it, every worker with the
+/// old key starts getting 401s and must be redeployed.
+/// </para>
 ///
 /// <para>
 /// The class is deliberately dependency-free beyond
@@ -27,29 +32,37 @@ namespace BitNetSharp.Distributed.Worker;
 /// </summary>
 internal sealed class CoordinatorClient : IDisposable
 {
+    /// <summary>Header the coordinator's ApiKey handler reads.</summary>
+    public const string ApiKeyHeader = "X-Api-Key";
+
+    /// <summary>Header the coordinator stamps as the <c>client_id</c> claim.</summary>
+    public const string WorkerIdHeader = "X-Worker-Id";
+
     private readonly HttpClient _http;
     private readonly WorkerConfig _config;
-    private readonly SemaphoreSlim _tokenLock = new(1, 1);
-    private readonly TimeProvider _time;
-    private AccessToken? _currentToken;
     private readonly bool _ownsHttpClient;
 
-    /// <summary>Scope requested on every token call.</summary>
-    public const string WorkerScope = "bitnet-worker";
-
-    public CoordinatorClient(WorkerConfig config, TimeProvider? time = null)
-        : this(config, httpClient: CreateDefaultHttpClient(config), ownsHttpClient: true, time)
+    public CoordinatorClient(WorkerConfig config)
+        : this(config, httpClient: CreateDefaultHttpClient(config), ownsHttpClient: true)
     {
     }
 
-    internal CoordinatorClient(WorkerConfig config, HttpClient httpClient, bool ownsHttpClient, TimeProvider? time = null)
+    internal CoordinatorClient(WorkerConfig config, HttpClient httpClient, bool ownsHttpClient)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(httpClient);
         _config = config;
         _http = httpClient;
         _ownsHttpClient = ownsHttpClient;
-        _time = time ?? TimeProvider.System;
+
+        // Both worker auth headers are constant for the lifetime of
+        // the process — install them once on the default headers so
+        // every request picks them up. Clear any pre-seeded value so
+        // test harnesses that re-use a handler do not double up.
+        _http.DefaultRequestHeaders.Remove(ApiKeyHeader);
+        _http.DefaultRequestHeaders.Remove(WorkerIdHeader);
+        _http.DefaultRequestHeaders.Add(ApiKeyHeader, config.ApiKey);
+        _http.DefaultRequestHeaders.Add(WorkerIdHeader, config.WorkerId);
     }
 
     private static HttpClient CreateDefaultHttpClient(WorkerConfig config)
@@ -64,74 +77,9 @@ internal sealed class CoordinatorClient : IDisposable
     }
 
     /// <summary>
-    /// Ensures a non-expired JWT is held in memory and returns it.
-    /// Fetches a fresh one via <c>POST /connect/token</c> with the
-    /// <see cref="WorkerConfig.ClientId"/> /
-    /// <see cref="WorkerConfig.ClientSecret"/> credentials on a miss
-    /// or when the cached token is within 30 seconds of expiry.
-    /// </summary>
-    public async Task<string> GetAccessTokenAsync(CancellationToken cancellationToken = default)
-    {
-        await _tokenLock.WaitAsync(cancellationToken).ConfigureAwait(false);
-        try
-        {
-            var now = _time.GetUtcNow();
-            if (_currentToken is not null && _currentToken.ExpiresAtUtc - now > TimeSpan.FromSeconds(30))
-            {
-                return _currentToken.Token;
-            }
-
-            var form = new List<KeyValuePair<string, string>>
-            {
-                new("grant_type",    "client_credentials"),
-                new("client_id",     _config.ClientId),
-                new("client_secret", _config.ClientSecret),
-                new("scope",         WorkerScope)
-            };
-
-            using var request = new HttpRequestMessage(HttpMethod.Post, "connect/token")
-            {
-                Content = new FormUrlEncodedContent(form)
-            };
-
-            using var response = await _http.SendAsync(request, cancellationToken).ConfigureAwait(false);
-            response.EnsureSuccessStatusCode();
-
-            var payload = await response.Content.ReadFromJsonAsync<TokenResponse>(cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (payload is null || string.IsNullOrWhiteSpace(payload.AccessToken))
-            {
-                throw new InvalidOperationException("Coordinator returned an empty token response.");
-            }
-
-            var expiresIn = payload.ExpiresIn > 0 ? payload.ExpiresIn : 3600;
-            _currentToken = new AccessToken(
-                Token: payload.AccessToken!,
-                ExpiresAtUtc: _time.GetUtcNow().AddSeconds(expiresIn));
-
-            return _currentToken.Token;
-        }
-        finally
-        {
-            _tokenLock.Release();
-        }
-    }
-
-    /// <summary>
-    /// Forces the cached access token to be discarded so the next
-    /// <see cref="GetAccessTokenAsync"/> call re-authenticates.
-    /// Called by the caller when a protected endpoint returns 401,
-    /// which typically means the operator rotated the client
-    /// secret on the coordinator admin page.
-    /// </summary>
-    public void InvalidateAccessToken()
-    {
-        _currentToken = null;
-    }
-
-    /// <summary>
     /// POSTs the initial <see cref="WorkerRegistrationRequest"/> to
-    /// <c>/register</c>, attaching the JWT access token as the
-    /// bearer header. Throws on non-2xx responses.
+    /// <c>/register</c>. Auth headers are applied automatically.
+    /// Throws on non-2xx responses.
     /// </summary>
     public async Task<WorkerRegistrationResponse> RegisterAsync(
         WorkerRegistrationRequest request,
@@ -139,15 +87,9 @@ internal sealed class CoordinatorClient : IDisposable
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var token = await GetAccessTokenAsync(cancellationToken).ConfigureAwait(false);
-
-        using var message = new HttpRequestMessage(HttpMethod.Post, "register")
-        {
-            Content = JsonContent.Create(request)
-        };
-        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
-
-        using var response = await _http.SendAsync(message, cancellationToken).ConfigureAwait(false);
+        using var response = await _http
+            .PostAsJsonAsync("register", request, cancellationToken)
+            .ConfigureAwait(false);
         response.EnsureSuccessStatusCode();
 
         var payload = await response.Content
@@ -172,14 +114,10 @@ internal sealed class CoordinatorClient : IDisposable
     {
         ArgumentNullException.ThrowIfNull(request);
 
-        var token = await GetAccessTokenAsync(cancellationToken).ConfigureAwait(false);
-        using var message = new HttpRequestMessage(HttpMethod.Post, "heartbeat")
-        {
-            Content = JsonContent.Create(request)
-        };
-        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var response = await _http
+            .PostAsJsonAsync("heartbeat", request, cancellationToken)
+            .ConfigureAwait(false);
 
-        using var response = await _http.SendAsync(message, cancellationToken).ConfigureAwait(false);
         if (response.StatusCode == System.Net.HttpStatusCode.Gone)
         {
             return null;
@@ -199,11 +137,10 @@ internal sealed class CoordinatorClient : IDisposable
     /// </summary>
     public async Task<WorkTaskAssignment?> TryClaimWorkAsync(CancellationToken cancellationToken = default)
     {
-        var token = await GetAccessTokenAsync(cancellationToken).ConfigureAwait(false);
-        using var message = new HttpRequestMessage(HttpMethod.Get, "work");
-        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var response = await _http
+            .GetAsync("work", cancellationToken)
+            .ConfigureAwait(false);
 
-        using var response = await _http.SendAsync(message, cancellationToken).ConfigureAwait(false);
         if (response.StatusCode == System.Net.HttpStatusCode.NoContent)
         {
             return null;
@@ -230,14 +167,10 @@ internal sealed class CoordinatorClient : IDisposable
     {
         ArgumentNullException.ThrowIfNull(submission);
 
-        var token = await GetAccessTokenAsync(cancellationToken).ConfigureAwait(false);
-        using var message = new HttpRequestMessage(HttpMethod.Post, "gradient")
-        {
-            Content = JsonContent.Create(submission)
-        };
-        message.Headers.Authorization = new AuthenticationHeaderValue("Bearer", token);
+        using var response = await _http
+            .PostAsJsonAsync("gradient", submission, cancellationToken)
+            .ConfigureAwait(false);
 
-        using var response = await _http.SendAsync(message, cancellationToken).ConfigureAwait(false);
         if (response.IsSuccessStatusCode)
         {
             return true;
@@ -255,7 +188,8 @@ internal sealed class CoordinatorClient : IDisposable
 
     /// <summary>
     /// Low-level send for the log sink that needs to attach its
-    /// own Authorization header and body. Exposes the raw
+    /// own body. Auth headers ride on the client's DefaultRequestHeaders
+    /// so callers do not need to add them explicitly. Exposes the raw
     /// <see cref="HttpResponseMessage"/> so the caller can handle
     /// status codes however it pleases.
     /// </summary>
@@ -268,36 +202,9 @@ internal sealed class CoordinatorClient : IDisposable
 
     public void Dispose()
     {
-        _tokenLock.Dispose();
         if (_ownsHttpClient)
         {
             _http.Dispose();
         }
-    }
-
-    /// <summary>
-    /// Internal holder for a currently-cached JWT plus its computed
-    /// expiry. Never serialized.
-    /// </summary>
-    private sealed record AccessToken(string Token, DateTimeOffset ExpiresAtUtc);
-
-    /// <summary>
-    /// Minimal wire-format view of Duende IdentityServer's
-    /// <c>/connect/token</c> response. Mapped via snake_case property
-    /// names because the OAuth 2.0 spec uses snake_case.
-    /// </summary>
-    private sealed record TokenResponse
-    {
-        [System.Text.Json.Serialization.JsonPropertyName("access_token")]
-        public string? AccessToken { get; init; }
-
-        [System.Text.Json.Serialization.JsonPropertyName("expires_in")]
-        public int ExpiresIn { get; init; }
-
-        [System.Text.Json.Serialization.JsonPropertyName("token_type")]
-        public string? TokenType { get; init; }
-
-        [System.Text.Json.Serialization.JsonPropertyName("scope")]
-        public string? Scope { get; init; }
     }
 }

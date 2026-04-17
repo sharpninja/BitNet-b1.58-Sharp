@@ -18,21 +18,19 @@ function New-Secret {
     return [Convert]::ToBase64String($bytes).Replace('+','-').Replace('/','_').TrimEnd('=')
 }
 
-$workerClientId     = 'worker-legion2-d2'
-$workerClientSecret = New-Secret
-$adminUsername      = 'admin-d2'
-$adminPassword      = New-Secret
-$coordinatorPort    = 5000
-$baseUrl            = "http://PAYTON-DESKTOP:$coordinatorPort"
+$workerApiKey    = New-Secret
+$adminUsername   = 'admin-d2'
+$adminPassword   = New-Secret
+$coordinatorPort = 5000
+$baseUrl         = "http://PAYTON-DESKTOP:$coordinatorPort"
 
 Write-Host "Launching coordinator on PAYTON-DESKTOP bound to $baseUrl"
-Write-Host "  worker client id     : $workerClientId"
-Write-Host "  worker client secret : $workerClientSecret"
-Write-Host "  admin username       : $adminUsername"
-Write-Host "  admin password       : $adminPassword"
+Write-Host "  worker api key : $workerApiKey"
+Write-Host "  admin username : $adminUsername"
+Write-Host "  admin password : $adminPassword"
 
 $remote = Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
-    param($port, $clientId, $clientSecret, $adminUser, $adminPass, $baseUrl)
+    param($port, $apiKey, $adminUser, $adminPass, $baseUrl)
 
     $ErrorActionPreference = 'Stop'
 
@@ -87,12 +85,9 @@ $remote = Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
         'set Coordinator__StaleWorkerThresholdSeconds=120'
         'set Coordinator__TargetTaskDurationSeconds=60'
         'set Coordinator__FullStepEfficiency=0.25'
-        'set Coordinator__AccessTokenLifetimeSeconds=3600'
         "set Coordinator__Admin__Username=$adminUser"
         "set Coordinator__Admin__Password=$adminPass"
-        "set Coordinator__WorkerClients__0__ClientId=$clientId"
-        "set Coordinator__WorkerClients__0__ClientSecret=$clientSecret"
-        'set Coordinator__WorkerClients__0__DisplayName=Legion2 D-2'
+        "set Coordinator__WorkerApiKey=$apiKey"
         "cd /d F:\GitHub\BitNet-b1.58-Sharp"
         "dotnet `"$dll`" 1>> `"$stdoutLog`" 2>> `"$stderrLog`""
     )
@@ -117,19 +112,18 @@ $remote = Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
         LaunchCmd = $launchCmd
         DbPath    = $dbPath
     }
-} -ArgumentList $coordinatorPort, $workerClientId, $workerClientSecret, $adminUsername, $adminPassword, $baseUrl
+} -ArgumentList $coordinatorPort, $workerApiKey, $adminUsername, $adminPassword, $baseUrl
 
 Write-Host ''
 Write-Host '── Remote coordinator spawned ──────────────────────────────────'
 $remote | Format-List | Out-String | Write-Host
 
 [PSCustomObject]@{
-    WorkerClientId     = $workerClientId
-    WorkerClientSecret = $workerClientSecret
-    AdminUsername      = $adminUsername
-    AdminPassword      = $adminPassword
-    BaseUrl            = $baseUrl
-    RemotePid          = $remote.Pid
-    StdoutLog          = $remote.StdoutLog
-    StderrLog          = $remote.StderrLog
+    WorkerApiKey  = $workerApiKey
+    AdminUsername = $adminUsername
+    AdminPassword = $adminPassword
+    BaseUrl       = $baseUrl
+    RemotePid     = $remote.Pid
+    StdoutLog     = $remote.StdoutLog
+    StderrLog     = $remote.StderrLog
 }

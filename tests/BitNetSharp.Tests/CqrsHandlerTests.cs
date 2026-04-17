@@ -8,7 +8,6 @@ using BitNetSharp.Distributed.Coordinator.Cqrs.Commands;
 using BitNetSharp.Distributed.Coordinator.Cqrs.Queries;
 using BitNetSharp.Distributed.Coordinator.Services;
 using GetTaskQueueSnapshotQueryHandler = BitNetSharp.Distributed.Coordinator.Cqrs.Queries.GetTaskQueueSnapshotQueryHandler;
-using BitNetSharp.Distributed.Coordinator.Identity;
 using BitNetSharp.Distributed.Coordinator.Persistence;
 using McpServer.Cqrs;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -32,11 +31,9 @@ public sealed class CqrsHandlerTests : IDisposable
     private readonly FakeTimeProvider _time;
     private readonly SqliteWorkerRegistryStore _workerStore;
     private readonly SqliteWorkQueueStore _queueStore;
-    private readonly SqliteClientRevocationStore _revocations;
     private readonly SqliteTelemetryStore _telemetry;
     private readonly FileSystemWeightStore _weightStore;
     private readonly WeightApplicationService _weightApplication;
-    private readonly WorkerClientRegistry _registry;
     private readonly IOptionsMonitor<CoordinatorOptions> _options;
 
     public CqrsHandlerTests()
@@ -47,20 +44,8 @@ public sealed class CqrsHandlerTests : IDisposable
         var connectionString = $"Data Source={_databasePath}";
         _workerStore = new SqliteWorkerRegistryStore(connectionString, _time);
         _queueStore = new SqliteWorkQueueStore(connectionString, _time);
-        _revocations = new SqliteClientRevocationStore(connectionString, _time);
         _telemetry = new SqliteTelemetryStore(connectionString, _time);
         _weightStore = new FileSystemWeightStore(_weightsDirectory);
-
-        _registry = new WorkerClientRegistry();
-        _registry.Seed(new[]
-        {
-            new WorkerClientOptions
-            {
-                ClientId = "worker-alpha",
-                ClientSecret = "alpha-secret",
-                DisplayName = "Alpha"
-            }
-        });
 
         _options = new StaticOptionsMonitor<CoordinatorOptions>(new CoordinatorOptions
         {
@@ -86,7 +71,6 @@ public sealed class CqrsHandlerTests : IDisposable
     {
         _workerStore.Dispose();
         _queueStore.Dispose();
-        _revocations.Dispose();
         _telemetry.Dispose();
         TryDelete(_databasePath);
         TryDelete(_databasePath + "-wal");
@@ -466,113 +450,6 @@ public sealed class CqrsHandlerTests : IDisposable
 
         Assert.True(result.IsFailure);
         Assert.Equal(SubmitGradientCommandHandler.TaskNotAssignedCode, result.Error);
-    }
-
-    // ── GetWorkerClientsQuery ───────────────────────────────────────
-
-    // ── GetWorkerInstallScriptQuery ─────────────────────────────────
-
-    [Fact]
-    public async Task GetWorkerInstallScript_renders_bash_for_known_client()
-    {
-        var handler = new GetWorkerInstallScriptQueryHandler(_registry, _options);
-
-        using var context = new CallContext();
-        var result = await handler.HandleAsync(
-            new GetWorkerInstallScriptQuery("worker-alpha", InstallShell.Bash),
-            context);
-
-        Assert.True(result.IsSuccess);
-        Assert.EndsWith(".sh", result.Value!.Filename);
-        Assert.Contains("BITNET_CLIENT_ID=\"worker-alpha\"", result.Value.Content);
-        Assert.Contains("BITNET_CLIENT_SECRET=\"alpha-secret\"", result.Value.Content);
-        Assert.Contains("http://localhost", result.Value.Content);
-    }
-
-    [Fact]
-    public async Task GetWorkerInstallScript_renders_powershell_for_known_client()
-    {
-        var handler = new GetWorkerInstallScriptQueryHandler(_registry, _options);
-
-        using var context = new CallContext();
-        var result = await handler.HandleAsync(
-            new GetWorkerInstallScriptQuery("worker-alpha", InstallShell.PowerShell),
-            context);
-
-        Assert.True(result.IsSuccess);
-        Assert.EndsWith(".ps1", result.Value!.Filename);
-        Assert.Contains("BITNET_CLIENT_ID         = 'worker-alpha'", result.Value.Content);
-        Assert.Contains("BITNET_CLIENT_SECRET     = 'alpha-secret'", result.Value.Content);
-    }
-
-    [Fact]
-    public async Task GetWorkerInstallScript_fails_for_unknown_client()
-    {
-        var handler = new GetWorkerInstallScriptQueryHandler(_registry, _options);
-
-        using var context = new CallContext();
-        var result = await handler.HandleAsync(
-            new GetWorkerInstallScriptQuery("ghost-client", InstallShell.Bash),
-            context);
-
-        Assert.True(result.IsFailure);
-        Assert.Contains("Unknown worker client", result.Error);
-    }
-
-    [Fact]
-    public async Task GetWorkerClients_returns_registry_entries_with_revocation_status()
-    {
-        _revocations.Revoke("worker-alpha");
-
-        var handler = new GetWorkerClientsQueryHandler(_registry, _revocations);
-
-        using var context = new CallContext();
-        var result = await handler.HandleAsync(new GetWorkerClientsQuery(), context);
-
-        Assert.True(result.IsSuccess);
-        Assert.Single(result.Value!);
-        var view = result.Value![0];
-        Assert.Equal("worker-alpha", view.ClientId);
-        Assert.Equal("alpha-secret", view.ClientSecret);
-        Assert.NotNull(view.RevokedAtUtc);
-    }
-
-    // ── RotateClientSecretCommand ───────────────────────────────────
-
-    [Fact]
-    public async Task RotateClientSecret_generates_new_secret_and_revokes()
-    {
-        var handler = new RotateClientSecretCommandHandler(
-            _registry,
-            _revocations,
-            NullLogger<RotateClientSecretCommandHandler>.Instance);
-
-        using var context = new CallContext();
-        var result = await handler.HandleAsync(
-            new RotateClientSecretCommand("worker-alpha"),
-            context);
-
-        Assert.True(result.IsSuccess);
-        Assert.Equal("worker-alpha", result.Value!.ClientId);
-        Assert.NotEqual("alpha-secret", result.Value.NewSecret);
-        Assert.NotNull(_revocations.GetRevokedAt("worker-alpha"));
-    }
-
-    [Fact]
-    public async Task RotateClientSecret_fails_for_unknown_client()
-    {
-        var handler = new RotateClientSecretCommandHandler(
-            _registry,
-            _revocations,
-            NullLogger<RotateClientSecretCommandHandler>.Instance);
-
-        using var context = new CallContext();
-        var result = await handler.HandleAsync(
-            new RotateClientSecretCommand("ghost-client"),
-            context);
-
-        Assert.True(result.IsFailure);
-        Assert.NotNull(result.Error);
     }
 
     // ── EnqueueTasksCommand ─────────────────────────────────────────
