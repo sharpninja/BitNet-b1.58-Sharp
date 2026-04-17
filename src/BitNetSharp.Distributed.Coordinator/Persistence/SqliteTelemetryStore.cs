@@ -225,6 +225,35 @@ FROM (
     }
 
     /// <summary>
+    /// Returns the fleet-wide measured tokens/sec over accepted
+    /// gradients inside <paramref name="maxAge"/> (default 30 min).
+    /// Used by the seed-size feedback loop in <c>seed-real-tasks</c>
+    /// to pick <c>tokensPerTask</c> so a newly-seeded task fits the
+    /// 10-minute target window on the slowest current worker.
+    /// Returns <c>null</c> when no gradients exist in the window or
+    /// total wall-clock is zero.
+    /// </summary>
+    public double? GetGlobalMeasuredTokensPerSecond(TimeSpan? maxAge = null)
+    {
+        var window = maxAge ?? TimeSpan.FromMinutes(30);
+        var cutoff = _time.GetUtcNow().Subtract(window).ToUnixTimeSeconds();
+
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+SELECT COALESCE(SUM(tokens_seen), 0), COALESCE(SUM(wall_clock_ms), 0)
+FROM gradient_events
+WHERE received_at >= $cutoff;";
+        cmd.Parameters.AddWithValue("$cutoff", cutoff);
+
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        var tokens = reader.GetInt64(0);
+        var wallMs = reader.GetInt64(1);
+        if (tokens <= 0 || wallMs <= 0) return null;
+        return tokens / (wallMs / 1000.0);
+    }
+
+    /// <summary>
     /// Total row count in the telemetry table; handy for sanity
     /// checks in tests.
     /// </summary>

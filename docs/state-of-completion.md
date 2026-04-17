@@ -76,7 +76,7 @@ the detailed plans in `distributed-training.md`,
 | `seed-real-tasks` CLI | ✅ | Phase-A real-shard seeding |
 | `dump-events` CLI | ✅ | Diagnostic log tail |
 | Deadline calibration from measured tps | ✅ | Landed in commit `9b604b7`; fallback `TargetTaskDurationSeconds*2` covers first-task case |
-| Seed-size feedback loop | ⚪ | P1 — K=1 default in `seed-real-tasks` keeps tasks inside 10-min target; automatic tokensPerTask sizing still pending |
+| Seed-size feedback loop | ✅ | `seed-real-tasks auto` reads fleet-wide gradient_events tps and sizes `tokensPerTask` to fit `TargetTaskDurationSeconds`; falls back to 16,384 when the telemetry table is empty |
 | "Stuck but alive" UI counter | ⚪ | P2 |
 | Purge of legacy 1,605 seed rows | ⚪ | P4 — product decision pending |
 
@@ -159,11 +159,13 @@ lands.
 `ClaimNextTaskCommandHandler.LeaseFor`, `SeedRealTasksCommandLine`.
 
 ### P1 — Seed-size feedback loop
-**Status:** ⚪ not started. Depends on P0.
-**Plan:** `seed-real-tasks` reads mean `tokens/(wall_clock_ms/1000)`
-from `gradient_events`, defaults `tokensPerTask ≈ realTps × 600`.
-**Acceptance:** newly seeded tasks fit in the 10-minute target
-without operator-tuned `tokensPerTask`.
+**Status:** ✅ shipped. `seed-real-tasks auto` reads the fleet-wide
+measured tps from `gradient_events` (30-min window) and picks
+`tokensPerTask = round(tps × TargetTaskDurationSeconds, multiple of
+512)`. Falls back to 16,384 when no recent events exist, so a fresh
+coordinator DB still seeds sanely.
+**Files:** `SqliteTelemetryStore.GetGlobalMeasuredTokensPerSecond`,
+`SeedRealTasksCommandLine` auto branch.
 
 ### P2 — "Soft-expired but alive" UI counter
 **Status:** ⚪ not started.

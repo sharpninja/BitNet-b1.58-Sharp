@@ -691,5 +691,51 @@ public sealed class CqrsHandlerTests : IDisposable
         Assert.True(result.IsSuccess);
         Assert.Equal(2, result.Value!.Inserted);
     }
+
+    [Fact]
+    public void GetGlobalMeasuredTokensPerSecond_returns_null_when_empty()
+    {
+        Assert.Null(_telemetry.GetGlobalMeasuredTokensPerSecond());
+    }
+
+    [Fact]
+    public void GetGlobalMeasuredTokensPerSecond_uses_sum_across_workers()
+    {
+        _telemetry.RecordAccepted(
+            clientId: "w1", taskId: "t1", tokensSeen: 1000,
+            wallClockMs: 2000, staleness: 0, effectiveLr: 0.1f,
+            newVersion: 1, lossAfter: 2.0);
+        _telemetry.RecordAccepted(
+            clientId: "w2", taskId: "t2", tokensSeen: 3000,
+            wallClockMs: 2000, staleness: 0, effectiveLr: 0.1f,
+            newVersion: 2, lossAfter: 2.0);
+
+        // 4000 tokens / 4.0s = 1000 tok/s
+        var tps = _telemetry.GetGlobalMeasuredTokensPerSecond();
+        Assert.NotNull(tps);
+        Assert.Equal(1000.0, tps!.Value, precision: 3);
+    }
+
+    [Fact]
+    public void GetGlobalMeasuredTokensPerSecond_ignores_events_outside_window()
+    {
+        _telemetry.RecordAccepted(
+            clientId: "w1", taskId: "t-old", tokensSeen: 999_999,
+            wallClockMs: 10, staleness: 0, effectiveLr: 0.1f,
+            newVersion: 1, lossAfter: 2.0);
+
+        _time.Advance(TimeSpan.FromHours(2));
+
+        _telemetry.RecordAccepted(
+            clientId: "w1", taskId: "t-new", tokensSeen: 1000,
+            wallClockMs: 2000, staleness: 0, effectiveLr: 0.1f,
+            newVersion: 2, lossAfter: 2.0);
+
+        // Only the recent 1000 tok / 2s = 500 should count; the
+        // 2-hour-old synthetic event sits outside the 30-min window.
+        var tps = _telemetry.GetGlobalMeasuredTokensPerSecond();
+        Assert.NotNull(tps);
+        Assert.Equal(500.0, tps!.Value, precision: 3);
+    }
 }
 #endif

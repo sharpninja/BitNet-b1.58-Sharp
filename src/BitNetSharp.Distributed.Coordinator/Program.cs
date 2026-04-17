@@ -992,21 +992,34 @@ static int SeedTasksCommandLine(string[] args)
 /// Walks <c>&lt;dbDir&gt;/corpus/tokenized/*.bin</c>, slices each shard
 /// into chunks of <c>tokensPerTask</c> int32s, and enqueues one task
 /// per chunk with the real shardId + byte offset/length. Usage:
-///   seed-real-tasks [tokensPerTask] [maxTasksPerShard] [--shard-prefix NAME]
-/// The optional <c>--shard-prefix</c> flag restricts seeding to
-/// <c>{prefix}-*.bin</c> files only, so v2 shards can be queued
-/// without re-enqueuing v1 tasks that are already in flight.
+///   seed-real-tasks [tokensPerTask|auto] [maxTasksPerShard] [--shard-prefix NAME]
+/// Passing <c>auto</c> for <c>tokensPerTask</c> sizes each task to
+/// fit the configured <c>TargetTaskDurationSeconds</c> window at the
+/// fleet-wide measured throughput from <c>gradient_events</c>; falls
+/// back to 16,384 if the telemetry table has no recent events. The
+/// optional <c>--shard-prefix</c> flag restricts seeding to
+/// <c>{prefix}-shard-*.bin</c> files only, so v2 shards can be
+/// queued without re-enqueuing v1 tasks that are already in flight.
 /// </summary>
 static int SeedRealTasksCommandLine(string[] args)
 {
     try
     {
-        var tokensPerTask = 16_384L;
+        const long DefaultTokensPerTask = 16_384L;
+        var tokensPerTask = DefaultTokensPerTask;
         var maxPerShard = int.MaxValue;
         string? shardPrefix = null;
-        if (args.Length > 1 && long.TryParse(args[1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var t) && t > 0)
+        var autoSize = false;
+        if (args.Length > 1)
         {
-            tokensPerTask = t;
+            if (string.Equals(args[1], "auto", StringComparison.OrdinalIgnoreCase))
+            {
+                autoSize = true;
+            }
+            else if (long.TryParse(args[1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var t) && t > 0)
+            {
+                tokensPerTask = t;
+            }
         }
         if (args.Length > 2 && int.TryParse(args[2], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var m) && m > 0)
         {
@@ -1035,6 +1048,31 @@ static int SeedRealTasksCommandLine(string[] args)
         {
             Console.Error.WriteLine("Coordinator:DatabasePath is not set.");
             return 2;
+        }
+
+        if (autoSize)
+        {
+            using var telemetry = new SqliteTelemetryStore(
+                $"Data Source={coordinator.DatabasePath}",
+                TimeProvider.System);
+            var globalTps = telemetry.GetGlobalMeasuredTokensPerSecond();
+            if (globalTps is { } tps)
+            {
+                var targetSeconds = Math.Max(60, coordinator.TargetTaskDurationSeconds);
+                // Round to the nearest multiple of 512 so shard
+                // offsets stay 4-byte-aligned and task sizing moves
+                // in perceptible steps as tps drifts.
+                var raw = (long)Math.Round(tps * targetSeconds);
+                tokensPerTask = Math.Max(512L, (raw / 512L) * 512L);
+                Console.WriteLine(
+                    $"auto-size: fleet tps={tps:F1} tok/s × target {targetSeconds}s → tokensPerTask={tokensPerTask:N0}");
+            }
+            else
+            {
+                tokensPerTask = DefaultTokensPerTask;
+                Console.WriteLine(
+                    $"auto-size: no recent gradient_events; falling back to tokensPerTask={tokensPerTask:N0}");
+            }
         }
 
         var corpusDir = BitNetSharp.Distributed.Coordinator.Services.CorpusShardLocator
