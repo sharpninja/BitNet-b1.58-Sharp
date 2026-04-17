@@ -3,7 +3,8 @@
 Snapshot of project completion status. Updated 2026-04-17 — P2
 soft-expired-alive counter landed; P3 script hygiene fully landed;
 `--shard-prefix` flag + `TelemetryPruneService` reconciled out of the
-further-horizon list.
+further-horizon list; §3 table reconciled with Further-horizon footer
+(Real-ASR + Multi-turn rows closed).
 
 This is the "where we are right now" doc: what works end-to-end, what
 is partially wired, and what is still on the backlog. Cross-references
@@ -54,8 +55,8 @@ the detailed plans in `distributed-training.md`,
 | `vocab.v1.json` backup | ✅ | Preserved; rollback path intact |
 | Corpus scope doc | ✅ | `docs/training-corpus-scope.md` |
 | Scaling plan v1.0 doc | ✅ | `docs/scaling-truckmate-corpus-v1.0.md` |
-| Real-ASR trace ingestion | ⚪ | Deferred — requires PII scrubbing workstream |
-| Multi-turn corpus | ⚪ | Deferred — new generator needed |
+| Real-ASR trace ingestion | ✅ | Superseded 2026-04-17 by Sonnet-generated `asr-v1-*` shards (commit `07f39f1`) |
+| Multi-turn corpus | ✅ | `MultiTurnCorpusGenerator` + `generate-multiturn-corpus` CLI; Option Z turn separators; vocab-pin 5174 preserved (commit `a7453b9`) |
 
 ## 4. Coordinator
 
