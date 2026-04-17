@@ -130,6 +130,11 @@ public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboar
                     RecentAverageLossAfter: telemetry?.AverageLossAfter ?? 0d,
                     LastEventUtc:           telemetry?.LastEventUtc);
             })
+            // Sort by most recent activity first: prefer telemetry
+            // LastEventUtc (real work) and fall back to heartbeat so
+            // workers that have registered but done nothing yet still
+            // order against each other.
+            .OrderByDescending(r => r.LastEventUtc ?? r.LastHeartbeatUtc)
             .ToList();
 
         var snapshot = new DashboardSnapshot(
