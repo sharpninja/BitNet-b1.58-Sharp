@@ -31,7 +31,8 @@ public sealed class CoordinatorClientTests
             HeartbeatInterval: TimeSpan.FromSeconds(30),
             ShutdownGrace: TimeSpan.FromSeconds(30),
             HealthBeaconPath: "/tmp/test-beacon",
-            LogLevel: "info");
+            LogLevel: "info",
+            ModelPreset: "small");
 
     private sealed class StubHandler : HttpMessageHandler
     {

@@ -4,7 +4,7 @@ using BitNetSharp.Core.Utils;
 
 namespace BitNetSharp.Core.Models;
 
-public sealed class BitNetTransformer
+public sealed partial class BitNetTransformer
 {
     private readonly float[,] _tokenEmbeddings;
 
@@ -30,6 +30,29 @@ public sealed class BitNetTransformer
     public RmsNorm FinalNorm { get; }
 
     public BitLinear OutputHead { get; }
+
+    /// <summary>
+    /// Enumerates every <see cref="BitLinear"/> projection that contributes trainable
+    /// master weights: the attention Q/K/V/O projections and feed-forward gate/up/down
+    /// projections inside each <see cref="BitNetLayer"/>, followed by the final
+    /// <see cref="OutputHead"/>. The order is stable so optimizer state can be paired
+    /// by index.
+    /// </summary>
+    public IEnumerable<BitLinear> EnumerateBitLinearLayers()
+    {
+        foreach (var layer in Layers)
+        {
+            yield return layer.Attention.QueryProjection;
+            yield return layer.Attention.KeyProjection;
+            yield return layer.Attention.ValueProjection;
+            yield return layer.Attention.OutputProjection;
+            yield return layer.FeedForward.GateProjection;
+            yield return layer.FeedForward.UpProjection;
+            yield return layer.FeedForward.DownProjection;
+        }
+
+        yield return OutputHead;
+    }
 
     public long EstimateResidentParameterBytes()
     {
@@ -71,6 +94,7 @@ public sealed class BitNetTransformer
         }
 
         var hidden = Embed(tokenIds);
+        CacheTokenIds(tokenIds);
 
         foreach (var layer in Layers)
         {

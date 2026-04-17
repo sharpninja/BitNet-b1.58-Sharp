@@ -506,6 +506,45 @@ public sealed class CqrsHandlerTests : IDisposable
         Assert.True(result.IsFailure);
     }
 
+    [Fact]
+    public async Task EnqueueTasks_persists_requested_tokens_per_task_on_every_record()
+    {
+        // Verifies the seed CLI / admin enqueue path round-trips the
+        // caller-specified TokensPerTask into each stored WorkTaskRecord
+        // instead of collapsing to a stub value. This is the invariant
+        // that keeps queued task sizes aligned with the worker's
+        // capability-pass target (TaskSizingCalculator output).
+        const long LargeTokenBudget = 262_144L;
+        const int EnqueueCount = 4;
+
+        var handler = BuildEnqueueHandler();
+        var command = new EnqueueTasksCommand(
+            ShardId: "shard-sized",
+            ShardStartOffset: 0,
+            ShardStride: LargeTokenBudget,
+            TokensPerTask: LargeTokenBudget,
+            KLocalSteps: 4,
+            HyperparametersJson: "{}",
+            WeightVersion: 1,
+            Count: EnqueueCount);
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(command, context);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(EnqueueCount, result.Value!.Inserted);
+
+        var first = _queueStore.GetById(result.Value.FirstTaskId);
+        var last = _queueStore.GetById(result.Value.LastTaskId);
+        Assert.NotNull(first);
+        Assert.NotNull(last);
+        Assert.Equal(LargeTokenBudget, first!.TokensPerTask);
+        Assert.Equal(LargeTokenBudget, last!.TokensPerTask);
+        Assert.Equal(LargeTokenBudget, first.ShardLength);
+        Assert.Equal(0L, first.ShardOffset);
+        Assert.Equal((long)(EnqueueCount - 1) * LargeTokenBudget, last.ShardOffset);
+    }
+
     // ── GetTaskQueueSnapshotQuery ───────────────────────────────────
 
     [Fact]

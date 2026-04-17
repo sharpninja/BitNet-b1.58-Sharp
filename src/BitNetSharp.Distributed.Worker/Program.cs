@@ -1,8 +1,11 @@
 using System;
+using System.Collections.Generic;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
+using BitNetSharp.Core.Models;
+using BitNetSharp.Core.Training;
 using BitNetSharp.Distributed.Contracts;
 using BitNetSharp.Distributed.Worker;
 using Serilog;
@@ -67,6 +70,20 @@ try
 
     using var client = new CoordinatorClient(config);
 
+    // Dedicated HTTP client for corpus shard fetches. Same auth
+    // headers as the coordinator client; separate because the corpus
+    // response bodies are multi-MiB and we do not want them to block
+    // or time-share the worker's registration / heartbeat / gradient
+    // submissions on the same connection.
+    using var corpusHttp = new System.Net.Http.HttpClient
+    {
+        BaseAddress = config.CoordinatorUrl,
+        Timeout = TimeSpan.FromMinutes(2)
+    };
+    corpusHttp.DefaultRequestHeaders.Add(CoordinatorClient.ApiKeyHeader, config.ApiKey);
+    corpusHttp.DefaultRequestHeaders.Add(CoordinatorClient.WorkerIdHeader, config.WorkerId);
+    using var corpusClient = new CorpusClient(corpusHttp, ownsHttpClient: false, maxCachedShards: 2);
+
     // Hand the client to the Serilog sink immediately so log batches
     // can flow as soon as auth is valid. The sink only ships when it
     // holds a non-null client; the initial registration supervisor
@@ -78,9 +95,26 @@ try
     Log.Information("Local beacon path: {BeaconPath}. Interval: {Interval}s.",
         config.HealthBeaconPath, config.HeartbeatInterval.TotalSeconds);
 
+    // Build the BitNetConfig that matches the coordinator's global
+    // model from the operator-selected preset. ComputeLength of this
+    // config is the flat-parameter vector length the worker is
+    // prepared to train against; /weights blobs whose length does
+    // not match will be skipped with a warning until the coordinator
+    // side is upgraded to serve full flat params.
+    var modelConfig = BuildModelConfig(config.ModelPreset);
+    Log.Information(
+        "Model preset: {Preset} (vocab={Vocab}, dim={Dim}, hidden={Hidden}, layers={Layers}, seq={Seq}) — expected flat-param length {Len:N0}",
+        config.ModelPreset,
+        modelConfig.VocabSize,
+        modelConfig.Dimension,
+        modelConfig.HiddenDimension,
+        modelConfig.LayerCount,
+        modelConfig.MaxSequenceLength,
+        FlatParameterPack.ComputeLength(modelConfig));
+
     var supervisorTask = RunRegistrationSupervisorAsync(client, config, report, gate, cts.Token);
     var heartbeatTask  = RunHeartbeatLoopAsync(client, config, beacon, gate, cts.Token);
-    var workTask       = RunWorkLoopAsync(client, config, gate, cts.Token);
+    var workTask       = RunWorkLoopAsync(client, corpusClient, config, modelConfig, gate, cts.Token);
 
     await Task.WhenAll(supervisorTask, heartbeatTask, workTask).ConfigureAwait(false);
 
@@ -203,10 +237,23 @@ static async Task<WorkerRegistrationResponse?> TryRegisterOnceAsync(
 
 static async Task RunWorkLoopAsync(
     CoordinatorClient client,
+    CorpusClient corpusClient,
     WorkerConfig config,
+    BitNetConfig modelConfig,
     RegistrationGate gate,
     CancellationToken cancellationToken)
 {
+    var expectedFlatLength = FlatParameterPack.ComputeLength(modelConfig);
+    // When the coordinator's corpus route cannot satisfy a shard
+    // fetch, fall back to deterministic synthesized tokens ONLY if
+    // the operator has explicitly opted in. Default is strict:
+    // skip the task rather than train on random data. This matches
+    // the Phase A policy that a worker must never corrupt weights
+    // with noise it could not verify came from the real corpus.
+    var allowSyntheticShards = string.Equals(
+        Environment.GetEnvironmentVariable("BITNET_ALLOW_SYNTHETIC_SHARDS"),
+        "true",
+        StringComparison.OrdinalIgnoreCase);
     // Idle backoff when the queue is empty so a worker does not hammer
     // the coordinator with empty /work polls. 5 seconds is short
     // enough that newly enqueued tasks are picked up quickly, long
@@ -284,14 +331,15 @@ static async Task RunWorkLoopAsync(
 
             Log.Information("Claimed task {TaskId} ({Tokens:N0} tokens, weight v{Version})", task.TaskId, task.TokensPerTask, task.WeightVersion);
 
-            // D-4b: compute a real gradient against the current
-            // weight vector, encode it with int8 error feedback, and
-            // submit the encoded payload. The "gradient" is a simple
-            // convergence-test stub: g = (target - current) scaled so
-            // the global vector approaches the target over many
-            // rounds. Real BitNet backprop replaces this in Phase A.
+            // Phase A Track 5: compute a real BitNet training
+            // gradient against the current weight vector, encode it
+            // with int8 error feedback, and submit the encoded
+            // payload. The "gradient" is the delta between locally-
+            // trained master parameters and the assigned snapshot
+            // (new_flat - old_flat). The coordinator aggregates these
+            // deltas across workers and advances the weight version.
             var wallClockStart = DateTimeOffset.UtcNow;
-            Log.Debug("Computing gradient for task {TaskId} (D-4b stub)", task.TaskId);
+            Log.Debug("Computing gradient for task {TaskId}", task.TaskId);
 
             // Download the current weight snapshot from the coordinator
             // when the task's WeightVersion differs from what we have
@@ -338,21 +386,112 @@ static async Task RunWorkLoopAsync(
             var dim = cachedWeights.Length;
             var currentWeights = cachedWeights;
 
-            // Synthetic gradient: push weights toward a constant
-            // target so the coordinator's weight vector converges
-            // visibly in the dashboard's loss trace.
-            var target = new float[dim];
-            var rng = new Random(task.TaskId.GetHashCode());
-            for (var wi = 0; wi < dim; wi++)
+            // Guard against a coordinator that has not yet been
+            // upgraded to serve full flat params (e.g. the legacy
+            // 4096-element placeholder). We cannot train against a
+            // vector of the wrong shape, so skip the task with a
+            // warning rather than corrupting the global weights.
+            if (dim != expectedFlatLength)
             {
-                target[wi] = (float)(rng.NextDouble() * 2d - 1d);
+                Log.Warning(
+                    "Weight vector length {Got} does not match expected {Expected} for preset {Preset}. "
+                    + "Coordinator has not been upgraded to the Phase A flat-parameter protocol yet — skipping task {TaskId}.",
+                    dim,
+                    expectedFlatLength,
+                    config.ModelPreset,
+                    task.TaskId);
+                await SafeDelay(idleBackoff, cancellationToken).ConfigureAwait(false);
+                continue;
             }
 
-            var gradient = new float[dim];
-            for (var wi = 0; wi < dim; wi++)
+            // Fetch real shard bytes for this task from the
+            // coordinator's /corpus/{shardId} endpoint via HTTP Range.
+            // Fall back to deterministic synthesis only if the
+            // operator has opted in via BITNET_ALLOW_SYNTHETIC_SHARDS=
+            // true — corrupting the global weights with random data
+            // when the real corpus fails to stream is worse than
+            // idling the worker.
+            IReadOnlyList<int[]> shardSequences;
+            try
             {
-                gradient[wi] = currentWeights[wi] - target[wi];
+                shardSequences = await corpusClient
+                    .FetchSequencesAsync(task, modelConfig.MaxSequenceLength, cancellationToken)
+                    .ConfigureAwait(false);
             }
+            catch (OperationCanceledException)
+            {
+                break;
+            }
+            catch (Exception ex)
+            {
+                if (allowSyntheticShards)
+                {
+                    Log.Warning(
+                        ex,
+                        "Real shard fetch failed for task {TaskId} (shard {ShardId}); "
+                        + "falling back to synthetic tokens because BITNET_ALLOW_SYNTHETIC_SHARDS=true",
+                        task.TaskId, task.ShardId);
+                    shardSequences = SynthesizeShardTokens(task, modelConfig);
+                }
+                else
+                {
+                    Log.Warning(
+                        "Real shard fetch failed for task {TaskId} (shard {ShardId}): {Message}. "
+                        + "Skipping task (set BITNET_ALLOW_SYNTHETIC_SHARDS=true to fall back to synth).",
+                        task.TaskId, task.ShardId, ex.Message);
+                    await SafeDelay(idleBackoff, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+            }
+
+            if (shardSequences.Count == 0)
+            {
+                if (allowSyntheticShards)
+                {
+                    Log.Warning(
+                        "Shard {ShardId}@{Offset}+{Length} yielded no full sequences at seqLen={Seq}; "
+                        + "falling back to synthetic tokens",
+                        task.ShardId, task.ShardOffset, task.ShardLength, modelConfig.MaxSequenceLength);
+                    shardSequences = SynthesizeShardTokens(task, modelConfig);
+                }
+                else
+                {
+                    Log.Warning(
+                        "Shard {ShardId}@{Offset}+{Length} yielded no full sequences at seqLen={Seq}. "
+                        + "Skipping task.",
+                        task.ShardId, task.ShardOffset, task.ShardLength, modelConfig.MaxSequenceLength);
+                    await SafeDelay(idleBackoff, cancellationToken).ConfigureAwait(false);
+                    continue;
+                }
+            }
+
+            var totalTokens = 0;
+            foreach (var seq in shardSequences)
+            {
+                totalTokens += seq.Length;
+            }
+
+            float[] gradient;
+            try
+            {
+                gradient = RealTrainingGradient.ComputeGradient(
+                    currentWeights,
+                    shardSequences,
+                    modelConfig,
+                    localSteps: Math.Max(1, task.KLocalSteps));
+            }
+            catch (Exception ex)
+            {
+                Log.Error(ex, "Real-training gradient computation failed for task {TaskId}", task.TaskId);
+                await SafeDelay(idleBackoff, cancellationToken).ConfigureAwait(false);
+                continue;
+            }
+
+            Log.Information(
+                "Computed gradient for task {TaskId} (Phase A training, {Steps} local steps, {Tokens} tok)",
+                task.TaskId,
+                Math.Max(1, task.KLocalSteps),
+                totalTokens);
 
             // Int8 error-feedback encoding — maintain a per-worker
             // residual across tasks so quantization bias corrects
@@ -372,12 +511,14 @@ static async Task RunWorkLoopAsync(
             var payload = Int8GradientCodec.Encode(gradient, errorFeedbackResidual);
             var wallClockMs = (long)(DateTimeOffset.UtcNow - wallClockStart).TotalMilliseconds;
 
-            // Compute a crude "loss" as mean squared distance to target.
+            // Crude "loss" proxy: mean-squared norm of the weight
+            // delta. Real training loss is reported inside the
+            // trainer's Console logs; the coordinator only needs a
+            // single scalar for its dashboard trendline.
             var loss = 0d;
             for (var wi = 0; wi < dim; wi++)
             {
-                var diff = currentWeights[wi] - target[wi];
-                loss += diff * diff;
+                loss += gradient[wi] * (double)gradient[wi];
             }
             loss /= dim;
 
@@ -510,7 +651,56 @@ static void PrintBanner(WorkerConfig config)
     Console.WriteLine(string.Create(culture, $" heartbeat interval  : {config.HeartbeatInterval.TotalSeconds:F0}s"));
     Console.WriteLine(string.Create(culture, $" shutdown grace      : {config.ShutdownGrace.TotalSeconds:F0}s"));
     Console.WriteLine(string.Create(culture, $" log level           : {config.LogLevel}"));
+    Console.WriteLine(string.Create(culture, $" model preset        : {config.ModelPreset}"));
     Console.WriteLine("───────────────────────────────────────────────────────────────");
+}
+
+static BitNetConfig BuildModelConfig(string presetName)
+{
+    // TruckMateModelPresets is the single source of truth for
+    // named preset sizes (small / medium / large). Build a
+    // BitNetConfig that matches so FlatParameterPack.ComputeLength
+    // agrees with the coordinator's notion of the global model.
+    var preset = TruckMateModelPresets.GetPreset(presetName);
+    return new BitNetConfig(
+        vocabSize: preset.VocabSize,
+        dimension: preset.Dimension,
+        hiddenDimension: preset.HiddenDimension,
+        layerCount: preset.LayerCount,
+        headCount: preset.HeadCount,
+        maxSequenceLength: preset.MaxSequenceLength);
+}
+
+static IReadOnlyList<int[]> SynthesizeShardTokens(WorkTaskAssignment task, BitNetConfig modelConfig)
+{
+    // Until the coordinator ships real shard bytes with each task,
+    // synthesize a deterministic token stream from the task's
+    // ShardId / ShardOffset so each worker trains on a reproducible
+    // but non-degenerate corpus. This matches the wire-format
+    // expectation that the coordinator's corpus generator ships a
+    // flat little-endian int32 token stream.
+    var seed = HashCode.Combine(task.ShardId, task.ShardOffset, task.ShardLength);
+    var rng = new Random(seed);
+
+    // Cap token count at a fraction of the task budget so a single
+    // /work round does not run for minutes. One sequence per
+    // maxSequenceLength chunk, at most 4 sequences per task.
+    var maxSeq = Math.Max(2, modelConfig.MaxSequenceLength);
+    var targetTokens = (int)Math.Min(task.TokensPerTask, 4L * maxSeq);
+    var sequenceCount = Math.Max(1, targetTokens / maxSeq);
+
+    var sequences = new List<int[]>(sequenceCount);
+    for (var s = 0; s < sequenceCount; s++)
+    {
+        var seq = new int[maxSeq];
+        for (var t = 0; t < seq.Length; t++)
+        {
+            seq[t] = rng.Next(0, modelConfig.VocabSize);
+        }
+        sequences.Add(seq);
+    }
+
+    return sequences;
 }
 
 static void WireShutdownSignals(CancellationTokenSource cts, TimeSpan grace)

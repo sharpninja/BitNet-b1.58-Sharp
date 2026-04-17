@@ -35,7 +35,8 @@ internal sealed record WorkerConfig(
     TimeSpan HeartbeatInterval,
     TimeSpan ShutdownGrace,
     string HealthBeaconPath,
-    string LogLevel)
+    string LogLevel,
+    string ModelPreset)
 {
     public const string EnvCoordinatorUrl   = "BITNET_COORDINATOR_URL";
     public const string EnvApiKey           = "BITNET_WORKER_API_KEY";
@@ -46,6 +47,7 @@ internal sealed record WorkerConfig(
     public const string EnvShutdownSeconds  = "BITNET_SHUTDOWN_SECONDS";
     public const string EnvHealthBeaconPath = "BITNET_HEALTH_BEACON";
     public const string EnvLogLevel         = "BITNET_LOG_LEVEL";
+    public const string EnvModelPreset      = "BITNET_MODEL_PRESET";
 
     /// <summary>
     /// Reads configuration from the process environment. Fails fast
@@ -93,6 +95,12 @@ internal sealed record WorkerConfig(
             logLevel = "info";
         }
 
+        var modelPreset = Environment.GetEnvironmentVariable(EnvModelPreset);
+        if (string.IsNullOrWhiteSpace(modelPreset))
+        {
+            modelPreset = "small";
+        }
+
         return new WorkerConfig(
             coordinatorUrl,
             apiKey,
@@ -102,7 +110,8 @@ internal sealed record WorkerConfig(
             TimeSpan.FromSeconds(heartbeatSeconds),
             TimeSpan.FromSeconds(shutdownSeconds),
             healthBeacon,
-            logLevel);
+            logLevel,
+            modelPreset);
     }
 
     private static string RequireEnv(string name)

@@ -50,7 +50,7 @@ else
     <table style="font-size:12px;">
         <thead>
             <tr>
-                <th style="width:170px;">Timestamp (UTC)</th>
+                <th style="width:200px;">Timestamp</th>
                 <th style="width:90px;">Level</th>
                 <th style="width:120px;">Worker</th>
                 <th style="width:200px;">Category</th>
@@ -69,7 +69,7 @@ else
                     _ => ""
                 };
                 <tr>
-                    <td>@ts.ToString("yyyy-MM-dd HH:mm:ss")</td>
+                    <td><time data-utc="@ts.ToString("O")">@ts.ToString("yyyy-MM-dd HH:mm:ss")</time></td>
                     <td style="@levelColor font-weight:bold;">@entry.Level</td>
                     <td>@entry.WorkerId</td>
                     <td style="color:#888; word-break:break-all;">@entry.Category</td>

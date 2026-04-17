@@ -48,7 +48,7 @@ else
                 {
                     <strong>@FormatDuration(eta)</strong>
 
-                    <text> (</text>@s.Progress.EtaUtc!.Value.ToString("u")<text>)</text>
+                    <text> (</text><time data-utc="@s.Progress.EtaUtc!.Value.ToString("O")">@s.Progress.EtaUtc!.Value.ToString("u")</time><text>)</text>
                 }
                 else
                 {
@@ -133,28 +133,51 @@ else
     }
     else
     {
-        <table>
+        <div style="display:flex; gap:12px; align-items:center; margin:8px 0; font-size:12px;">
+            <label>Filter by state:
+                <select id="worker-filter" onchange="bitnetWorkerGrid.applyFilter(this.value)" style="padding:4px;">
+                    <option value="">all</option>
+                    <option value="Active">Active</option>
+                    <option value="Draining">Draining</option>
+                    <option value="Gone">Gone</option>
+                </select>
+            </label>
+            <span style="color:#888;">Click any column header to sort (click again to reverse).</span>
+        </div>
+        <table id="worker-grid" data-sortable="1">
             <thead>
                 <tr>
-                    <th>Client ID</th>
-                    <th>Name</th>
-                    <th>State</th>
-                    <th>Threads</th>
-                    <th>Baseline tok/s</th>
-                    <th>Live tok/s</th>
-                    <th>Live tasks (1m)</th>
-                    <th>Current task</th>
-                    <th>On task</th>
-                    <th>Recent tasks (15m)</th>
-                    <th>Avg staleness</th>
-                    <th>Last heartbeat</th>
+                    <th data-col="clientId"      data-type="str">Client ID</th>
+                    <th data-col="name"          data-type="str">Name</th>
+                    <th data-col="state"         data-type="str">State</th>
+                    <th data-col="threads"       data-type="num">Threads</th>
+                    <th data-col="baselineTps"   data-type="num">Baseline tok/s</th>
+                    <th data-col="liveTps"       data-type="num">Live tok/s</th>
+                    <th data-col="liveTasks"     data-type="num">Live tasks (1m)</th>
+                    <th data-col="currentTask"   data-type="str">Current task</th>
+                    <th data-col="onTaskSec"     data-type="num">On task</th>
+                    <th data-col="recentTasks"   data-type="num">Recent tasks (15m)</th>
+                    <th data-col="avgStaleness"  data-type="num">Avg staleness</th>
+                    <th data-col="lastHeartbeat" data-type="num">Last heartbeat</th>
                     <th>Actions</th>
                 </tr>
             </thead>
             <tbody>
                 @foreach (var row in s.WorkerRows)
                 {
-                    <tr>
+                    <tr data-status="@row.State"
+                        data-clientid="@row.ClientId"
+                        data-name="@row.Name"
+                        data-state="@row.State"
+                        data-threads="@row.CpuThreads"
+                        data-baselinetps="@row.TokensPerSecond"
+                        data-livetps="@row.LiveTokensPerSecond"
+                        data-livetasks="@row.LiveTasksCompleted"
+                        data-currenttask="@(row.CurrentTaskId ?? string.Empty)"
+                        data-ontasksec="@(row.SecondsOnCurrentTask ?? 0d)"
+                        data-recenttasks="@row.RecentTasksCompleted"
+                        data-avgstaleness="@row.RecentAverageStaleness"
+                        data-lastheartbeat="@row.LastHeartbeatUtc.ToUnixTimeSeconds()">
                         <td>@row.ClientId</td>
                         <td>@row.Name</td>
                         <td class="@(row.State == WorkerState.Active ? "ok" : row.State == WorkerState.Gone ? "warn" : "")">@row.State</td>
@@ -175,7 +198,7 @@ else
                         <td>@(row.SecondsOnCurrentTask is { } secs ? FormatDuration(secs) : "—")</td>
                         <td>@row.RecentTasksCompleted</td>
                         <td>@row.RecentAverageStaleness.ToString("F2")</td>
-                        <td>@row.LastHeartbeatUtc.ToString("u")</td>
+                        <td><time data-utc="@row.LastHeartbeatUtc.ToString("O")">@row.LastHeartbeatUtc.ToString("u")</time></td>
                         <td style="display:flex; gap:6px;">
                             <form method="post" action="@($"/admin/workers/{row.ClientId}/drain?redirect=/admin/dashboard")" style="margin:0;">
                                 <button class="btn" type="submit">Drain</button>
@@ -191,7 +214,7 @@ else
     }
 
     <p style="color:#666; font-size:11px; margin-top:12px;">
-        Snapshot generated @s.GeneratedAtUtc.ToString("u").
+        Snapshot generated <time data-utc="@s.GeneratedAtUtc.ToString("O")">@s.GeneratedAtUtc.ToString("u")</time>.
     </p>
 
     <style>

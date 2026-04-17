@@ -77,6 +77,11 @@ if (args.Length > 0 && string.Equals(args[0], "tokenize-corpus", StringCompariso
     return TokenizeCorpusCommandLine(args);
 }
 
+if (args.Length > 0 && string.Equals(args[0], "seed-real-tasks", StringComparison.OrdinalIgnoreCase))
+{
+    return SeedRealTasksCommandLine(args);
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Running under Windows Service Control Manager sets the current
@@ -131,6 +136,7 @@ builder.Services.AddSingleton(sp =>
     var coord = sp.GetRequiredService<CoordinatorOptions>();
     return new SqliteLogStore(BuildConnectionString(coord));
 });
+builder.Services.AddSingleton<ICoordinatorModelConfig, CoordinatorModelConfig>();
 builder.Services.AddSingleton<WeightApplicationService>();
 
 // ── Duende IdentityServer (admin OIDC only) ───────────────────────
@@ -255,6 +261,7 @@ builder.Services.AddCqrsHandlers(typeof(CoordinatorHostMarker).Assembly);
 builder.Services.AddTransient<TasksPageViewModel>();
 builder.Services.AddTransient<DashboardPageViewModel>();
 builder.Services.AddTransient<LogViewerPageViewModel>();
+builder.Services.AddTransient<TaskBrowserPageViewModel>();
 
 // Hosted service that transitions stale workers to Gone and
 // recycles timed-out task assignments back to Pending.
@@ -282,6 +289,17 @@ _ = app.Services.GetRequiredService<SqliteWorkerRegistryStore>();
 _ = app.Services.GetRequiredService<FileSystemWeightStore>();
 _ = app.Services.GetRequiredService<SqliteTelemetryStore>();
 _ = app.Services.GetRequiredService<SqliteLogStore>();
+
+// Resolve + log the chosen model preset once at startup so the
+// operator sees the canonical flat-vector shape every worker is
+// expected to agree on. This is the Track 7 "model config banner".
+var modelConfig = app.Services.GetRequiredService<ICoordinatorModelConfig>();
+startupLogger.LogInformation(
+    "Coordinator model configuration: {Display}. Weight vector bytes on wire = {Bytes:N0} (header {Header} + {Elements:N0} x 4).",
+    modelConfig.ToDisplayString(),
+    WeightBlobCodec.HeaderSize + 4L * modelConfig.FlatLength,
+    WeightBlobCodec.HeaderSize,
+    modelConfig.FlatLength);
 
 // Eagerly materialize the global weight vector (or load latest
 // persisted version from disk) so the first /gradient request has
@@ -427,6 +445,18 @@ app.MapPost("/gradient", async (
             statusCode: StatusCodes.Status409Conflict);
     }
 
+    // Track 7: surface gradient shape mismatches with an
+    // explicit length_mismatch body so workers can log a precise
+    // "expected N, got M" diagnostic without having to regex the
+    // free-form gradient_failed message.
+    if (result.Error is not null
+        && result.Error.StartsWith(SubmitGradientCommandHandler.GradientShapeCode, StringComparison.Ordinal))
+    {
+        return Results.Json(
+            new ErrorResponse("length_mismatch", result.Error),
+            statusCode: StatusCodes.Status400BadRequest);
+    }
+
     return Results.Json(
         new ErrorResponse("gradient_failed", result.Error ?? "unknown"),
         statusCode: StatusCodes.Status400BadRequest);
@@ -461,25 +491,32 @@ app.MapPost("/logs", (
 }).RequireAuthorization(WorkerApiKeyAuth.PolicyName);
 
 // ── /corpus/{shardId} — streams a corpus shard to the worker ─────
+// Resolution order: .bin (tokenized int32 stream, preferred — matches
+// what CorpusClient on the worker expects) → .txt (legacy synthetic) →
+// bare id (already has extension). Content-Type flips accordingly so
+// Range requests on the tokenized path stay byte-exact.
 app.MapGet("/corpus/{shardId}", (
     string shardId,
     CoordinatorOptions options) =>
 {
-    var corpusDir = System.IO.Path.Combine(
-        System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(options.DatabasePath)) ?? ".",
-        "corpus");
-    var shardPath = System.IO.Path.Combine(corpusDir, $"{shardId}.txt");
-    if (!System.IO.File.Exists(shardPath))
+    var shardPath = BitNetSharp.Distributed.Coordinator.Services.CorpusShardLocator
+        .TryResolve(options.DatabasePath, shardId);
+    if (shardPath is null)
     {
         return Results.Json(
             new ErrorResponse("unknown_shard", $"Corpus shard '{shardId}' not found."),
             statusCode: StatusCodes.Status404NotFound);
     }
 
+    var ext = System.IO.Path.GetExtension(shardPath);
+    var (contentType, downloadName) = ext.Equals(".bin", System.StringComparison.OrdinalIgnoreCase)
+        ? ("application/octet-stream", shardId + ".bin")
+        : ("text/plain; charset=utf-8",  shardId + ".txt");
+
     return Results.File(
         path: shardPath,
-        contentType: "text/plain; charset=utf-8",
-        fileDownloadName: $"{shardId}.txt",
+        contentType: contentType,
+        fileDownloadName: downloadName,
         enableRangeProcessing: true);
 }).RequireAuthorization(WorkerApiKeyAuth.PolicyName);
 
@@ -791,10 +828,24 @@ static int SeedTasksCommandLine(string[] args)
 {
     try
     {
+        // Realistic per-task token budget. At ~1K tok/s of real training
+        // throughput on a calibrated worker, 262,144 tokens ≈ a 4-minute
+        // task — well within the 10-minute target duration the worker
+        // capability calibration pass provisions for, and 32× the
+        // previous 8,192-token stub that completed in under a second
+        // and caused excessive weight-version churn.
+        const long DefaultTokensPerTask = 262_144L;
+
         var count = 5;
+        var tokensPerTask = DefaultTokensPerTask;
         if (args.Length > 1 && int.TryParse(args[1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsedCount) && parsedCount > 0)
         {
             count = parsedCount;
+        }
+
+        if (args.Length > 2 && long.TryParse(args[2], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsedTokens) && parsedTokens > 0)
+        {
+            tokensPerTask = parsedTokens;
         }
 
         var config = new ConfigurationBuilder()
@@ -826,9 +877,9 @@ static int SeedTasksCommandLine(string[] args)
                 TaskId: taskId,
                 WeightVersion: coordinator.InitialWeightVersion,
                 ShardId: "shard-seed",
-                ShardOffset: (long)i * 8192,
-                ShardLength: 8192,
-                TokensPerTask: 8192,
+                ShardOffset: (long)i * tokensPerTask,
+                ShardLength: tokensPerTask,
+                TokensPerTask: tokensPerTask,
                 KLocalSteps: 4,
                 HyperparametersJson: "{}",
                 State: WorkTaskState.Pending,
@@ -842,12 +893,116 @@ static int SeedTasksCommandLine(string[] args)
         }
 
         var pending = store.CountByState(WorkTaskState.Pending);
-        Console.WriteLine($"Seeded {inserted} tasks into {coordinator.DatabasePath}. Queue pending count: {pending}.");
+        Console.WriteLine($"Seeded {inserted} tasks ({tokensPerTask:N0} tokens each) into {coordinator.DatabasePath}. Queue pending count: {pending}.");
         return 0;
     }
     catch (Exception ex)
     {
         Console.Error.WriteLine($"seed-tasks failed: {ex}");
+        return 1;
+    }
+}
+
+/// <summary>
+/// Enqueues tasks that point at real tokenized shards on disk.
+/// Walks <c>&lt;dbDir&gt;/corpus/tokenized/*.bin</c>, slices each shard
+/// into chunks of <c>tokensPerTask</c> int32s, and enqueues one task
+/// per chunk with the real shardId + byte offset/length. Usage:
+///   seed-real-tasks [tokensPerTask] [maxTasksPerShard]
+/// </summary>
+static int SeedRealTasksCommandLine(string[] args)
+{
+    try
+    {
+        var tokensPerTask = 16_384L;
+        var maxPerShard = int.MaxValue;
+        if (args.Length > 1 && long.TryParse(args[1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var t) && t > 0)
+        {
+            tokensPerTask = t;
+        }
+        if (args.Length > 2 && int.TryParse(args[2], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var m) && m > 0)
+        {
+            maxPerShard = m;
+        }
+
+        var config = new ConfigurationBuilder()
+            .SetBasePath(System.IO.Path.GetDirectoryName(typeof(Program).Assembly.Location) ?? ".")
+            .AddJsonFile("appsettings.json", optional: true)
+            .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}.json", optional: true)
+            .AddEnvironmentVariables()
+            .Build();
+
+        var coordinator = new CoordinatorOptions();
+        config.GetSection(CoordinatorOptions.SectionName).Bind(coordinator);
+
+        if (string.IsNullOrWhiteSpace(coordinator.DatabasePath))
+        {
+            Console.Error.WriteLine("Coordinator:DatabasePath is not set.");
+            return 2;
+        }
+
+        var corpusDir = BitNetSharp.Distributed.Coordinator.Services.CorpusShardLocator
+            .GetCorpusDirectory(coordinator.DatabasePath);
+        var tokenizedDir = System.IO.Path.Combine(corpusDir, "tokenized");
+        if (!System.IO.Directory.Exists(tokenizedDir))
+        {
+            Console.Error.WriteLine($"Tokenized corpus dir missing: {tokenizedDir}");
+            return 3;
+        }
+
+        var binFiles = System.IO.Directory.GetFiles(tokenizedDir, "*.bin");
+        Array.Sort(binFiles, StringComparer.Ordinal);
+        if (binFiles.Length == 0)
+        {
+            Console.Error.WriteLine($"No tokenized .bin shards found in {tokenizedDir}");
+            return 4;
+        }
+
+        using var store = new SqliteWorkQueueStore(
+            $"Data Source={coordinator.DatabasePath}",
+            TimeProvider.System);
+
+        var bytesPerTask = tokensPerTask * sizeof(int);
+        var now = DateTimeOffset.UtcNow;
+        var totalInserted = 0;
+        foreach (var file in binFiles)
+        {
+            var shardId = System.IO.Path.GetFileNameWithoutExtension(file);
+            var fileSize = new System.IO.FileInfo(file).Length;
+            var tokensInShard = fileSize / sizeof(int);
+            var taskCount = (int)Math.Min(maxPerShard, tokensInShard / tokensPerTask);
+            for (var i = 0; i < taskCount; i++)
+            {
+                var taskId = $"task-real-{Guid.NewGuid():N}";
+                var offset = (long)i * bytesPerTask;
+                store.EnqueuePending(new WorkTaskRecord(
+                    TaskId: taskId,
+                    WeightVersion: coordinator.InitialWeightVersion,
+                    ShardId: shardId,
+                    ShardOffset: offset,
+                    ShardLength: bytesPerTask,
+                    TokensPerTask: tokensPerTask,
+                    KLocalSteps: 4,
+                    HyperparametersJson: "{}",
+                    State: WorkTaskState.Pending,
+                    AssignedWorkerId: null,
+                    AssignedAtUtc: null,
+                    DeadlineUtc: null,
+                    Attempt: 0,
+                    CreatedAtUtc: now,
+                    CompletedAtUtc: null));
+                totalInserted++;
+            }
+            Console.WriteLine($"  {shardId}: {taskCount} tasks ({fileSize:N0} bytes, {tokensInShard:N0} tokens)");
+        }
+
+        var pending = store.CountByState(WorkTaskState.Pending);
+        Console.WriteLine($"Seeded {totalInserted} real tasks ({tokensPerTask:N0} tokens each) into {coordinator.DatabasePath}. Queue pending count: {pending}.");
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"seed-real-tasks failed: {ex}");
         return 1;
     }
 }

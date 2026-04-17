@@ -1,7 +1,10 @@
-param([int]$Count = 5)
+param(
+    [int]$Count = 5,
+    [long]$TokensPerTask = 262144
+)
 
 Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
-    param($Count)
+    param($Count, $TokensPerTask)
 
     $ErrorActionPreference = 'Continue'
     Set-Location 'F:\GitHub\BitNet-b1.58-Sharp'
@@ -24,11 +27,11 @@ Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
     $env:Coordinator__DatabasePath = $envMap['Coordinator__DatabasePath']
     $env:Coordinator__InitialWeightVersion = '1'
 
-    $out = & 'C:\Program Files\dotnet\dotnet.exe' $dll 'seed-tasks' $Count 2>&1
+    $out = & 'C:\Program Files\dotnet\dotnet.exe' $dll 'seed-tasks' $Count $TokensPerTask 2>&1
     $exit = $LASTEXITCODE
 
     [PSCustomObject]@{
         Exit = $exit
         Output = ($out -join "`n")
     }
-} -ArgumentList $Count
+} -ArgumentList $Count,$TokensPerTask

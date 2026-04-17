@@ -2,11 +2,14 @@
 using System;
 using System.IO;
 using System.Linq;
+using BitNetSharp.Core.Models;
+using BitNetSharp.Core.Training;
 using BitNetSharp.Distributed.Contracts;
 using BitNetSharp.Distributed.Coordinator.Configuration;
 using BitNetSharp.Distributed.Coordinator.Persistence;
 using BitNetSharp.Distributed.Coordinator.Services;
 using Microsoft.Extensions.Logging.Abstractions;
+using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace BitNetSharp.Tests;
@@ -42,6 +45,23 @@ public sealed class WeightApplicationServiceTests : IDisposable
             _store,
             new StaticOptionsMonitor<CoordinatorOptions>(options),
             NullLogger<WeightApplicationService>.Instance);
+    }
+
+    private WeightApplicationService CreateServiceWithModelConfig(
+        CoordinatorOptions options,
+        ICoordinatorModelConfig modelConfig)
+    {
+        return new WeightApplicationService(
+            _store,
+            new StaticOptionsMonitor<CoordinatorOptions>(options),
+            modelConfig,
+            NullLogger<WeightApplicationService>.Instance);
+    }
+
+    private static ICoordinatorModelConfig BuildPresetConfig(string preset)
+    {
+        var opts = Options.Create(new CoordinatorOptions { ModelPreset = preset });
+        return new CoordinatorModelConfig(opts);
     }
 
     [Fact]
@@ -190,6 +210,120 @@ public sealed class WeightApplicationServiceTests : IDisposable
         var result = svc.Apply(999, new float[] { 0f, 0f });
         Assert.False(result.Accepted);
         Assert.Contains("newer", result.Reason);
+    }
+
+    // ── Track 7: model-preset initialization + migration ────────────
+
+    [Fact]
+    public void EnsureInitialized_with_model_config_sizes_vector_to_flat_length()
+    {
+        var modelConfig = BuildPresetConfig("small");
+        var svc = CreateServiceWithModelConfig(
+            new CoordinatorOptions { ModelPreset = "small" },
+            modelConfig);
+
+        svc.EnsureInitialized();
+
+        // Small preset: 5174*256 + 4*(4*256*256 + 2*256*1024 + 1024*256) + 256*5174
+        //             = 6,843,392 fp32 elements.
+        Assert.Equal(6_843_392, modelConfig.FlatLength);
+        Assert.Equal(modelConfig.FlatLength, svc.Dimension);
+        Assert.Equal(1, svc.CurrentVersion);
+
+        // The initial vector is not zeros: it is the FlatParameterPack
+        // of a freshly-constructed BitNetTransformer, which uses
+        // ParameterInitializer random weights, so at least one element
+        // must be non-zero.
+        var snapshot = svc.Snapshot();
+        Assert.Contains(snapshot, v => v != 0f);
+    }
+
+    [Fact]
+    public void Apply_with_model_config_round_trips_full_length_gradient()
+    {
+        var modelConfig = BuildPresetConfig("small");
+        var svc = CreateServiceWithModelConfig(
+            new CoordinatorOptions
+            {
+                ModelPreset = "small",
+                BaseLearningRate = 0.01,
+                StalenessAlpha = 0
+            },
+            modelConfig);
+        svc.EnsureInitialized();
+
+        var before = svc.Snapshot();
+        var gradient = new float[modelConfig.FlatLength];
+        gradient[0] = 1f;
+        gradient[modelConfig.FlatLength - 1] = -2f;
+
+        var result = svc.Apply(baseVersion: 1, gradient);
+
+        Assert.True(result.Accepted);
+        Assert.Equal(2, result.NewVersion);
+
+        var after = svc.Snapshot();
+        Assert.Equal(before[0] - 0.01f, after[0], precision: 5);
+        Assert.Equal(before[^1] - 0.01f * -2f, after[^1], precision: 5);
+    }
+
+    [Fact]
+    public void Apply_with_model_config_rejects_gradient_with_wrong_length()
+    {
+        var modelConfig = BuildPresetConfig("small");
+        var svc = CreateServiceWithModelConfig(
+            new CoordinatorOptions { ModelPreset = "small" },
+            modelConfig);
+        svc.EnsureInitialized();
+
+        // A 4,096-element gradient (the legacy D-1 placeholder) must
+        // be rejected when the coordinator is configured for the
+        // real 6,843,392-element small preset.
+        var legacyGradient = new float[4_096];
+        var result = svc.Apply(1, legacyGradient);
+
+        Assert.False(result.Accepted);
+        Assert.NotNull(result.Reason);
+        Assert.Contains("does not match", result.Reason);
+    }
+
+    [Fact]
+    public void EnsureInitialized_resets_legacy_4096_persisted_weights_to_preset_length()
+    {
+        // Simulate the Phase D state: v1 on disk is a 4,096-element
+        // zero vector written by the pre-Track-7 coordinator.
+        var legacyBlob = WeightBlobCodec.Encode(1L, new float[4_096]);
+        _store.SaveVersion(1L, legacyBlob);
+
+        var modelConfig = BuildPresetConfig("small");
+        var svc = CreateServiceWithModelConfig(
+            new CoordinatorOptions { ModelPreset = "small" },
+            modelConfig);
+
+        svc.EnsureInitialized();
+
+        // Service must NOT adopt the legacy 4096-element vector —
+        // instead it logs a warning and initializes a fresh vector
+        // at version 2 sized to the configured preset.
+        Assert.Equal(2, svc.CurrentVersion);
+        Assert.Equal(modelConfig.FlatLength, svc.Dimension);
+        Assert.NotEqual(4_096, svc.Dimension);
+
+        // Legacy v1 must stay on disk (immutable) and v2 must be
+        // visible so workers can download it.
+        Assert.NotNull(_store.TryGetManifest(1));
+        Assert.NotNull(_store.TryGetManifest(2));
+    }
+
+    [Fact]
+    public void CoordinatorModelConfig_exposes_expected_small_preset_values()
+    {
+        var modelConfig = BuildPresetConfig("small");
+
+        Assert.Equal("small", modelConfig.PresetName);
+        Assert.Equal(6_843_392, modelConfig.FlatLength);
+        Assert.Equal(FlatParameterPack.ComputeLength(modelConfig.Config), modelConfig.FlatLength);
+        Assert.Contains("preset=small", modelConfig.ToDisplayString());
     }
 
     [Fact]

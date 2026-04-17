@@ -1,25 +1,36 @@
+using System.Diagnostics;
 using BitNetSharp.Core.Layers;
 using BitNetSharp.Core.Models;
+using BitNetSharp.Core.Quantization;
 
 namespace BitNetSharp.Core.Training;
 
 /// <summary>
-/// Full-backprop trainer that updates all BitLinear layers in the transformer
-/// using the Straight-Through Estimator (STE). Unlike BitNetPaperTrainer which
-/// only trains the output head and final norm, this trainer updates all 7N+1
-/// BitLinear projections.
+/// Full-backprop trainer that updates every BitLinear layer in a
+/// <see cref="BitNetTransformer"/> plus the token-embedding matrix using the
+/// Straight-Through Estimator (STE). Relies on
+/// <see cref="BitNetTransformer.Backward"/> to chain gradients from logits all
+/// the way back to the embedding table.
 /// </summary>
 public sealed class BitNetFullTrainer
 {
-    private readonly BitNetPaperModel _model;
+    private readonly BitNetPaperModel? _model;
+    private readonly BitNetTransformer _transformer;
     private readonly BitNetTrainingOptions _options;
-    private readonly BitNetDataLoader _loader;
+    private readonly BitNetDataLoader? _loader;
     private readonly AdamWOptimizer _optimizer;
     private readonly List<(BitLinear Layer, AdamWOptimizer.OptimizerState State)> _layerStates;
+    private readonly AdamWOptimizer.OptimizerState _embeddingState;
 
+    /// <summary>
+    /// Constructs a trainer that drives a <see cref="BitNetPaperModel"/> end-to-end via
+    /// <see cref="Train(IEnumerable{TrainingExample})"/>. Compatible with existing callers
+    /// that feed prompt/response pairs through the data loader.
+    /// </summary>
     public BitNetFullTrainer(BitNetPaperModel model, BitNetTrainingOptions? options = null)
     {
         _model = model ?? throw new ArgumentNullException(nameof(model));
+        _transformer = model.Transformer;
         _options = options ?? new BitNetTrainingOptions(
             dataLoaderOptions: new BitNetDataLoaderOptions(
                 sequenceLength: model.Config.MaxSequenceLength));
@@ -33,13 +44,49 @@ public sealed class BitNetFullTrainer
 
         _layerStates = [];
         InitializeAllLayers();
+        _embeddingState = _optimizer.CreateState(_transformer.Config.VocabSize, _transformer.Config.Dimension);
+    }
+
+    /// <summary>
+    /// Constructs a trainer that operates directly on a <see cref="BitNetTransformer"/>.
+    /// Used by tests and the distributed worker path where tokenized sequences are
+    /// already available and the full paper-model scaffolding is unnecessary.
+    /// </summary>
+    public BitNetFullTrainer(BitNetTransformer transformer, BitNetTrainingOptions? options = null)
+    {
+        _model = null;
+        _transformer = transformer ?? throw new ArgumentNullException(nameof(transformer));
+        _options = options ?? new BitNetTrainingOptions(
+            dataLoaderOptions: new BitNetDataLoaderOptions(
+                sequenceLength: transformer.Config.MaxSequenceLength));
+        _loader = null;
+        _optimizer = new AdamWOptimizer(
+            _options.LearningRate,
+            _options.Beta1,
+            _options.Beta2,
+            _options.Epsilon,
+            _options.WeightDecay);
+
+        _layerStates = [];
+        InitializeAllLayers();
+        _embeddingState = _optimizer.CreateState(_transformer.Config.VocabSize, _transformer.Config.Dimension);
     }
 
     public BitNetTrainingOptions Options => _options;
 
+    /// <summary>
+    /// Trains the underlying <see cref="BitNetPaperModel"/> on the supplied examples.
+    /// Only available on the paper-model constructor path.
+    /// </summary>
     public TrainingReport Train(IEnumerable<TrainingExample> examples)
     {
         ArgumentNullException.ThrowIfNull(examples);
+
+        if (_model is null || _loader is null)
+        {
+            throw new InvalidOperationException(
+                "This trainer was constructed without a BitNetPaperModel. Use Train(IReadOnlyList<int[]>, int) instead.");
+        }
 
         var trainingSet = examples.ToList();
         if (trainingSet.Count == 0)
@@ -71,17 +118,49 @@ public sealed class BitNetFullTrainer
             throw new InvalidOperationException("The configured data split produced zero training sequences.");
         }
 
-        var lossHistory = new List<double>(_options.Epochs);
-        var epochMetrics = new List<TrainingEpochMetrics>(_options.Epochs);
+        var rawTokenSequences = trainingSequences
+            .Select(sequence => sequence.TokenIds.ToArray())
+            .ToArray();
+
+        return TrainCore(rawTokenSequences, _options.Epochs, dataset: _options.TrainingDatasetName);
+    }
+
+    /// <summary>
+    /// Trains the underlying <see cref="BitNetTransformer"/> on the supplied pre-tokenized
+    /// sequences for the requested number of epochs.
+    /// </summary>
+    public TrainingReport Train(IReadOnlyList<int[]> tokenSequences, int epochs)
+    {
+        ArgumentNullException.ThrowIfNull(tokenSequences);
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(epochs);
+
+        if (tokenSequences.Count == 0)
+        {
+            throw new ArgumentException("At least one token sequence is required.", nameof(tokenSequences));
+        }
+
+        return TrainCore(tokenSequences, epochs, dataset: _options.TrainingDatasetName);
+    }
+
+    private TrainingReport TrainCore(IReadOnlyList<int[]> tokenSequences, int epochs, string? dataset)
+    {
+        var lossHistory = new List<double>(epochs);
+        var epochMetrics = new List<TrainingEpochMetrics>(epochs);
         var totalSamples = 0;
 
-        for (var epoch = 0; epoch < _options.Epochs; epoch++)
+        for (var epoch = 0; epoch < epochs; epoch++)
         {
+            var epochStart = Stopwatch.GetTimestamp();
             var epochLoss = 0d;
             var epochObservations = 0;
 
-            foreach (var sequence in trainingSequences)
+            foreach (var sequence in tokenSequences)
             {
+                if (sequence.Length < 2)
+                {
+                    continue;
+                }
+
                 var batchResult = TrainOnSequence(sequence);
                 epochLoss += batchResult.Loss;
                 epochObservations += batchResult.Observations;
@@ -93,29 +172,50 @@ public sealed class BitNetFullTrainer
             epochMetrics.Add(new TrainingEpochMetrics(
                 epoch + 1, averageLoss, totalSamples, epochObservations));
 
+            var elapsedSeconds = Stopwatch.GetElapsedTime(epochStart).TotalSeconds;
             var perplexityHint = averageLoss > 0 ? Math.Exp(averageLoss) : double.NaN;
             Console.WriteLine(
-                $"[FullTrainer] Epoch {epoch + 1}/{_options.Epochs} | Loss: {averageLoss:F6} | Perplexity: {perplexityHint:F2} | Sequences: {totalSamples:N0} | Tokens: {epochObservations:N0}");
+                $"[FullTrainer] Epoch {epoch + 1}/{epochs} | Loss: {averageLoss:F6} | Perplexity: {perplexityHint:F2} | Sequences: {totalSamples:N0} | Tokens: {epochObservations:N0} | Wall: {elapsedSeconds:F2}s");
         }
 
-        var stats = _model.GetTernaryWeightStats();
+        var stats = _model is null
+            ? GetTransformerTernaryStats()
+            : _model.GetTernaryWeightStats();
+
         return new TrainingReport(
             lossHistory,
             totalSamples,
-            _options.Epochs,
+            epochs,
             stats.NegativeCount,
             stats.ZeroCount,
             stats.PositiveCount,
             epochMetrics,
             [],
             [],
-            _options.TrainingDatasetName,
+            dataset,
             null);
+    }
+
+    private TernaryWeightStats GetTransformerTernaryStats()
+    {
+        var negative = 0;
+        var zero = 0;
+        var positive = 0;
+
+        foreach (var layer in _transformer.EnumerateBitLinearLayers())
+        {
+            var stats = layer.GetTernaryStats();
+            negative += stats.NegativeCount;
+            zero += stats.ZeroCount;
+            positive += stats.PositiveCount;
+        }
+
+        return new TernaryWeightStats(negative, zero, positive);
     }
 
     private void InitializeAllLayers()
     {
-        foreach (var layer in EnumerateAllBitLinearLayers())
+        foreach (var layer in _transformer.EnumerateBitLinearLayers())
         {
             layer.InitializeMasterWeights();
             var outDim = layer.Config.OutputDimension;
@@ -125,25 +225,26 @@ public sealed class BitNetFullTrainer
         }
     }
 
-    private SequenceResult TrainOnSequence(BitNetTokenSequence sequence)
+    private SequenceResult TrainOnSequence(int[] tokenIds)
     {
-        var inputIds = sequence.TokenIds.Take(sequence.TokenIds.Count - 1).ToArray();
-        var targetIds = sequence.TokenIds.Skip(1).ToArray();
+        var inputIds = new int[tokenIds.Length - 1];
+        var targetIds = new int[tokenIds.Length - 1];
+        Array.Copy(tokenIds, 0, inputIds, 0, inputIds.Length);
+        Array.Copy(tokenIds, 1, targetIds, 0, targetIds.Length);
 
         // Full forward pass through the transformer
-        var logits = _model.Transformer.Forward(inputIds);
+        var logits = _transformer.Forward(inputIds);
 
         // Compute loss and output gradient
         var totalLoss = 0d;
-        var vocabSize = _model.Config.VocabSize;
+        var vocabSize = _transformer.Config.VocabSize;
         var seqLen = targetIds.Length;
         var gradLogits = new float[seqLen, vocabSize];
         var probabilities = new float[vocabSize];
+        var positionLogits = new float[vocabSize];
 
         for (var position = 0; position < seqLen; position++)
         {
-            // Extract logits for this position
-            var positionLogits = new float[vocabSize];
             for (var v = 0; v < vocabSize; v++)
             {
                 positionLogits[v] = logits[position, v];
@@ -158,26 +259,17 @@ public sealed class BitNetFullTrainer
             }
         }
 
-        // Zero all gradients
+        // Zero every gradient buffer before the backward pass.
         foreach (var (layer, _) in _layerStates)
         {
             layer.ZeroGradients();
         }
+        _transformer.ZeroTokenEmbeddingGradients();
 
-        // Backward pass through the entire model
-        // OutputHead backward
-        var gradHidden = _model.Transformer.OutputHead.BackwardSTE(gradLogits);
+        // Backward pass drives gradients all the way to the token embeddings.
+        _transformer.Backward(gradLogits);
 
-        // FinalNorm backward
-        gradHidden = _model.Transformer.FinalNorm.BackwardSTE(gradHidden);
-
-        // Backward through transformer layers in reverse order
-        for (var layerIndex = _model.Transformer.Layers.Length - 1; layerIndex >= 0; layerIndex--)
-        {
-            gradHidden = _model.Transformer.Layers[layerIndex].BackwardSTE(gradHidden);
-        }
-
-        // Update all master weights
+        // Optimizer step for every BitLinear layer.
         foreach (var (layer, state) in _layerStates)
         {
             var masterWeights = layer.ExportMasterWeights();
@@ -188,35 +280,43 @@ public sealed class BitNetFullTrainer
                 continue;
             }
 
-            // Wrap flat arrays as single-row 2D for optimizer compatibility
             var weights2D = WrapAs2D(masterWeights, layer.Config.OutputDimension, layer.Config.InputDimension);
             var gradients2D = WrapAs2D(masterGradients, layer.Config.OutputDimension, layer.Config.InputDimension);
 
             _optimizer.Step(weights2D, gradients2D, state);
 
-            // Import updated weights back and re-quantize
             var updatedWeights = Flatten(weights2D);
             layer.ImportMasterWeights(updatedWeights);
             layer.SyncTernaryFromMaster();
         }
 
-        return new SequenceResult(totalLoss, seqLen);
-    }
-
-    private IEnumerable<BitLinear> EnumerateAllBitLinearLayers()
-    {
-        foreach (var layer in _model.Transformer.Layers)
+        // Optimizer step for the token embedding matrix. AdamW.Step mutates the
+        // parameter tensor in place; since the transformer only exposes an
+        // additive apply-update path, we clone the current embeddings, let the
+        // optimizer update the clone, and hand the delta to
+        // ApplyTokenEmbeddingUpdate.
+        var embeddingGrads = _transformer.ExportTokenEmbeddingGradients();
+        if (embeddingGrads is not null)
         {
-            yield return layer.Attention.QueryProjection;
-            yield return layer.Attention.KeyProjection;
-            yield return layer.Attention.ValueProjection;
-            yield return layer.Attention.OutputProjection;
-            yield return layer.FeedForward.GateProjection;
-            yield return layer.FeedForward.UpProjection;
-            yield return layer.FeedForward.DownProjection;
+            var currentEmbeddings = _transformer.ExportTokenEmbeddings();
+            var updatedEmbeddings = (float[,])currentEmbeddings.Clone();
+            _optimizer.Step(updatedEmbeddings, embeddingGrads, _embeddingState);
+
+            var rows = updatedEmbeddings.GetLength(0);
+            var cols = updatedEmbeddings.GetLength(1);
+            var delta = new float[rows, cols];
+            for (var r = 0; r < rows; r++)
+            {
+                for (var c = 0; c < cols; c++)
+                {
+                    delta[r, c] = updatedEmbeddings[r, c] - currentEmbeddings[r, c];
+                }
+            }
+
+            _transformer.ApplyTokenEmbeddingUpdate(delta);
         }
 
-        yield return _model.Transformer.OutputHead;
+        return new SequenceResult(totalLoss, seqLen);
     }
 
     private static float[,] WrapAs2D(float[] flat, int rows, int cols)

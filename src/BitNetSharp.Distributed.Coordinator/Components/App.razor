@@ -25,9 +25,129 @@
         .btn:hover { background: #2a56d1; }
         .warn { color: #f87; }
         .ok { color: #7f7; }
+        th[data-col] { cursor: pointer; user-select: none; }
+        th[data-col]:hover { background: #2a2a2a; }
     </style>
 </head>
 <body>
     <Routes />
+    @* Converts every <time data-utc="…"> element to the viewer's local
+       time zone. Re-runs whenever Blazor patches the DOM so the 2-second
+       dashboard refresh keeps working. Fall back to the server-rendered
+       UTC text if Date parsing fails. *@
+    <script>
+        (function () {
+            function fmt(d) {
+                return d.toLocaleString(undefined, {
+                    year: 'numeric', month: '2-digit', day: '2-digit',
+                    hour: '2-digit', minute: '2-digit', second: '2-digit',
+                    hour12: false
+                });
+            }
+            function localizeAll(root) {
+                var nodes = (root || document).querySelectorAll('time[data-utc]:not([data-localized])');
+                for (var i = 0; i < nodes.length; i++) {
+                    var el = nodes[i];
+                    var iso = el.getAttribute('data-utc');
+                    var d = new Date(iso);
+                    if (!isNaN(d.getTime())) {
+                        el.textContent = fmt(d);
+                        el.setAttribute('title', iso + ' (UTC)');
+                    }
+                    el.setAttribute('data-localized', '1');
+                }
+            }
+            function bump() { localizeAll(document); }
+            bump();
+            var mo = new MutationObserver(function () { bump(); });
+            mo.observe(document.body, { childList: true, subtree: true, characterData: true });
+        })();
+    </script>
+    @* Worker-grid client-side filter + sort. Filter hides rows whose
+       data-status does not match; sort reorders tbody children by a
+       data-<col> value. Both re-apply after every Blazor DOM patch via
+       MutationObserver so the 2-second dashboard refresh preserves the
+       viewer's chosen view. *@
+    <script>
+        (function () {
+            var state = { filter: '', sortCol: null, sortDir: null, reordering: false };
+            function applyFilter(rows) {
+                for (var i = 0; i < rows.length; i++) {
+                    var r = rows[i];
+                    var s = r.getAttribute('data-status') || '';
+                    r.style.display = (state.filter === '' || s === state.filter) ? '' : 'none';
+                }
+            }
+            function applySort(tbody, rows) {
+                if (!state.sortCol || !state.sortDir) return;
+                var col = state.sortCol;
+                var type = state.sortType || 'str';
+                var dir = state.sortDir === 'asc' ? 1 : -1;
+                var arr = Array.prototype.slice.call(rows);
+                arr.sort(function (a, b) {
+                    var av = a.getAttribute('data-' + col.toLowerCase()) || '';
+                    var bv = b.getAttribute('data-' + col.toLowerCase()) || '';
+                    if (type === 'num') {
+                        var an = parseFloat(av); var bn = parseFloat(bv);
+                        if (isNaN(an)) an = -Infinity; if (isNaN(bn)) bn = -Infinity;
+                        return (an - bn) * dir;
+                    }
+                    return av.localeCompare(bv) * dir;
+                });
+                var changed = false;
+                for (var i = 0; i < arr.length; i++) {
+                    if (tbody.children[i] !== arr[i]) { changed = true; break; }
+                }
+                if (!changed) return;
+                state.reordering = true;
+                try { for (var j = 0; j < arr.length; j++) tbody.appendChild(arr[j]); }
+                finally { state.reordering = false; }
+            }
+            function updateHeaderIndicators(table) {
+                var ths = table.querySelectorAll('th[data-col]');
+                for (var i = 0; i < ths.length; i++) {
+                    var th = ths[i];
+                    var col = th.getAttribute('data-col');
+                    var mark = '';
+                    if (col === state.sortCol) mark = state.sortDir === 'asc' ? ' \u2191' : ' \u2193';
+                    var base = th.getAttribute('data-label');
+                    if (!base) { base = th.textContent.replace(/[\s\u2191\u2193]+$/, ''); th.setAttribute('data-label', base); }
+                    th.textContent = base + mark;
+                }
+            }
+            function refresh() {
+                var table = document.getElementById('worker-grid');
+                if (!table) return;
+                var tbody = table.tBodies[0]; if (!tbody) return;
+                var rows = tbody.rows;
+                applyFilter(rows);
+                applySort(tbody, rows);
+                updateHeaderIndicators(table);
+            }
+            window.bitnetWorkerGrid = {
+                applyFilter: function (v) { state.filter = v || ''; refresh(); },
+                sortBy: function (col, type) {
+                    if (state.sortCol === col) {
+                        state.sortDir = state.sortDir === 'asc' ? 'desc' : (state.sortDir === 'desc' ? null : 'asc');
+                        if (state.sortDir === null) state.sortCol = null;
+                    } else {
+                        state.sortCol = col; state.sortType = type || 'str'; state.sortDir = 'asc';
+                    }
+                    refresh();
+                }
+            };
+            document.addEventListener('click', function (ev) {
+                var th = ev.target.closest && ev.target.closest('#worker-grid th[data-col]');
+                if (!th) return;
+                window.bitnetWorkerGrid.sortBy(th.getAttribute('data-col'), th.getAttribute('data-type'));
+            });
+            var mo2 = new MutationObserver(function () {
+                if (state.reordering) return;
+                refresh();
+            });
+            mo2.observe(document.body, { childList: true, subtree: true });
+            refresh();
+        })();
+    </script>
 </body>
 </html>

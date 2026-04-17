@@ -20,6 +20,7 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <ProjectReference Include="..\BitNetSharp.Core\BitNetSharp.Core.csproj" />
     <ProjectReference Include="..\BitNetSharp.Distributed.Contracts\BitNetSharp.Distributed.Contracts.csproj" />
     <!--
       Cross-repo project references to the McpServer CQRS + MVVM

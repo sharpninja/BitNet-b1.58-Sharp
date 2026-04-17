@@ -1,0 +1,199 @@
+@page "/admin/task-browser"
+@attribute [Authorize(Policy = "AdminPolicy")]
+@rendermode RenderMode.InteractiveServer
+@using BitNetSharp.Distributed.Coordinator.Cqrs.Queries
+@using BitNetSharp.Distributed.Coordinator.Persistence
+@using BitNetSharp.Distributed.Coordinator.ViewModels
+@inject TaskBrowserPageViewModel ViewModel
+@implements IDisposable
+
+<h2>Task browser</h2>
+<p style="color:#999; font-size:12px;">
+    Shows the most recent <strong>queued</strong> (Pending or Assigned)
+    and <strong>finished</strong> (Done or Failed) tasks alongside the
+    shard file path each task references. Refreshes every 5 s.
+</p>
+
+@if (!string.IsNullOrWhiteSpace(ViewModel.LastError))
+{
+    <p class="warn">@ViewModel.LastError</p>
+}
+
+@if (ViewModel.Snapshot is null)
+{
+    <p>Loading…</p>
+}
+else
+{
+    var s = ViewModel.Snapshot;
+
+    <p style="color:#888; font-size:12px;">
+        Corpus directory: <code>@s.CorpusDirectory</code> ·
+        Limit per section:
+        <input type="number" value="@ViewModel.Limit" min="10" max="2000"
+               @onchange="OnLimitChanged" style="width:72px; padding:2px;" />
+    </p>
+
+    <h3 style="margin-top:16px;">Queued (@s.Queued.Count)</h3>
+    @if (s.Queued.Count == 0)
+    {
+        <p class="warn">No queued tasks.</p>
+    }
+    else
+    {
+        <table style="font-size:11px;">
+            <thead>
+                <tr>
+                    <th>Task</th>
+                    <th>State</th>
+                    <th>Weights</th>
+                    <th>Shard</th>
+                    <th>Offset</th>
+                    <th>Length</th>
+                    <th>Tokens</th>
+                    <th>K</th>
+                    <th>Assigned to</th>
+                    <th>Assigned at</th>
+                    <th>Deadline</th>
+                    <th>Attempt</th>
+                    <th>Created</th>
+                    <th>Shard path</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in s.Queued)
+                {
+                    @RenderRow(row)
+                }
+            </tbody>
+        </table>
+    }
+
+    <h3 style="margin-top:24px;">Finished (@s.Finished.Count)</h3>
+    @if (s.Finished.Count == 0)
+    {
+        <p class="warn">No finished tasks yet.</p>
+    }
+    else
+    {
+        <table style="font-size:11px;">
+            <thead>
+                <tr>
+                    <th>Task</th>
+                    <th>State</th>
+                    <th>Weights</th>
+                    <th>Shard</th>
+                    <th>Offset</th>
+                    <th>Length</th>
+                    <th>Tokens</th>
+                    <th>Worker</th>
+                    <th>Assigned</th>
+                    <th>Completed</th>
+                    <th>Attempt</th>
+                    <th>Shard path</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var row in s.Finished)
+                {
+                    <tr>
+                        <td style="font-family:ui-monospace,monospace; font-size:10px;">@TruncateId(row.TaskId)</td>
+                        <td class="@(row.State == WorkTaskState.Done ? "ok" : "warn")">@row.State</td>
+                        <td>@row.WeightVersion</td>
+                        <td>@row.ShardId</td>
+                        <td>@row.ShardOffset.ToString("N0")</td>
+                        <td>@row.ShardLength.ToString("N0")</td>
+                        <td>@row.TokensPerTask.ToString("N0")</td>
+                        <td>@(row.AssignedWorkerId ?? "—")</td>
+                        <td>@RenderTs(row.AssignedAtUtc)</td>
+                        <td>@RenderTs(row.CompletedAtUtc)</td>
+                        <td>@row.Attempt</td>
+                        <td>@RenderShardPath(row)</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+
+    <p style="color:#666; font-size:11px; margin-top:12px;">
+        Snapshot generated <time data-utc="@s.GeneratedAtUtc.ToString("O")">@s.GeneratedAtUtc.ToString("u")</time>.
+    </p>
+}
+
+@code {
+    private System.Threading.Timer? _refreshTimer;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ViewModel.LoadAsync();
+        _refreshTimer = new System.Threading.Timer(async _ =>
+        {
+            try
+            {
+                await InvokeAsync(async () =>
+                {
+                    await ViewModel.LoadAsync();
+                    StateHasChanged();
+                });
+            }
+            catch
+            {
+                // Timer callback must not crash the circuit.
+            }
+        }, null, TimeSpan.FromSeconds(5), TimeSpan.FromSeconds(5));
+    }
+
+    public void Dispose() => _refreshTimer?.Dispose();
+
+    private async Task OnLimitChanged(Microsoft.AspNetCore.Components.ChangeEventArgs e)
+    {
+        if (int.TryParse(e.Value?.ToString(), out var n) && n >= 10 && n <= 2000)
+        {
+            ViewModel.Limit = n;
+            await ViewModel.LoadAsync();
+        }
+    }
+
+    private static string TruncateId(string id) =>
+        id.Length > 12 ? id.Substring(0, 12) + "…" : id;
+
+    private static Microsoft.AspNetCore.Components.MarkupString RenderTs(DateTimeOffset? ts)
+    {
+        if (ts is null) return new Microsoft.AspNetCore.Components.MarkupString("—");
+        var iso = ts.Value.ToString("O");
+        var utc = ts.Value.ToString("u");
+        return new Microsoft.AspNetCore.Components.MarkupString(
+            $"<time data-utc=\"{iso}\">{System.Net.WebUtility.HtmlEncode(utc)}</time>");
+    }
+
+    private static Microsoft.AspNetCore.Components.MarkupString RenderShardPath(TaskBrowserRow row)
+    {
+        if (row.ShardExists && row.ResolvedShardPath is not null)
+        {
+            var html = $"<span class=\"ok\" title=\"exists\">{System.Net.WebUtility.HtmlEncode(row.ResolvedShardPath)}</span>";
+            return new Microsoft.AspNetCore.Components.MarkupString(html);
+        }
+        var missing = $"<span class=\"warn\" title=\"missing\">{System.Net.WebUtility.HtmlEncode(row.ExpectedShardPath)}</span>";
+        return new Microsoft.AspNetCore.Components.MarkupString(missing);
+    }
+
+    private Microsoft.AspNetCore.Components.RenderFragment RenderRow(TaskBrowserRow row) => __builder =>
+    {
+        <tr>
+            <td style="font-family:ui-monospace,monospace; font-size:10px;">@TruncateId(row.TaskId)</td>
+            <td class="@(row.State == WorkTaskState.Assigned ? "ok" : "")">@row.State</td>
+            <td>@row.WeightVersion</td>
+            <td>@row.ShardId</td>
+            <td>@row.ShardOffset.ToString("N0")</td>
+            <td>@row.ShardLength.ToString("N0")</td>
+            <td>@row.TokensPerTask.ToString("N0")</td>
+            <td>@row.KLocalSteps</td>
+            <td>@(row.AssignedWorkerId ?? "—")</td>
+            <td>@RenderTs(row.AssignedAtUtc)</td>
+            <td>@RenderTs(row.DeadlineUtc)</td>
+            <td>@row.Attempt</td>
+            <td>@RenderTs(row.CreatedAtUtc)</td>
+            <td>@RenderShardPath(row)</td>
+        </tr>
+    };
+}

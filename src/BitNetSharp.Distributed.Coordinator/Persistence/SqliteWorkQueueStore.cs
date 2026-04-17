@@ -310,6 +310,75 @@ ORDER BY assigned_at DESC;";
     }
 
     /// <summary>
+    /// Lists tasks in the given states, most recent first. Admin-facing
+    /// helper that powers the task browser page — callers pass
+    /// <c>new[] { Pending, Assigned }</c> for the queue view or
+    /// <c>new[] { Done, Failed }</c> for the history view. Ordering
+    /// keys off <c>completed_at DESC</c> then <c>assigned_at DESC</c>
+    /// then <c>created_at DESC</c> so finished tasks float the newest
+    /// result, active claims float the newest assignment, and pending
+    /// entries float the newest enqueue.
+    /// </summary>
+    public IReadOnlyList<WorkTaskRecord> ListByStates(IReadOnlyList<WorkTaskState> states, int limit = 200)
+    {
+        ArgumentNullException.ThrowIfNull(states);
+        if (states.Count == 0)
+        {
+            return Array.Empty<WorkTaskRecord>();
+        }
+        if (limit <= 0)
+        {
+            throw new ArgumentOutOfRangeException(nameof(limit), limit, "limit must be positive");
+        }
+
+        using var cmd = _connection.CreateCommand();
+        // Build parameterised IN list so SQL injection is impossible.
+        var placeholders = new string[states.Count];
+        for (var i = 0; i < states.Count; i++)
+        {
+            var p = $"$s{i}";
+            placeholders[i] = p;
+            cmd.Parameters.AddWithValue(p, states[i].ToString());
+        }
+        cmd.CommandText = @"
+SELECT task_id, weight_version, shard_id, shard_offset, shard_length,
+       tokens_per_task, k_local_steps, hp_json, state,
+       assigned_to, assigned_at, deadline_at, attempt,
+       created_at, completed_at
+FROM tasks
+WHERE state IN (" + string.Join(", ", placeholders) + @")
+ORDER BY COALESCE(completed_at, 0) DESC,
+         COALESCE(assigned_at,  0) DESC,
+         created_at DESC,
+         task_id DESC
+LIMIT $limit;";
+        cmd.Parameters.AddWithValue("$limit", limit);
+
+        var results = new List<WorkTaskRecord>(limit);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            results.Add(new WorkTaskRecord(
+                TaskId: reader.GetString(0),
+                WeightVersion: reader.GetInt64(1),
+                ShardId: reader.GetString(2),
+                ShardOffset: reader.GetInt64(3),
+                ShardLength: reader.GetInt64(4),
+                TokensPerTask: reader.GetInt64(5),
+                KLocalSteps: reader.GetInt32(6),
+                HyperparametersJson: reader.GetString(7),
+                State: Enum.Parse<WorkTaskState>(reader.GetString(8)),
+                AssignedWorkerId: reader.IsDBNull(9) ? null : reader.GetString(9),
+                AssignedAtUtc: reader.IsDBNull(10) ? null : DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(10)),
+                DeadlineUtc: reader.IsDBNull(11) ? null : DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(11)),
+                Attempt: reader.GetInt32(12),
+                CreatedAtUtc: DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(13)),
+                CompletedAtUtc: reader.IsDBNull(14) ? null : DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(14))));
+        }
+        return results;
+    }
+
+    /// <summary>
     /// Returns the count of tasks currently in the given state. Handy
     /// for <c>/status</c> dashboards and smoke tests.
     /// </summary>
