@@ -423,3 +423,11 @@ AGENTS-README-FIRST.yaml
 
 # Generated model weights (produced during CI builds)
 *.gguf
+
+# Claude Code per-user state that shouldn't land in the repo
+.claude/settings.local.json
+.claude/scheduled_tasks.lock
+
+# Ad-hoc source archives (local zip-and-send)
+src.zip
+
