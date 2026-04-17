@@ -3,6 +3,7 @@ using System.Threading.Tasks;
 using BitNetSharp.Distributed.Contracts;
 using BitNetSharp.Distributed.Coordinator.Configuration;
 using BitNetSharp.Distributed.Coordinator.Persistence;
+using BitNetSharp.Distributed.Coordinator.Services;
 using McpServer.Cqrs;
 using Microsoft.Extensions.Options;
 
@@ -27,15 +28,18 @@ public sealed class ClaimNextTaskCommandHandler : ICommandHandler<ClaimNextTaskC
 {
     private readonly SqliteWorkQueueStore _workQueue;
     private readonly IOptionsMonitor<CoordinatorOptions> _options;
+    private readonly WeightApplicationService _weights;
     private readonly TimeProvider _time;
 
     public ClaimNextTaskCommandHandler(
         SqliteWorkQueueStore workQueue,
         IOptionsMonitor<CoordinatorOptions> options,
+        WeightApplicationService weights,
         TimeProvider time)
     {
         _workQueue = workQueue;
         _options = options;
+        _weights = weights;
         _time = time;
     }
 
@@ -57,11 +61,18 @@ public sealed class ClaimNextTaskCommandHandler : ICommandHandler<ClaimNextTaskC
             return Task.FromResult(Result<WorkTaskAssignment?>.Success(null));
         }
 
+        // Claim-time freshness: the task row stores the weight version
+        // the operator enqueued it against, but async SGD wants workers
+        // to train against the CURRENT global version so staleness stays
+        // bounded no matter how long the task sat in the queue. Override
+        // the assignment's weight version + URL with whatever the
+        // WeightApplicationService holds right now.
+        var currentVersion = _weights.CurrentVersion;
         var baseUrl = opts.BaseUrl.TrimEnd('/');
         WorkTaskAssignment? assignment = new WorkTaskAssignment(
             TaskId: claimed.TaskId,
-            WeightVersion: claimed.WeightVersion,
-            WeightUrl: $"{baseUrl}/weights/{claimed.WeightVersion}",
+            WeightVersion: currentVersion,
+            WeightUrl: $"{baseUrl}/weights/{currentVersion}",
             ShardId: claimed.ShardId,
             ShardOffset: claimed.ShardOffset,
             ShardLength: claimed.ShardLength,
