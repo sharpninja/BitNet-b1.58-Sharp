@@ -808,7 +808,9 @@ static int TokenizeCorpusCommandLine(string[] args)
         var tokenizedDir = System.IO.Path.Combine(corpusDir, "tokenized");
         Directory.CreateDirectory(tokenizedDir);
 
-        var pattern = shardPrefix is null ? "*.txt" : $"{shardPrefix}-*.txt";
+        // Require literal "-shard-" so prefix "truckmate" cannot
+        // accidentally slurp up "truckmate-v2-shard-*.txt".
+        var pattern = shardPrefix is null ? "*.txt" : $"{shardPrefix}-shard-*.txt";
         var shardFiles = Directory.GetFiles(corpusDir, pattern)
             .OrderBy(f => f, StringComparer.OrdinalIgnoreCase)
             .ToArray();
@@ -1029,7 +1031,9 @@ static int SeedRealTasksCommandLine(string[] args)
             return 3;
         }
 
-        var binPattern = shardPrefix is null ? "*.bin" : $"{shardPrefix}-*.bin";
+        // Require literal "-shard-" so prefix "truckmate" doesn't
+        // also sweep in "truckmate-v2-shard-*.bin" rows.
+        var binPattern = shardPrefix is null ? "*.bin" : $"{shardPrefix}-shard-*.bin";
         var binFiles = System.IO.Directory.GetFiles(tokenizedDir, binPattern);
         Array.Sort(binFiles, StringComparer.Ordinal);
         if (binFiles.Length == 0)

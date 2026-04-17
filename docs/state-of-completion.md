@@ -75,8 +75,8 @@ the detailed plans in `distributed-training.md`,
 | `seed-tasks` CLI (synthetic) | ✅ | Legacy path |
 | `seed-real-tasks` CLI | ✅ | Phase-A real-shard seeding |
 | `dump-events` CLI | ✅ | Diagnostic log tail |
-| Deadline calibration from measured tps | 🟡 | P0 in flight (this commit) — build + verify pending |
-| Seed-size feedback loop | ⚪ | P1 — blocked on P0 landing |
+| Deadline calibration from measured tps | ✅ | Landed in commit `9b604b7`; fallback `TargetTaskDurationSeconds*2` covers first-task case |
+| Seed-size feedback loop | ⚪ | P1 — K=1 default in `seed-real-tasks` keeps tasks inside 10-min target; automatic tokensPerTask sizing still pending |
 | "Stuck but alive" UI counter | ⚪ | P2 |
 | Purge of legacy 1,605 seed rows | ⚪ | P4 — product decision pending |
 
@@ -150,13 +150,13 @@ the detailed plans in `distributed-training.md`,
 ## 10. Remaining work — ordered by priority
 
 ### P0 — Real-throughput deadline calibration
-**Status:** 🟡 code written, build + deploy pending.
+**Status:** ✅ landed in `9b604b7`; `3c06953` adds the companion
+`KLocalSteps: 1` default + `purge-pending` CLI so mis-seeded
+40-min K=4 tasks don't outrun the lease before first telemetry
+lands.
 **Files:** `SqliteTelemetryStore.GetMeasuredTokensPerSecond`,
 `SqliteWorkQueueStore.TryClaimNextPending(Func<long, TimeSpan>)`,
-`ClaimNextTaskCommandHandler.LeaseFor`.
-**Acceptance:** 40 seeded real-shard tasks complete end-to-end
-without claim-expiry loops; `/admin/dashboard` shows monotonically
-rising Done count as workers submit.
+`ClaimNextTaskCommandHandler.LeaseFor`, `SeedRealTasksCommandLine`.
 
 ### P1 — Seed-size feedback loop
 **Status:** ⚪ not started. Depends on P0.
@@ -174,10 +174,14 @@ Display as a second counter next to Assigned.
 worker at a glance.
 
 ### P3 — Script hygiene
-**Status:** ⚪ not started.
-**Plan:** Delete `.claude/scripts/tmp-*.ps1` that are no longer used;
-promote anything still valuable to a non-`tmp-` filename + document.
-**Acceptance:** `git status` clean of stray `tmp-*` entries.
+**Status:** 🟡 partial — one-off probes deleted 2026-04-17, three
+active scripts retained under `tmp-` prefix pending rename:
+`tmp-deploy-coord.ps1` (referenced from `scripts/Generate-TruckMateCorpusV2.ps1`
+and this doc), `tmp-dump-events.ps1` (remote log tail),
+`tmp-purge-reseed.ps1` (queue reset after K mis-seed). A future pass
+can promote to non-`tmp-` names once caller references are updated
+in lockstep.
+**Acceptance:** `git status` clean of stray one-off `tmp-*` probes. ✅
 
 ### P4 — Legacy `task-seed-*` rows
 **Status:** ⚪ product decision pending.
