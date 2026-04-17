@@ -522,6 +522,10 @@ static async Task RunWorkLoopAsync(
             }
             loss /= dim;
 
+            var measuredTps = wallClockMs > 0
+                ? task.TokensPerTask / (wallClockMs / 1000.0)
+                : (double?)null;
+
             var submission = new GradientSubmission(
                 TaskId: task.TaskId,
                 WorkerId: config.WorkerId,
@@ -530,7 +534,8 @@ static async Task RunWorkLoopAsync(
                 LossAfter: loss,
                 GradientFormat: Int8GradientCodec.FormatId,
                 GradientPayload: payload,
-                WallClockMs: wallClockMs);
+                WallClockMs: wallClockMs,
+                MeasuredTokensPerSecond: measuredTps);
 
             try
             {

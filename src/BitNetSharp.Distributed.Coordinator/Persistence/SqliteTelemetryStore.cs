@@ -61,6 +61,28 @@ CREATE INDEX IF NOT EXISTS ix_gradient_events_client
 CREATE INDEX IF NOT EXISTS ix_gradient_events_received
     ON gradient_events(received_at);
 ");
+
+        // v2 migration: add nullable measured_tps column so workers that
+        // populate GradientSubmission.MeasuredTokensPerSecond can have
+        // their authoritative rate stored alongside the derived one.
+        // Older rows stay NULL and fall back to derivation in rollups.
+        AddColumnIfMissing("gradient_events", "measured_tps", "REAL");
+    }
+
+    private void AddColumnIfMissing(string table, string column, string type)
+    {
+        using var probe = _connection.CreateCommand();
+        probe.CommandText = $"PRAGMA table_info({table});";
+        using var reader = probe.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(1), column, StringComparison.Ordinal))
+            {
+                return;
+            }
+        }
+        reader.Close();
+        ExecuteNonQuery($"ALTER TABLE {table} ADD COLUMN {column} {type};");
     }
 
     /// <summary>
@@ -75,7 +97,8 @@ CREATE INDEX IF NOT EXISTS ix_gradient_events_received
         long staleness,
         float effectiveLr,
         long newVersion,
-        double lossAfter)
+        double lossAfter,
+        double? measuredTokensPerSecond = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(clientId);
         ArgumentException.ThrowIfNullOrWhiteSpace(taskId);
@@ -86,10 +109,10 @@ CREATE INDEX IF NOT EXISTS ix_gradient_events_received
             cmd.CommandText = @"
 INSERT INTO gradient_events (
     received_at, client_id, task_id, tokens_seen, wall_clock_ms,
-    staleness, effective_lr, new_version, loss_after
+    staleness, effective_lr, new_version, loss_after, measured_tps
 ) VALUES (
     $received_at, $client_id, $task_id, $tokens_seen, $wall_clock_ms,
-    $staleness, $effective_lr, $new_version, $loss_after
+    $staleness, $effective_lr, $new_version, $loss_after, $measured_tps
 );";
             cmd.Parameters.AddWithValue("$received_at", _time.GetUtcNow().ToUnixTimeSeconds());
             cmd.Parameters.AddWithValue("$client_id", clientId);
@@ -100,6 +123,7 @@ INSERT INTO gradient_events (
             cmd.Parameters.AddWithValue("$effective_lr", effectiveLr);
             cmd.Parameters.AddWithValue("$new_version", newVersion);
             cmd.Parameters.AddWithValue("$loss_after", lossAfter);
+            cmd.Parameters.AddWithValue("$measured_tps", (object?)measuredTokensPerSecond ?? DBNull.Value);
             cmd.ExecuteNonQuery();
         }
     }

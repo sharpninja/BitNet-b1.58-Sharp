@@ -695,6 +695,41 @@ public sealed class CqrsHandlerTests : IDisposable
     }
 
     [Fact]
+    public void RecordAccepted_persists_optional_measured_tps_column()
+    {
+        using var probe = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_databasePath}");
+        probe.Open();
+
+        _telemetry.RecordAccepted(
+            clientId: "w-tps", taskId: "t-tps", tokensSeen: 1000,
+            wallClockMs: 2000, staleness: 0, effectiveLr: 0.1f,
+            newVersion: 1, lossAfter: 2.0, measuredTokensPerSecond: 42.5);
+
+        using var cmd = probe.CreateCommand();
+        cmd.CommandText = "SELECT measured_tps FROM gradient_events WHERE task_id = 't-tps';";
+        var raw = cmd.ExecuteScalar();
+        Assert.NotNull(raw);
+        Assert.Equal(42.5, Convert.ToDouble(raw, System.Globalization.CultureInfo.InvariantCulture));
+    }
+
+    [Fact]
+    public void RecordAccepted_stores_null_measured_tps_when_not_supplied()
+    {
+        using var probe = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_databasePath}");
+        probe.Open();
+
+        _telemetry.RecordAccepted(
+            clientId: "w-null", taskId: "t-null", tokensSeen: 1000,
+            wallClockMs: 2000, staleness: 0, effectiveLr: 0.1f,
+            newVersion: 1, lossAfter: 2.0);
+
+        using var cmd = probe.CreateCommand();
+        cmd.CommandText = "SELECT measured_tps FROM gradient_events WHERE task_id = 't-null';";
+        var raw = cmd.ExecuteScalar();
+        Assert.True(raw is null || raw is DBNull);
+    }
+
+    [Fact]
     public void GetGlobalMeasuredTokensPerSecond_returns_null_when_empty()
     {
         Assert.Null(_telemetry.GetGlobalMeasuredTokensPerSecond());

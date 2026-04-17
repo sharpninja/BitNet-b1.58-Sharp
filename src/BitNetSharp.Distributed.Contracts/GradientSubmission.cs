@@ -28,6 +28,13 @@ namespace BitNetSharp.Distributed.Contracts;
 /// and is not interpreted at the Contracts layer.</param>
 /// <param name="WallClockMs">How long the worker took to execute the
 /// task end-to-end. Feeds into the coordinator's efficiency estimate.</param>
+/// <param name="MeasuredTokensPerSecond">Worker-side real backprop
+/// throughput (tokens consumed divided by the actual stopwatch rate).
+/// When present, the coordinator stores it on the telemetry row so
+/// rollups can use the worker's authoritative number instead of deriving
+/// <c>tokens_seen / wall_clock_ms</c>. Nullable for back-compat with
+/// older worker builds; the coordinator falls back to derivation when
+/// <c>null</c>.</param>
 public sealed record GradientSubmission(
     string TaskId,
     string WorkerId,
@@ -36,4 +43,5 @@ public sealed record GradientSubmission(
     double LossAfter,
     string GradientFormat,
     byte[] GradientPayload,
-    long WallClockMs);
+    long WallClockMs,
+    double? MeasuredTokensPerSecond = null);

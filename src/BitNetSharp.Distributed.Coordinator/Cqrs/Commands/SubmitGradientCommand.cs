@@ -146,7 +146,8 @@ public sealed class SubmitGradientCommandHandler : ICommandHandler<SubmitGradien
             staleness: staleness,
             effectiveLr: effectiveLr,
             newVersion: newVersion,
-            lossAfter: command.Submission.LossAfter);
+            lossAfter: command.Submission.LossAfter,
+            measuredTokensPerSecond: command.Submission.MeasuredTokensPerSecond);
 
         _logger.LogInformation(
             "Accepted gradient for task {TaskId} from worker {ClientId}: format={Format}, bytes={Size}, tokens={Tokens}, loss={Loss}, staleness={Staleness}, new_version={NewVersion}, effective_lr={EffectiveLr:F4}",
