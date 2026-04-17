@@ -81,7 +81,8 @@ the detailed plans in `distributed-training.md`,
 | Deadline calibration from measured tps | ✅ | Landed in commit `9b604b7`; fallback `TargetTaskDurationSeconds*2` covers first-task case |
 | Seed-size feedback loop | ✅ | `seed-real-tasks auto` reads fleet-wide gradient_events tps and sizes `tokensPerTask` to fit `TargetTaskDurationSeconds`; falls back to 16,384 when the telemetry table is empty |
 | "Soft-expired but alive" UI counter | ✅ | Dashboard card joins tasks.deadline_at < now with fresh worker heartbeat |
-| Purge of legacy 1,605 seed rows | ⚪ | P4 — product decision pending |
+| "Stuck (dead)" UI counter | ✅ | Dashboard card: Assigned + deadline past + worker missing/heartbeat stale |
+| Purge / hide of legacy `task-seed-*` rows | ✅ | P4 tooling shipped: `purge-legacy-seed-rows` (hard) + `mark-legacy` (reversible) |
 
 ## 5. Coordinator admin UI (Blazor Server)
 
@@ -109,7 +110,7 @@ the detailed plans in `distributed-training.md`,
 | Weight download via `/weights/{version}` | ✅ | |
 | Gradient submit | ✅ | Observed loss-going-down signal on LEGION2 |
 | Heartbeat | ✅ | |
-| Measured-backprop telemetry upstream | 🟡 | Coordinator already reads it from gradient_events; no dedicated wire field |
+| Measured-backprop telemetry upstream | ✅ | Dedicated `MeasuredTokensPerSecond` field on `GradientSubmitRequest`; persisted in `gradient_events.measured_tps` |
 
 ## 7. Fleet nodes
 
@@ -217,7 +218,7 @@ signal once operator runs either CLI.
 - Real-ASR-trace ingestion with PII scrubbing.
 - Multi-turn corpus generator.
 - Per-worker GPU support (currently CPU-only in containers).
-- Worker-side dedicated `measured_tokens_per_second` wire field on gradient submit (🟡 coordinator currently derives it from `gradient_events.wall_clock_ms` + `tokens_seen`).
+- ~~Worker-side dedicated `measured_tokens_per_second` wire field on gradient submit.~~ ✅ Landed 2026-04-17; `GradientSubmission.MeasuredTokensPerSecond` → `gradient_events.measured_tps`.
 
 ## 11. How to resume after context break
 
