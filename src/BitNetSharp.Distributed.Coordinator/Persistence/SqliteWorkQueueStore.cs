@@ -438,6 +438,46 @@ LIMIT $limit;";
     }
 
     /// <summary>
+    /// Counts Assigned tasks whose lease deadline has passed but whose
+    /// owning worker is still sending heartbeats inside
+    /// <paramref name="staleAfter"/>. This is the "soft-expired but
+    /// alive" signal: the task is technically eligible for recycling by
+    /// <see cref="RecycleTimedOutAssignments"/>, yet the worker is
+    /// demonstrably still on the network — meaning real backprop is
+    /// likely running longer than the lease.
+    ///
+    /// <para>
+    /// The dashboard pairs this counter with Assigned so the operator
+    /// can tell the difference between a stuck worker (heartbeat stale)
+    /// and a slow-but-alive worker (heartbeat fresh, deadline passed).
+    /// JOINs the <c>workers</c> table on <c>assigned_to = worker_id</c>
+    /// because both stores share the same SQLite file.
+    /// </para>
+    /// </summary>
+    public int CountSoftExpiredButAlive(TimeSpan staleAfter)
+    {
+        if (staleAfter <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(staleAfter), "Stale threshold must be positive.");
+        }
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+SELECT COUNT(1)
+FROM tasks t
+INNER JOIN workers w ON t.assigned_to = w.worker_id
+WHERE t.state = 'Assigned'
+  AND t.deadline_at IS NOT NULL
+  AND t.deadline_at < $now
+  AND w.last_heartbeat >= $cutoff;";
+        var nowUnix = _time.GetUtcNow().ToUnixTimeSeconds();
+        var cutoff = _time.GetUtcNow().Subtract(staleAfter).ToUnixTimeSeconds();
+        cmd.Parameters.AddWithValue("$now", nowUnix);
+        cmd.Parameters.AddWithValue("$cutoff", cutoff);
+        var result = cmd.ExecuteScalar();
+        return result is null or DBNull ? 0 : Convert.ToInt32(result, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
     /// Returns the count of tasks currently in the given state. Handy
     /// for <c>/status</c> dashboards and smoke tests.
     /// </summary>

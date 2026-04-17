@@ -2,9 +2,11 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading.Tasks;
+using BitNetSharp.Distributed.Coordinator.Configuration;
 using BitNetSharp.Distributed.Coordinator.Persistence;
 using BitNetSharp.Distributed.Coordinator.Services;
 using McpServer.Cqrs;
+using Microsoft.Extensions.Options;
 
 namespace BitNetSharp.Distributed.Coordinator.Cqrs.Queries;
 
@@ -35,7 +37,13 @@ public sealed record DashboardSnapshot(
     IReadOnlyList<DashboardWorkerRow> WorkerRows,
     DateTimeOffset GeneratedAtUtc);
 
-public sealed record TaskCounts(int Pending, int Assigned, int Done, int Failed);
+/// <summary>
+/// Task counter rollup. <paramref name="SoftExpiredButAlive"/> counts
+/// Assigned tasks whose lease deadline has passed but whose worker is
+/// still sending heartbeats — a "slow but alive" signal distinct from a
+/// stuck worker whose heartbeat is also stale.
+/// </summary>
+public sealed record TaskCounts(int Pending, int Assigned, int Done, int Failed, int SoftExpiredButAlive);
 
 public sealed record WorkerCounts(int Configured, int Active, int Draining, int Gone);
 
@@ -105,6 +113,7 @@ public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboar
     private readonly SqliteWorkerRegistryStore _workerStore;
     private readonly SqliteTelemetryStore _telemetry;
     private readonly WeightApplicationService _weights;
+    private readonly IOptionsMonitor<CoordinatorOptions> _options;
     private readonly TimeProvider _time;
 
     public GetDashboardSnapshotQueryHandler(
@@ -112,12 +121,14 @@ public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboar
         SqliteWorkerRegistryStore workerStore,
         SqliteTelemetryStore telemetry,
         WeightApplicationService weights,
+        IOptionsMonitor<CoordinatorOptions> options,
         TimeProvider time)
     {
         _workQueue = workQueue;
         _workerStore = workerStore;
         _telemetry = telemetry;
         _weights = weights;
+        _options = options;
         _time = time;
     }
 
@@ -129,11 +140,14 @@ public sealed class GetDashboardSnapshotQueryHandler : IQueryHandler<GetDashboar
         var recentStart = now - RecentWindow;
         var liveStart = now - LiveWindow;
 
+        var staleAfterSeconds = Math.Max(1, _options.CurrentValue.StaleWorkerThresholdSeconds);
+        var staleAfter = TimeSpan.FromSeconds(staleAfterSeconds);
         var taskCounts = new TaskCounts(
-            Pending:  _workQueue.CountByState(WorkTaskState.Pending),
-            Assigned: _workQueue.CountByState(WorkTaskState.Assigned),
-            Done:     _workQueue.CountByState(WorkTaskState.Done),
-            Failed:   _workQueue.CountByState(WorkTaskState.Failed));
+            Pending:             _workQueue.CountByState(WorkTaskState.Pending),
+            Assigned:            _workQueue.CountByState(WorkTaskState.Assigned),
+            Done:                _workQueue.CountByState(WorkTaskState.Done),
+            Failed:              _workQueue.CountByState(WorkTaskState.Failed),
+            SoftExpiredButAlive: _workQueue.CountSoftExpiredButAlive(staleAfter));
 
         var active   = _workerStore.CountByState(WorkerState.Active);
         var draining = _workerStore.CountByState(WorkerState.Draining);

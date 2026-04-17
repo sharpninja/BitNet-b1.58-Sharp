@@ -77,7 +77,7 @@ the detailed plans in `distributed-training.md`,
 | `dump-events` CLI | ✅ | Diagnostic log tail |
 | Deadline calibration from measured tps | ✅ | Landed in commit `9b604b7`; fallback `TargetTaskDurationSeconds*2` covers first-task case |
 | Seed-size feedback loop | ✅ | `seed-real-tasks auto` reads fleet-wide gradient_events tps and sizes `tokensPerTask` to fit `TargetTaskDurationSeconds`; falls back to 16,384 when the telemetry table is empty |
-| "Stuck but alive" UI counter | ⚪ | P2 |
+| "Soft-expired but alive" UI counter | ✅ | Dashboard card joins tasks.deadline_at < now with fresh worker heartbeat |
 | Purge of legacy 1,605 seed rows | ⚪ | P4 — product decision pending |
 
 ## 5. Coordinator admin UI (Blazor Server)
@@ -168,12 +168,16 @@ coordinator DB still seeds sanely.
 `SeedRealTasksCommandLine` auto branch.
 
 ### P2 — "Soft-expired but alive" UI counter
-**Status:** ⚪ not started.
-**Plan:** Dashboard query joins task rows with worker heartbeat; a
-row with `deadline < now` but a fresh heartbeat is "soft-expired".
-Display as a second counter next to Assigned.
-**Acceptance:** operator can tell a stuck worker from a slow-but-alive
-worker at a glance.
+**Status:** ✅ shipped. `SqliteWorkQueueStore.CountSoftExpiredButAlive`
+joins tasks with workers: Assigned rows whose `deadline_at < now` but
+whose owning worker's `last_heartbeat >= now - StaleWorkerThresholdSeconds`.
+`GetDashboardSnapshotQueryHandler` now takes `IOptionsMonitor<CoordinatorOptions>`
+and wires the window. `TaskCounts` gets a new `SoftExpiredButAlive`
+field; `DashboardPage.razor` renders a new card (warn-tinted when > 0)
+between Assigned and Done so the operator can distinguish a stuck
+worker from a slow-but-alive one at a glance.
+**Files:** `SqliteWorkQueueStore.CountSoftExpiredButAlive`,
+`GetDashboardSnapshotQuery.cs` (ctor + TaskCounts), `DashboardPage.razor`.
 
 ### P3 — Script hygiene
 **Status:** 🟡 partial — one-off probes deleted 2026-04-17, three

@@ -72,6 +72,10 @@ else
             <div class="card-label">Assigned tasks</div>
             <div class="card-value">@s.Tasks.Assigned</div>
         </div>
+        <div class="card" title="Assigned tasks whose lease deadline has passed but whose worker is still sending heartbeats — slow-but-alive, not stuck.">
+            <div class="card-label">Soft-expired (alive)</div>
+            <div class="card-value @(s.Tasks.SoftExpiredButAlive == 0 ? "" : "warn")">@s.Tasks.SoftExpiredButAlive</div>
+        </div>
         <div class="card">
             <div class="card-label">Done</div>
             <div class="card-value ok">@s.Tasks.Done</div>

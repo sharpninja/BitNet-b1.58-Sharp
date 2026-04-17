@@ -605,6 +605,7 @@ public sealed class CqrsHandlerTests : IDisposable
             _workerStore,
             _telemetry,
             _weightApplication,
+            _options,
             _time);
 
         using var context = new CallContext();
@@ -653,6 +654,7 @@ public sealed class CqrsHandlerTests : IDisposable
             _workerStore,
             _telemetry,
             _weightApplication,
+            _options,
             _time);
 
         using var context = new CallContext();
@@ -736,6 +738,90 @@ public sealed class CqrsHandlerTests : IDisposable
         var tps = _telemetry.GetGlobalMeasuredTokensPerSecond();
         Assert.NotNull(tps);
         Assert.Equal(500.0, tps!.Value, precision: 3);
+    }
+
+    // ── CountSoftExpiredButAlive ────────────────────────────────────
+
+    private void UpsertWorker(string workerId, DateTimeOffset heartbeatAt)
+    {
+        _workerStore.Upsert(new WorkerRecord(
+            WorkerId: workerId,
+            Name: workerId,
+            CpuThreads: 4,
+            TokensPerSecond: 1000d,
+            RecommendedTokensPerTask: 4096L,
+            ProcessArchitecture: "X64",
+            OsDescription: "TestOS",
+            RegisteredAtUtc: heartbeatAt,
+            LastHeartbeatUtc: heartbeatAt,
+            State: WorkerState.Active));
+    }
+
+    [Fact]
+    public void CountSoftExpiredButAlive_counts_assigned_past_deadline_with_fresh_heartbeat()
+    {
+        UpsertWorker("worker-a", _time.GetUtcNow());
+        _queueStore.EnqueuePending(NewPendingTask("s-1"));
+        var claimed = _queueStore.TryClaimNextPending("worker-a", TimeSpan.FromSeconds(30));
+        Assert.NotNull(claimed);
+
+        // Advance past the 30-s lease but inside the 300-s stale window.
+        _time.Advance(TimeSpan.FromSeconds(60));
+        _workerStore.TouchHeartbeat("worker-a");
+
+        Assert.Equal(1, _queueStore.CountSoftExpiredButAlive(TimeSpan.FromSeconds(300)));
+    }
+
+    [Fact]
+    public void CountSoftExpiredButAlive_ignores_tasks_whose_worker_went_silent()
+    {
+        UpsertWorker("worker-a", _time.GetUtcNow());
+        _queueStore.EnqueuePending(NewPendingTask("s-2"));
+        _queueStore.TryClaimNextPending("worker-a", TimeSpan.FromSeconds(30));
+
+        // Advance past both lease AND stale threshold without heartbeat.
+        _time.Advance(TimeSpan.FromSeconds(600));
+
+        Assert.Equal(0, _queueStore.CountSoftExpiredButAlive(TimeSpan.FromSeconds(300)));
+    }
+
+    [Fact]
+    public void CountSoftExpiredButAlive_ignores_tasks_whose_deadline_has_not_passed()
+    {
+        UpsertWorker("worker-a", _time.GetUtcNow());
+        _queueStore.EnqueuePending(NewPendingTask("s-3"));
+        _queueStore.TryClaimNextPending("worker-a", TimeSpan.FromMinutes(10));
+
+        _time.Advance(TimeSpan.FromSeconds(60));
+        _workerStore.TouchHeartbeat("worker-a");
+
+        Assert.Equal(0, _queueStore.CountSoftExpiredButAlive(TimeSpan.FromSeconds(300)));
+    }
+
+    [Fact]
+    public async Task GetDashboardSnapshot_surfaces_soft_expired_alive_count()
+    {
+        UpsertWorker("worker-a", _time.GetUtcNow());
+        _queueStore.EnqueuePending(NewPendingTask("d-soft"));
+        _queueStore.TryClaimNextPending("worker-a", TimeSpan.FromSeconds(30));
+
+        _time.Advance(TimeSpan.FromSeconds(60));
+        _workerStore.TouchHeartbeat("worker-a");
+
+        var handler = new GetDashboardSnapshotQueryHandler(
+            _queueStore,
+            _workerStore,
+            _telemetry,
+            _weightApplication,
+            _options,
+            _time);
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(new GetDashboardSnapshotQuery(), context);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(1, result.Value!.Tasks.SoftExpiredButAlive);
+        Assert.Equal(1, result.Value.Tasks.Assigned);
     }
 }
 #endif
