@@ -970,7 +970,10 @@ static int SeedTasksCommandLine(string[] args)
 /// Walks <c>&lt;dbDir&gt;/corpus/tokenized/*.bin</c>, slices each shard
 /// into chunks of <c>tokensPerTask</c> int32s, and enqueues one task
 /// per chunk with the real shardId + byte offset/length. Usage:
-///   seed-real-tasks [tokensPerTask] [maxTasksPerShard]
+///   seed-real-tasks [tokensPerTask] [maxTasksPerShard] [--shard-prefix NAME]
+/// The optional <c>--shard-prefix</c> flag restricts seeding to
+/// <c>{prefix}-*.bin</c> files only, so v2 shards can be queued
+/// without re-enqueuing v1 tasks that are already in flight.
 /// </summary>
 static int SeedRealTasksCommandLine(string[] args)
 {
@@ -978,6 +981,7 @@ static int SeedRealTasksCommandLine(string[] args)
     {
         var tokensPerTask = 16_384L;
         var maxPerShard = int.MaxValue;
+        string? shardPrefix = null;
         if (args.Length > 1 && long.TryParse(args[1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var t) && t > 0)
         {
             tokensPerTask = t;
@@ -985,6 +989,14 @@ static int SeedRealTasksCommandLine(string[] args)
         if (args.Length > 2 && int.TryParse(args[2], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var m) && m > 0)
         {
             maxPerShard = m;
+        }
+        for (var i = 1; i < args.Length - 1; i++)
+        {
+            if (args[i] == "--shard-prefix")
+            {
+                shardPrefix = args[i + 1];
+                break;
+            }
         }
 
         var config = new ConfigurationBuilder()
@@ -1012,12 +1024,17 @@ static int SeedRealTasksCommandLine(string[] args)
             return 3;
         }
 
-        var binFiles = System.IO.Directory.GetFiles(tokenizedDir, "*.bin");
+        var binPattern = shardPrefix is null ? "*.bin" : $"{shardPrefix}-*.bin";
+        var binFiles = System.IO.Directory.GetFiles(tokenizedDir, binPattern);
         Array.Sort(binFiles, StringComparer.Ordinal);
         if (binFiles.Length == 0)
         {
-            Console.Error.WriteLine($"No tokenized .bin shards found in {tokenizedDir}");
+            Console.Error.WriteLine($"No tokenized .bin shards matching '{binPattern}' found in {tokenizedDir}");
             return 4;
+        }
+        if (shardPrefix is not null)
+        {
+            Console.WriteLine($"Restricting to shard-prefix '{shardPrefix}' → {binFiles.Length} shards");
         }
 
         using var store = new SqliteWorkQueueStore(

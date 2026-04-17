@@ -165,11 +165,9 @@ if ($tokExit -eq 3) {
 }
 
 if (-not $SkipSeed) {
-    Write-Host "==> Seeding tasks against $Name shards..."
-    # seed-real-tasks does not yet honor --shard-prefix; caller can
-    # run it manually after this script lands if shard targeting is
-    # needed.
-    Write-Warning "Automatic seeding skipped: run seed-real-tasks manually after verifying vocab."
+    Write-Host "==> Seeding tasks against $Name shards (tokensPerTask=16384, maxPerShard=4)..."
+    $seedOut = Invoke-Coord @('seed-real-tasks', '16384', '4', '--shard-prefix', $Name)
+    $seedOut | Write-Host
 }
 
 Write-Host "==> Done. Monitor http://${Coordinator}:5000/admin/dashboard"
