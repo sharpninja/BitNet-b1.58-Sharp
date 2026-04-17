@@ -17,3 +17,5 @@
   - [Usage](usage.md)
   - [Training and visualization](training-and-visualization.md)
   - [Distributed training (coordinator + workers)](distributed-training.md)
+  - [Training corpus scope and sources](training-corpus-scope.md)
+  - [State of completion and remaining work](state-of-completion.md)

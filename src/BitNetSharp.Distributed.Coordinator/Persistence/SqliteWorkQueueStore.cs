@@ -134,12 +134,19 @@ INSERT INTO tasks (
     /// same task.
     /// </summary>
     public WorkTaskRecord? TryClaimNextPending(string workerId, TimeSpan leaseDuration)
+        => TryClaimNextPending(workerId, _ => leaseDuration);
+
+    /// <summary>
+    /// Claim variant that lets the caller size the lease per-task by
+    /// inspecting <c>tokens_per_task</c>. Used by
+    /// <c>ClaimNextTaskCommandHandler</c> to set a deadline based on
+    /// the worker's measured real-training throughput instead of a
+    /// fixed multiple of the calibration-time target duration.
+    /// </summary>
+    public WorkTaskRecord? TryClaimNextPending(string workerId, Func<long, TimeSpan> leaseForTokensPerTask)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(workerId);
-        if (leaseDuration <= TimeSpan.Zero)
-        {
-            throw new ArgumentOutOfRangeException(nameof(leaseDuration), "Lease duration must be positive.");
-        }
+        ArgumentNullException.ThrowIfNull(leaseForTokensPerTask);
 
         lock (_writeGate)
         {
@@ -152,18 +159,27 @@ INSERT INTO tasks (
             using var selectCmd = _connection.CreateCommand();
             selectCmd.Transaction = transaction;
             selectCmd.CommandText = @"
-SELECT task_id FROM tasks
+SELECT task_id, tokens_per_task FROM tasks
 WHERE state = 'Pending'
 ORDER BY created_at ASC, task_id ASC
 LIMIT 1;";
-            var taskIdObj = selectCmd.ExecuteScalar();
-            if (taskIdObj is null || taskIdObj is DBNull)
+            using var selReader = selectCmd.ExecuteReader();
+            if (!selReader.Read())
             {
+                selReader.Close();
                 transaction.Commit();
                 return null;
             }
+            var taskId = selReader.GetString(0);
+            var tokensPerTask = selReader.GetInt64(1);
+            selReader.Close();
 
-            var taskId = (string)taskIdObj;
+            var leaseDuration = leaseForTokensPerTask(tokensPerTask);
+            if (leaseDuration <= TimeSpan.Zero)
+            {
+                throw new InvalidOperationException("Lease calculator returned a non-positive duration.");
+            }
+
             var nowUnix = _time.GetUtcNow().ToUnixTimeSeconds();
             var deadlineUnix = _time.GetUtcNow().Add(leaseDuration).ToUnixTimeSeconds();
 

@@ -173,6 +173,41 @@ WHERE received_at >= $since;";
     }
 
     /// <summary>
+    /// Returns the measured real-world tokens/second for a given worker
+    /// based on the most recent <paramref name="lookback"/> accepted
+    /// gradients. Derives throughput from stored <c>tokens_seen</c> and
+    /// <c>wall_clock_ms</c>, which unlike the calibration-time
+    /// <c>workers.tokens_per_sec</c> column reflects real backprop
+    /// cost. Returns <c>null</c> when no prior gradients exist for
+    /// the worker or when total wall-clock is zero.
+    /// </summary>
+    public double? GetMeasuredTokensPerSecond(string clientId, int lookback = 8)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(clientId);
+        if (lookback <= 0) { lookback = 1; }
+
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+SELECT COALESCE(SUM(tokens_seen), 0), COALESCE(SUM(wall_clock_ms), 0)
+FROM (
+    SELECT tokens_seen, wall_clock_ms
+    FROM gradient_events
+    WHERE client_id = $client_id
+    ORDER BY id DESC
+    LIMIT $limit
+);";
+        cmd.Parameters.AddWithValue("$client_id", clientId);
+        cmd.Parameters.AddWithValue("$limit", lookback);
+
+        using var reader = cmd.ExecuteReader();
+        if (!reader.Read()) return null;
+        var tokens = reader.GetInt64(0);
+        var wallMs = reader.GetInt64(1);
+        if (tokens <= 0 || wallMs <= 0) return null;
+        return tokens / (wallMs / 1000.0);
+    }
+
+    /// <summary>
     /// Total row count in the telemetry table; handy for sanity
     /// checks in tests.
     /// </summary>
