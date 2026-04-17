@@ -105,6 +105,7 @@
             }
             function updateHeaderIndicators(table) {
                 var ths = table.querySelectorAll('th[data-col]');
+                var changes = [];
                 for (var i = 0; i < ths.length; i++) {
                     var th = ths[i];
                     var col = th.getAttribute('data-col');
@@ -112,8 +113,13 @@
                     if (col === state.sortCol) mark = state.sortDir === 'asc' ? ' \u2191' : ' \u2193';
                     var base = th.getAttribute('data-label');
                     if (!base) { base = th.textContent.replace(/[\s\u2191\u2193]+$/, ''); th.setAttribute('data-label', base); }
-                    th.textContent = base + mark;
+                    var desired = base + mark;
+                    if (th.textContent !== desired) changes.push([th, desired]);
                 }
+                if (changes.length === 0) return;
+                state.reordering = true;
+                try { for (var j = 0; j < changes.length; j++) changes[j][0].textContent = changes[j][1]; }
+                finally { state.reordering = false; }
             }
             function refresh() {
                 var table = document.getElementById('worker-grid');
