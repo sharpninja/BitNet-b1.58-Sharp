@@ -72,6 +72,11 @@ if (args.Length > 0 && string.Equals(args[0], "generate-corpus", StringCompariso
     return GenerateCorpusCommandLine(args);
 }
 
+if (args.Length > 0 && string.Equals(args[0], "generate-multiturn-corpus", StringComparison.OrdinalIgnoreCase))
+{
+    return GenerateMultiTurnCorpusCommandLine(args);
+}
+
 if (args.Length > 0 && string.Equals(args[0], "tokenize-corpus", StringComparison.OrdinalIgnoreCase))
 {
     return TokenizeCorpusCommandLine(args);
@@ -827,6 +832,78 @@ static int GenerateCorpusCommandLine(string[] args)
     catch (Exception ex)
     {
         Console.Error.WriteLine($"generate-corpus failed: {ex}");
+        return 1;
+    }
+}
+
+static int GenerateMultiTurnCorpusCommandLine(string[] args)
+{
+    try
+    {
+        var count = 50_000;
+        var seed = 42;
+        var examplesPerShard = 5_000;
+        var turnsPerExample = 2;
+
+        if (args.Length > 1 && int.TryParse(args[1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsedCount) && parsedCount > 0)
+        {
+            count = parsedCount;
+        }
+
+        for (var i = 2; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "--seed" when i + 1 < args.Length:
+                    if (int.TryParse(args[++i], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsedSeed))
+                    {
+                        seed = parsedSeed;
+                    }
+                    break;
+                case "--examples-per-shard" when i + 1 < args.Length:
+                    if (int.TryParse(args[++i], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsedEps) && parsedEps > 0)
+                    {
+                        examplesPerShard = parsedEps;
+                    }
+                    break;
+                case "--turns-per-example" when i + 1 < args.Length:
+                    if (int.TryParse(args[++i], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsedTurns) && parsedTurns >= 2)
+                    {
+                        turnsPerExample = parsedTurns;
+                    }
+                    break;
+            }
+        }
+
+        var config = new ConfigurationBuilder()
+            .SetBasePath(System.IO.Path.GetDirectoryName(typeof(Program).Assembly.Location) ?? ".")
+            .AddJsonFile("appsettings.json", optional: true)
+            .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}.json", optional: true)
+            .AddEnvironmentVariables()
+            .Build();
+
+        var coordinator = new CoordinatorOptions();
+        config.GetSection(CoordinatorOptions.SectionName).Bind(coordinator);
+
+        var corpusDir = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(coordinator.DatabasePath)) ?? ".",
+            "corpus");
+
+        Console.WriteLine($"Generating {count} multi-turn examples into {corpusDir} (seed={seed}, turns={turnsPerExample})…");
+        var manifest = MultiTurnCorpusGenerator.Generate(corpusDir, count, examplesPerShard, seed, turnsPerExample);
+
+        Console.WriteLine($"Generated {manifest.TotalExamples} examples across {manifest.Shards.Count} shards.");
+        foreach (var shard in manifest.Shards)
+        {
+            Console.WriteLine($"  {shard.ShardId}: {shard.ExampleCount} examples, {shard.SizeBytes:N0} bytes");
+        }
+
+        Console.WriteLine($"Manifest saved to {System.IO.Path.Combine(corpusDir, $"manifest.{MultiTurnCorpusGenerator.DefaultManifestName}.json")}");
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"generate-multiturn-corpus failed: {ex}");
         return 1;
     }
 }

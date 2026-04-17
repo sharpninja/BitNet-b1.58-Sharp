@@ -124,7 +124,13 @@ public static class TruckMateCorpusGenerator
         return manifest;
     }
 
-    private static string GenerateExample(Random rng, CorpusPoolVersion v)
+    /// <summary>
+    /// Emits a single <c>[USER] ... [INTENT] {...}</c> line from the
+    /// shared intent-pool distribution. Exposed as <c>internal</c> so
+    /// the multi-turn generator can concatenate N of these per example
+    /// line without forking the pool definitions or the RNG histogram.
+    /// </summary>
+    internal static string GenerateExample(Random rng, CorpusPoolVersion v)
     {
         var intentFamily = rng.Next(10);
         return intentFamily switch
