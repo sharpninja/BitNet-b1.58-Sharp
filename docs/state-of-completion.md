@@ -1,6 +1,9 @@
 # State of Completion and Remaining Work
 
-Snapshot of project completion status. Updated 2026-04-17.
+Snapshot of project completion status. Updated 2026-04-17 — P2
+soft-expired-alive counter landed; P3 script hygiene fully landed;
+`--shard-prefix` flag + `TelemetryPruneService` reconciled out of the
+further-horizon list.
 
 This is the "where we are right now" doc: what works end-to-end, what
 is partially wired, and what is still on the backlog. Cross-references
@@ -180,14 +183,15 @@ worker from a slow-but-alive one at a glance.
 `GetDashboardSnapshotQuery.cs` (ctor + TaskCounts), `DashboardPage.razor`.
 
 ### P3 — Script hygiene
-**Status:** 🟡 partial — one-off probes deleted 2026-04-17, three
-active scripts retained under `tmp-` prefix pending rename:
-`tmp-deploy-coord.ps1` (referenced from `scripts/Generate-TruckMateCorpusV2.ps1`
-and this doc), `tmp-dump-events.ps1` (remote log tail),
-`tmp-purge-reseed.ps1` (queue reset after K mis-seed). A future pass
-can promote to non-`tmp-` names once caller references are updated
-in lockstep.
-**Acceptance:** `git status` clean of stray one-off `tmp-*` probes. ✅
+**Status:** ✅ shipped. The surviving one-off helpers were promoted out
+of `.claude/scripts/tmp-*.ps1` into `scripts/` with non-`tmp-`
+names: `deploy-coord.ps1`, `dump-events.ps1`, `purge-and-reseed.ps1`,
+`check-telemetry.ps1`, `purge-telemetry.ps1`, `set-coord-env.ps1`,
+`purge-v1-shards.ps1`. Caller references in
+`scripts/Generate-TruckMateCorpusV2.ps1` and this doc follow the new
+paths.
+**Acceptance:** no `tmp-*` probes in `.claude/scripts/`; `git status`
+clean. ✅
 
 ### P4 — Legacy `task-seed-*` rows
 **Status:** ⚪ product decision pending.
@@ -200,11 +204,12 @@ signal, not backfilled stubs.
 ### Further horizon (not sequenced)
 
 - ~~Corpus-v2 scale (200K+ examples) to unlock `truckmate-large`.~~ ✅ Done 2026-04-17.
-- `seed-real-tasks --shard-prefix truckmate-v2` flag to target v2 shards in seeding. Currently seeds fall back to legacy behavior.
+- ~~`seed-real-tasks --shard-prefix truckmate-v2` flag to target v2 shards in seeding.~~ ✅ Landed in commit `12da06f`; `scripts/Generate-TruckMateCorpusV2.ps1` wires it for auto-seed.
+- ~~Automated nightly telemetry prune (`D-5` in the full impl plan).~~ ✅ `TelemetryPruneService` runs hourly, deletes `gradient_events` + `worker_logs` older than `TelemetryRetentionDays` / `LogRetentionDays`.
 - Real-ASR-trace ingestion with PII scrubbing.
 - Multi-turn corpus generator.
 - Per-worker GPU support (currently CPU-only in containers).
-- Automated nightly telemetry prune (`D-5` in the full impl plan).
+- Worker-side dedicated `measured_tokens_per_second` wire field on gradient submit (🟡 coordinator currently derives it from `gradient_events.wall_clock_ms` + `tokens_seen`).
 
 ## 11. How to resume after context break
 
