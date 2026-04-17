@@ -648,6 +648,7 @@ public sealed class CqrsHandlerTests : IDisposable
             _telemetry,
             _weightApplication,
             new PruneHealth(),
+            new BackupHealth(),
             _options,
             _time);
 
@@ -698,6 +699,7 @@ public sealed class CqrsHandlerTests : IDisposable
             _telemetry,
             _weightApplication,
             new PruneHealth(),
+            new BackupHealth(),
             _options,
             _time);
 
@@ -931,6 +933,7 @@ public sealed class CqrsHandlerTests : IDisposable
             _telemetry,
             _weightApplication,
             new PruneHealth(),
+            new BackupHealth(),
             _options,
             _time);
 
@@ -958,6 +961,7 @@ public sealed class CqrsHandlerTests : IDisposable
             _telemetry,
             _weightApplication,
             new PruneHealth(),
+            new BackupHealth(),
             _options,
             _time);
 
@@ -967,5 +971,82 @@ public sealed class CqrsHandlerTests : IDisposable
         Assert.True(result.IsSuccess);
         Assert.Equal(1, result.Value!.Tasks.SoftExpiredButAlive);
         Assert.Equal(1, result.Value.Tasks.Assigned);
+    }
+
+    [Fact]
+    public async Task VacuumDatabase_compacts_sqlite_file()
+    {
+        // Bloat the DB: insert + delete a lot of rows so free pages
+        // exist. VACUUM should shrink the file. 10k rows ensures the
+        // post-checkpoint footprint is well above any single-page
+        // round-up noise, so the shrink is unambiguous.
+        for (var i = 0; i < 10_000; i++)
+        {
+            _telemetry.RecordAccepted("worker-bloat", $"bloat-{i}", 4096, 500, 0, 0.1f, 3, 0.9d);
+        }
+        // Dispose every store that holds a long-lived SqliteConnection
+        // to this file. VACUUM needs an exclusive lock and will be a
+        // no-op if any connection (even a pooled reader) still points
+        // at the database.
+        _telemetry.Dispose();
+        _queueStore.Dispose();
+        _workerStore.Dispose();
+        // Checkpoint WAL into the main DB file, then delete rows so
+        // VACUUM sees a large free-page set it can actually reclaim.
+        // Without a pre-checkpoint, the "before" size reads the main
+        // file alone (WAL pages still pending) and the handler's own
+        // wal_checkpoint(TRUNCATE) can push it higher than the vacuumed
+        // result, making the shrink assertion flap.
+        using (var conn = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_databasePath}"))
+        {
+            conn.Open();
+            using (var cp = conn.CreateCommand())
+            {
+                cp.CommandText = "PRAGMA wal_checkpoint(TRUNCATE);";
+                cp.ExecuteNonQuery();
+            }
+            using var cmd = conn.CreateCommand();
+            cmd.CommandText = "DELETE FROM gradient_events;";
+            cmd.ExecuteNonQuery();
+        }
+        // Flush pooled handles — VACUUM needs an exclusive lock and
+        // will refuse to shrink if the pool retains a read-open conn.
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+
+        var options = new StaticOptionsMonitor<CoordinatorOptions>(new CoordinatorOptions
+        {
+            DatabasePath = _databasePath,
+        });
+        var handler = new VacuumDatabaseCommandHandler(
+            options,
+            NullLogger<VacuumDatabaseCommandHandler>.Instance);
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(new VacuumDatabaseCommand(), context);
+
+        Assert.True(result.IsSuccess);
+        Assert.True(result.Value!.SizeAfterBytes <= result.Value.SizeBeforeBytes,
+            $"VACUUM must not grow the file: before={result.Value.SizeBeforeBytes} after={result.Value.SizeAfterBytes}");
+
+        // Stronger invariant: post-VACUUM, the file size equals
+        // page_count × page_size — the freelist has been drained. If
+        // VACUUM truly ran, that product is far smaller than the
+        // pre-DELETE bloat we just committed (≈1 MB from 10k rows).
+        Microsoft.Data.Sqlite.SqliteConnection.ClearAllPools();
+        using var verify = new Microsoft.Data.Sqlite.SqliteConnection($"Data Source={_databasePath}");
+        verify.Open();
+        using var pc = verify.CreateCommand();
+        pc.CommandText = "PRAGMA page_count;";
+        var pageCount = Convert.ToInt64(pc.ExecuteScalar());
+        using var ps = verify.CreateCommand();
+        ps.CommandText = "PRAGMA page_size;";
+        var pageSize = Convert.ToInt64(ps.ExecuteScalar());
+        using var fl = verify.CreateCommand();
+        fl.CommandText = "PRAGMA freelist_count;";
+        var freelist = Convert.ToInt64(fl.ExecuteScalar());
+
+        Assert.Equal(0, freelist);
+        Assert.True(pageCount * pageSize < 100_000,
+            $"post-VACUUM logical size should be <100KB (empty tables only); got pages={pageCount} × {pageSize} = {pageCount * pageSize}");
     }
 }

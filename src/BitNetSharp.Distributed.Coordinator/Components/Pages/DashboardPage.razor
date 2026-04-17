@@ -42,6 +42,34 @@ else
             }
         </p>
     }
+    @if (s.BackupHealth.ConsecutiveFailures > 0)
+    {
+        <p class="warn" style="border:1px solid #a33; padding:6px 8px;">
+            <strong>Backup service unhealthy:</strong>
+            @s.BackupHealth.ConsecutiveFailures consecutive failure(s).
+            @if (!string.IsNullOrWhiteSpace(s.BackupHealth.LastFailureMessage))
+            {
+                <span> Last error: <code>@s.BackupHealth.LastFailureMessage</code></span>
+            }
+            @if (s.BackupHealth.LastFailureAtUtc is { } bat)
+            {
+                <span style="color:#aaa;"> (@bat.ToString("u"))</span>
+            }
+        </p>
+    }
+    else if (s.BackupHealth.LastSuccessAtUtc is { } lastOk)
+    {
+        <p style="color:#888; font-size:0.9em;">
+            Last backup: @lastOk.ToString("u")
+            @if (!string.IsNullOrWhiteSpace(s.BackupHealth.LastBackupPath))
+            {
+                <span> → <code>@s.BackupHealth.LastBackupPath</code></span>
+            }
+        </p>
+    }
+    <form method="post" action="/admin/database/vacuum-form" data-enhance="false" style="margin:6px 0;">
+        <button type="submit" class="btn" title="PRAGMA wal_checkpoint(TRUNCATE) + VACUUM — reclaims free pages in place. Safe to run anytime; may briefly pause writers.">Vacuum database</button>
+    </form>
     var pct = s.Progress.PercentComplete * 100d;
     <section style="margin-top:12px;">
         <div style="display:flex; justify-content:space-between; align-items:baseline;">

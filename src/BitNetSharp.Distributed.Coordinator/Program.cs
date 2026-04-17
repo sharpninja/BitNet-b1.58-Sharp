@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using System.Net.Http;
 using System.Security.Claims;
 using BitNetSharp.Distributed.Contracts;
 using BitNetSharp.Distributed.Coordinator;
@@ -75,6 +76,11 @@ if (args.Length > 0 && string.Equals(args[0], "generate-corpus", StringCompariso
 if (args.Length > 0 && string.Equals(args[0], "generate-multiturn-corpus", StringComparison.OrdinalIgnoreCase))
 {
     return GenerateMultiTurnCorpusCommandLine(args);
+}
+
+if (args.Length > 0 && string.Equals(args[0], "generate-asr-corpus", StringComparison.OrdinalIgnoreCase))
+{
+    return GenerateAsrCorpusCommandLine(args);
 }
 
 if (args.Length > 0 && string.Equals(args[0], "tokenize-corpus", StringComparison.OrdinalIgnoreCase))
@@ -314,6 +320,17 @@ builder.Services.AddHostedService<StaleSweeperService>();
 // when the prune loop has started failing.
 builder.Services.AddSingleton<PruneHealth>();
 builder.Services.AddHostedService<TelemetryPruneService>();
+builder.Services.AddSingleton<BackupHealth>();
+builder.Services.AddHostedService<DatabaseBackupService>();
+
+// Sonnet-backed ASR corpus generator (manual CLI verb only — not a
+// hosted service). HttpClient typed client target the Anthropic
+// Messages API; per-run, not long-lived.
+builder.Services.AddHttpClient<SonnetAsrCorpusGenerator>(client =>
+{
+    client.BaseAddress = new Uri("https://api.anthropic.com/");
+    client.Timeout = TimeSpan.FromMinutes(2);
+});
 
 var app = builder.Build();
 
@@ -755,6 +772,21 @@ app.MapPost("/admin/tasks/kick-stuck-form", async (IDispatcher dispatcher) =>
     return Results.Redirect($"/admin/dashboard?error={Uri.EscapeDataString(result.Error ?? "unknown")}");
 }).RequireAuthorization("AdminPolicy").DisableAntiforgery();
 
+app.MapPost("/admin/database/vacuum-form", async (IDispatcher dispatcher) =>
+{
+    var result = await dispatcher
+        .SendAsync<VacuumDatabaseResult>(new VacuumDatabaseCommand())
+        .ConfigureAwait(false);
+
+    if (result.IsSuccess)
+    {
+        var saved = result.Value!.SizeBeforeBytes - result.Value.SizeAfterBytes;
+        return Results.Redirect($"/admin/dashboard?vacuumed={Uri.EscapeDataString(saved.ToString(System.Globalization.CultureInfo.InvariantCulture))}");
+    }
+
+    return Results.Redirect($"/admin/dashboard?error={Uri.EscapeDataString(result.Error ?? "unknown")}");
+}).RequireAuthorization("AdminPolicy").DisableAntiforgery();
+
 app.Run();
 return 0;
 
@@ -904,6 +936,109 @@ static int GenerateMultiTurnCorpusCommandLine(string[] args)
     catch (Exception ex)
     {
         Console.Error.WriteLine($"generate-multiturn-corpus failed: {ex}");
+        return 1;
+    }
+}
+
+static int GenerateAsrCorpusCommandLine(string[] args)
+{
+    try
+    {
+        var count = 1_000;
+        var seed = 42;
+        var examplesPerShard = 500;
+        var batchSize = 20;
+        var dryRun = false;
+
+        if (args.Length > 1 && int.TryParse(args[1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var parsedCount) && parsedCount > 0)
+        {
+            count = parsedCount;
+        }
+
+        for (var i = 2; i < args.Length; i++)
+        {
+            switch (args[i])
+            {
+                case "--count" when i + 1 < args.Length:
+                    if (int.TryParse(args[++i], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var c) && c > 0)
+                        count = c;
+                    break;
+                case "--seed" when i + 1 < args.Length:
+                    if (int.TryParse(args[++i], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var s))
+                        seed = s;
+                    break;
+                case "--examples-per-shard" when i + 1 < args.Length:
+                    if (int.TryParse(args[++i], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var eps) && eps > 0)
+                        examplesPerShard = eps;
+                    break;
+                case "--batch-size" when i + 1 < args.Length:
+                    if (int.TryParse(args[++i], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var bs) && bs > 0)
+                        batchSize = bs;
+                    break;
+                case "--dry-run":
+                    dryRun = true;
+                    break;
+            }
+        }
+
+        var config = new ConfigurationBuilder()
+            .SetBasePath(System.IO.Path.GetDirectoryName(typeof(Program).Assembly.Location) ?? ".")
+            .AddJsonFile("appsettings.json", optional: true)
+            .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}.json", optional: true)
+            .AddEnvironmentVariables()
+            .Build();
+
+        var coordinator = new CoordinatorOptions();
+        config.GetSection(CoordinatorOptions.SectionName).Bind(coordinator);
+
+        if (dryRun)
+        {
+            // Static estimate doesn't need HttpClient or a live key.
+            var batches = (count + batchSize - 1) / batchSize;
+            var inputTokens = (long)batches * (800L + 40L * batchSize);
+            var outputTokens = (long)count * 60L;
+            var projected =
+                ((decimal)inputTokens / 1_000_000m) * SonnetAsrCorpusGenerator.InputUsdPerMillion +
+                ((decimal)outputTokens / 1_000_000m) * SonnetAsrCorpusGenerator.OutputUsdPerMillion;
+            Console.WriteLine($"Dry-run estimate: count={count} batches={batches} input~{inputTokens:N0} output~{outputTokens:N0} projected~{projected:C}");
+            Console.WriteLine($"Cost cap: {coordinator.AsrCostCapUsd:C}");
+            return 0;
+        }
+
+        if (string.IsNullOrWhiteSpace(coordinator.AnthropicApiKey))
+        {
+            Console.Error.WriteLine("generate-asr-corpus: Coordinator__AnthropicApiKey is not set.");
+            return 2;
+        }
+
+        var corpusDir = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(coordinator.DatabasePath)) ?? ".",
+            "corpus");
+
+        Console.WriteLine($"Generating {count} ASR-noisy examples via {coordinator.AnthropicModel} into {corpusDir} (seed={seed}, batch={batchSize})…");
+
+        using var http = new HttpClient { BaseAddress = new Uri("https://api.anthropic.com/"), Timeout = TimeSpan.FromMinutes(2) };
+        using var loggerFactory = LoggerFactory.Create(b => b.AddSimpleConsole());
+        var logger = loggerFactory.CreateLogger<SonnetAsrCorpusGenerator>();
+        var generator = new SonnetAsrCorpusGenerator(
+            http,
+            new StaticCoordinatorOptionsMonitor(coordinator),
+            logger);
+
+        var manifest = generator.GenerateAsync(corpusDir, count, examplesPerShard, seed, batchSize)
+            .GetAwaiter().GetResult();
+
+        Console.WriteLine($"Generated {manifest.TotalExamples} examples across {manifest.Shards.Count} shards.");
+        foreach (var shard in manifest.Shards)
+        {
+            Console.WriteLine($"  {shard.ShardId}: {shard.ExampleCount} examples, {shard.SizeBytes:N0} bytes");
+        }
+        Console.WriteLine($"Manifest saved to {System.IO.Path.Combine(corpusDir, "manifest.asr-v1.json")}");
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"generate-asr-corpus failed: {ex}");
         return 1;
     }
 }
@@ -1763,5 +1898,19 @@ namespace BitNetSharp.Distributed.Coordinator
         {
             options.ExpectedKey = () => _coordinator.CurrentValue.WorkerApiKey;
         }
+    }
+
+    /// <summary>
+    /// Minimal <see cref="IOptionsMonitor{T}"/> used by the
+    /// <c>generate-asr-corpus</c> CLI verb, which runs outside the
+    /// host DI container. Only the constructed value is ever returned.
+    /// </summary>
+    internal sealed class StaticCoordinatorOptionsMonitor : IOptionsMonitor<CoordinatorOptions>
+    {
+        private readonly CoordinatorOptions _value;
+        public StaticCoordinatorOptionsMonitor(CoordinatorOptions value) { _value = value; }
+        public CoordinatorOptions CurrentValue => _value;
+        public CoordinatorOptions Get(string? name) => _value;
+        public IDisposable? OnChange(Action<CoordinatorOptions, string?> listener) => null;
     }
 }

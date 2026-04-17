@@ -114,6 +114,27 @@ public sealed class CoordinatorOptions
     public int LogRetentionDays { get; set; } = 3;
 
     /// <summary>
+    /// Directory where nightly backup snapshots are written. Empty
+    /// value resolves to <c>{DatabasePath-directory}/backups</c>.
+    /// Each iteration writes a <c>yyyyMMdd'T'HHmmss</c> subdir holding
+    /// the SQLite copy + weight blobs.
+    /// </summary>
+    public string BackupRoot { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Number of days a backup subdir is retained before
+    /// <see cref="BitNetSharp.Distributed.Coordinator.Services.DatabaseBackupService"/>
+    /// prunes it on the next iteration.
+    /// </summary>
+    public int BackupRetentionDays { get; set; } = 14;
+
+    /// <summary>
+    /// Wall-clock interval between backup iterations. Clamped to a
+    /// minimum of 1 hour inside the service.
+    /// </summary>
+    public int BackupIntervalHours { get; set; } = 24;
+
+    /// <summary>
     /// Single shared API key every worker must present in the
     /// <c>X-Api-Key</c> header to hit the worker endpoints. Set via
     /// environment variable <c>Coordinator__WorkerApiKey</c> by the
@@ -130,6 +151,42 @@ public sealed class CoordinatorOptions
     /// instead.
     /// </summary>
     public AdminOptions Admin { get; set; } = new();
+
+    /// <summary>
+    /// Anthropic API key used by
+    /// <see cref="BitNetSharp.Distributed.Coordinator.Services.SonnetAsrCorpusGenerator"/>
+    /// to query Claude Sonnet for synthetic ASR-noisy transcripts. Set
+    /// via env var <c>Coordinator__AnthropicApiKey</c>. Empty value
+    /// aborts the generator before any HTTP call.
+    /// </summary>
+    public string AnthropicApiKey { get; set; } = string.Empty;
+
+    /// <summary>
+    /// Anthropic model id passed in the Messages API request body.
+    /// Defaults to the current Sonnet release.
+    /// </summary>
+    public string AnthropicModel { get; set; } = "claude-sonnet-4-6";
+
+    /// <summary>
+    /// Max concurrent in-flight Messages-API calls. Matches the
+    /// Anthropic tier-1 rate-limit headroom; raise cautiously.
+    /// </summary>
+    public int AsrMaxConcurrency { get; set; } = 4;
+
+    /// <summary>
+    /// Cumulative USD cost ceiling per generator run. Enforced after
+    /// each batch using the <c>usage</c> block the Messages API
+    /// returns. Once the running total exceeds this, the generator
+    /// stops and returns a partial manifest.
+    /// </summary>
+    public decimal AsrCostCapUsd { get; set; } = 5.00m;
+
+    /// <summary>
+    /// Shard-id prefix for generated ASR shards. Workers select ASR
+    /// shards via this prefix so they stay distinct from the
+    /// deterministic <c>truckmate-v2-</c> corpus.
+    /// </summary>
+    public string AsrShardPrefix { get; set; } = "asr-v1-";
 }
 
 /// <summary>
