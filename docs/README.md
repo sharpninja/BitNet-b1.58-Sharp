@@ -39,3 +39,4 @@ dotnet test BitNet-b1.58-Sharp.slnx
 - [Repository alignment guidelines](repo-alignment-guidelines.md)
 - [Usage](usage.md)
 - [Training and visualization](training-and-visualization.md)
+- [Distributed training (coordinator + workers)](distributed-training.md)

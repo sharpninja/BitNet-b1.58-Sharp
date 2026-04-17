@@ -82,6 +82,11 @@ if (args.Length > 0 && string.Equals(args[0], "seed-real-tasks", StringCompariso
     return SeedRealTasksCommandLine(args);
 }
 
+if (args.Length > 0 && string.Equals(args[0], "dump-events", StringComparison.OrdinalIgnoreCase))
+{
+    return DumpEventsCommandLine(args);
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Running under Windows Service Control Manager sets the current
@@ -1003,6 +1008,63 @@ static int SeedRealTasksCommandLine(string[] args)
     catch (Exception ex)
     {
         Console.Error.WriteLine($"seed-real-tasks failed: {ex}");
+        return 1;
+    }
+}
+
+/// <summary>
+/// Dumps the most recent worker_logs rows to stdout. Diagnostic CLI
+/// for triaging worker behavior without needing a browser / OIDC
+/// session. Usage: dump-events [limit=40] [minLevel]
+/// </summary>
+static int DumpEventsCommandLine(string[] args)
+{
+    try
+    {
+        var limit = 40;
+        string? minLevel = null;
+        if (args.Length > 1 && int.TryParse(args[1], System.Globalization.NumberStyles.Integer, System.Globalization.CultureInfo.InvariantCulture, out var n) && n > 0)
+        {
+            limit = n;
+        }
+        if (args.Length > 2)
+        {
+            minLevel = args[2];
+        }
+
+        var config = new ConfigurationBuilder()
+            .SetBasePath(System.IO.Path.GetDirectoryName(typeof(Program).Assembly.Location) ?? ".")
+            .AddJsonFile("appsettings.json", optional: true)
+            .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}.json", optional: true)
+            .AddEnvironmentVariables()
+            .Build();
+
+        var coordinator = new CoordinatorOptions();
+        config.GetSection(CoordinatorOptions.SectionName).Bind(coordinator);
+        if (string.IsNullOrWhiteSpace(coordinator.DatabasePath))
+        {
+            Console.Error.WriteLine("Coordinator:DatabasePath is not set.");
+            return 2;
+        }
+
+        using var store = new SqliteLogStore($"Data Source={coordinator.DatabasePath}");
+        var rows = store.Query(limit: limit, minLevel: minLevel);
+        foreach (var r in rows)
+        {
+            var ts = DateTimeOffset.FromUnixTimeSeconds(r.TimestampUnix).ToLocalTime().ToString("HH:mm:ss");
+            var worker = (r.WorkerId ?? "-").Length > 8 ? r.WorkerId!.Substring(0, 8) : (r.WorkerId ?? "-");
+            Console.WriteLine($"{ts} {r.Level,-5} {worker,-8} {r.Category,-30} {r.Message}");
+            if (!string.IsNullOrEmpty(r.Exception))
+            {
+                Console.WriteLine($"  ex: {r.Exception}");
+            }
+        }
+        Console.WriteLine($"-- {rows.Count} rows, total={store.TotalCount()}");
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"dump-events failed: {ex}");
         return 1;
     }
 }
