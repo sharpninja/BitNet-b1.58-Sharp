@@ -117,7 +117,7 @@ function Invoke-Coord {
 }
 
 if (-not $SkipDeploy) {
-    $deploy = Join-Path $PSScriptRoot '..\.claude\scripts\tmp-deploy-coord.ps1'
+    $deploy = Join-Path $PSScriptRoot 'deploy-coord.ps1'
     if (Test-Path $deploy) {
         Write-Host "==> Deploying latest coordinator DLL via $deploy"
         & $deploy

@@ -175,16 +175,31 @@ WHERE received_at >= $since;";
     /// <summary>
     /// Returns the measured real-world tokens/second for a given worker
     /// based on the most recent <paramref name="lookback"/> accepted
-    /// gradients. Derives throughput from stored <c>tokens_seen</c> and
+    /// gradients inside <paramref name="maxAge"/> (default 30 min).
+    /// Derives throughput from stored <c>tokens_seen</c> and
     /// <c>wall_clock_ms</c>, which unlike the calibration-time
     /// <c>workers.tokens_per_sec</c> column reflects real backprop
-    /// cost. Returns <c>null</c> when no prior gradients exist for
-    /// the worker or when total wall-clock is zero.
+    /// cost. Returns <c>null</c> when no prior gradients exist inside
+    /// the window or when total wall-clock is zero.
+    ///
+    /// <para>
+    /// The time window matters: without it, legacy fast synthetic
+    /// gradients (wall_clock_ms in the single-digit-millisecond range)
+    /// skew the rollup to 700k+ tok/s, which then produces 60-second
+    /// leases that expire before 10-minute real-training tasks finish.
+    /// Bounding to 30 minutes means a regime change (e.g. synthetic ⇒
+    /// real-corpus workload) naturally decays within the window.
+    /// </para>
     /// </summary>
-    public double? GetMeasuredTokensPerSecond(string clientId, int lookback = 8)
+    public double? GetMeasuredTokensPerSecond(
+        string clientId,
+        int lookback = 8,
+        TimeSpan? maxAge = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(clientId);
         if (lookback <= 0) { lookback = 1; }
+        var window = maxAge ?? TimeSpan.FromMinutes(30);
+        var cutoff = _time.GetUtcNow().Subtract(window).ToUnixTimeSeconds();
 
         using var cmd = _connection.CreateCommand();
         cmd.CommandText = @"
@@ -193,11 +208,13 @@ FROM (
     SELECT tokens_seen, wall_clock_ms
     FROM gradient_events
     WHERE client_id = $client_id
+      AND received_at >= $cutoff
     ORDER BY id DESC
     LIMIT $limit
 );";
         cmd.Parameters.AddWithValue("$client_id", clientId);
         cmd.Parameters.AddWithValue("$limit", lookback);
+        cmd.Parameters.AddWithValue("$cutoff", cutoff);
 
         using var reader = cmd.ExecuteReader();
         if (!reader.Read()) return null;

@@ -9,12 +9,8 @@ Invoke-Command -ComputerName PAYTON-DESKTOP -ScriptBlock {
     Write-Host '==> Stopping coordinator service'
     Stop-Service BitNetCoordinator
     Start-Sleep -Seconds 3
-    Write-Host '==> Purge pending'
-    & dotnet $dll purge-pending 2>&1
-    Write-Host '==> Reseed v1 (K=1)'
-    & dotnet $dll seed-real-tasks 16384 2 --shard-prefix truckmate-v1 2>&1 | Select-Object -Last 6
-    Write-Host '==> Reseed v2 (K=1)'
-    & dotnet $dll seed-real-tasks 16384 2 --shard-prefix truckmate-v2 2>&1 | Select-Object -Last 6
+    Write-Host '==> Purge telemetry'
+    & dotnet $dll purge-telemetry 2>&1
     Write-Host '==> Start coordinator service'
     Start-Service BitNetCoordinator
     Start-Sleep -Seconds 3

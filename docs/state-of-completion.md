@@ -204,7 +204,7 @@ signal, not backfilled stubs.
 
 1. `git status` to see whether the P0 diff is still uncommitted.
 2. `dotnet build BitNet-b1.58-Sharp.slnx` — confirm P0 compiles.
-3. `.claude/scripts/tmp-deploy-coord.ps1` — robocopy + restart service.
+3. `scripts/deploy-coord.ps1` — robocopy + restart service.
 4. Open `/admin/dashboard` — watch Assigned ≥ 1 for ~10 min, then
    Done increment.
 5. If P0 verified, move to P1: wire measured-tps into

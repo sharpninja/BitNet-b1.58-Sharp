@@ -92,6 +92,16 @@ if (args.Length > 0 && string.Equals(args[0], "purge-pending", StringComparison.
     return PurgePendingCommandLine(args);
 }
 
+if (args.Length > 0 && string.Equals(args[0], "dump-telemetry", StringComparison.OrdinalIgnoreCase))
+{
+    return DumpTelemetryCommandLine(args);
+}
+
+if (args.Length > 0 && string.Equals(args[0], "purge-telemetry", StringComparison.OrdinalIgnoreCase))
+{
+    return PurgeTelemetryCommandLine(args);
+}
+
 var builder = WebApplication.CreateBuilder(args);
 
 // Running under Windows Service Control Manager sets the current
@@ -1207,6 +1217,155 @@ static int PurgePendingCommandLine(string[] args)
     catch (Exception ex)
     {
         Console.Error.WriteLine($"purge-pending failed: {ex}");
+        return 1;
+    }
+}
+
+/// <summary>
+/// Deletes every row from gradient_events. Used to drop legacy
+/// synthetic benchmark samples whose tokens/sec is three orders of
+/// magnitude above real backprop; those rows otherwise poison
+/// lease calibration until the 30-minute window decays them.
+/// Service must be stopped first.
+/// </summary>
+static int PurgeTelemetryCommandLine(string[] args)
+{
+    try
+    {
+        var config = new ConfigurationBuilder()
+            .SetBasePath(System.IO.Path.GetDirectoryName(typeof(Program).Assembly.Location) ?? ".")
+            .AddJsonFile("appsettings.json", optional: true)
+            .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}.json", optional: true)
+            .AddEnvironmentVariables()
+            .Build();
+        var coord = new CoordinatorOptions();
+        config.GetSection(CoordinatorOptions.SectionName).Bind(coord);
+        if (string.IsNullOrWhiteSpace(coord.DatabasePath))
+        {
+            Console.Error.WriteLine("Coordinator:DatabasePath is not set.");
+            return 2;
+        }
+
+        using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={coord.DatabasePath}");
+        conn.Open();
+        using var cmd = conn.CreateCommand();
+        cmd.CommandText = "DELETE FROM gradient_events;";
+        var deleted = cmd.ExecuteNonQuery();
+        Console.WriteLine($"purge-telemetry: deleted {deleted} gradient_events rows");
+        return 0;
+    }
+    catch (Microsoft.Data.Sqlite.SqliteException ex) when (ex.SqliteErrorCode == 5)
+    {
+        Console.Error.WriteLine($"purge-telemetry: database locked — stop the BitNetCoordinator service first. ({ex.Message})");
+        return 2;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"purge-telemetry failed: {ex}");
+        return 1;
+    }
+}
+
+/// <summary>
+/// Reads gradient_events + tasks directly against the coordinator DB
+/// and prints a small diagnostic table. Used to sanity-check lease
+/// calibration (<c>GetMeasuredTokensPerSecond</c>) and to see which
+/// tasks are currently Assigned with what deadlines.
+/// </summary>
+static int DumpTelemetryCommandLine(string[] args)
+{
+    try
+    {
+        var config = new ConfigurationBuilder()
+            .SetBasePath(System.IO.Path.GetDirectoryName(typeof(Program).Assembly.Location) ?? ".")
+            .AddJsonFile("appsettings.json", optional: true)
+            .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}.json", optional: true)
+            .AddEnvironmentVariables()
+            .Build();
+        var coord = new CoordinatorOptions();
+        config.GetSection(CoordinatorOptions.SectionName).Bind(coord);
+        if (string.IsNullOrWhiteSpace(coord.DatabasePath))
+        {
+            Console.Error.WriteLine("Coordinator:DatabasePath is not set.");
+            return 2;
+        }
+
+        using var conn = new Microsoft.Data.Sqlite.SqliteConnection(
+            $"Data Source={coord.DatabasePath};Mode=ReadOnly;Cache=Shared");
+        conn.Open();
+
+        Console.WriteLine("== Per-worker gradient_events rollup ==");
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT client_id, COUNT(1), SUM(tokens_seen), SUM(wall_clock_ms), MAX(received_at) " +
+                              "FROM gradient_events GROUP BY client_id ORDER BY COUNT(1) DESC";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var cid = r.GetString(0);
+                var n = r.GetInt64(1);
+                var tok = r.GetInt64(2);
+                var ms = r.GetInt64(3);
+                var last = r.GetInt64(4);
+                var tps = ms > 0 ? tok / (ms / 1000.0) : 0.0;
+                var lastStr = DateTimeOffset.FromUnixTimeSeconds(last).ToLocalTime().ToString("HH:mm:ss");
+                Console.WriteLine($"  {cid,-40}  n={n,-5} tok={tok,-10} ms={ms,-10} tps={tps,-10:F2} last={lastStr}");
+            }
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("== Last 12 gradient events (by id desc) ==");
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT id, client_id, tokens_seen, wall_clock_ms, received_at " +
+                              "FROM gradient_events ORDER BY id DESC LIMIT 12";
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                var id = r.GetInt64(0);
+                var cid = r.GetString(1);
+                var tok = r.GetInt64(2);
+                var ms = r.GetInt64(3);
+                var at = DateTimeOffset.FromUnixTimeSeconds(r.GetInt64(4)).ToLocalTime().ToString("HH:mm:ss");
+                Console.WriteLine($"  id={id,-7} {cid,-40} tok={tok,-6} ms={ms,-8} at={at}");
+            }
+        }
+
+        Console.WriteLine();
+        Console.WriteLine("== Current Pending/Assigned (top 10 by assigned_at desc) ==");
+        using (var cmd = conn.CreateCommand())
+        {
+            cmd.CommandText = "SELECT task_id, assigned_to, assigned_at, deadline_at, tokens_per_task, k_local_steps, state " +
+                              "FROM tasks WHERE state IN ('Assigned','Pending') " +
+                              "ORDER BY COALESCE(assigned_at, 0) DESC LIMIT 10";
+            using var r = cmd.ExecuteReader();
+            var now = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
+            while (r.Read())
+            {
+                var tid = r.GetString(0);
+                var worker = r.IsDBNull(1) ? "-" : r.GetString(1);
+                var aa = r.IsDBNull(2) ? "-" : DateTimeOffset.FromUnixTimeSeconds(r.GetInt64(2)).ToLocalTime().ToString("HH:mm:ss");
+                string da = "-";
+                string remaining = "-";
+                if (!r.IsDBNull(3))
+                {
+                    var deadlineUnix = r.GetInt64(3);
+                    da = DateTimeOffset.FromUnixTimeSeconds(deadlineUnix).ToLocalTime().ToString("HH:mm:ss");
+                    remaining = $"{deadlineUnix - now}s";
+                }
+                var tok = r.GetInt64(4);
+                var k = r.GetInt32(5);
+                var st = r.GetString(6);
+                Console.WriteLine($"  {tid,-42} state={st,-9} worker={worker,-38} assigned={aa} deadline={da} rem={remaining,-6} tok={tok} K={k}");
+            }
+        }
+
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"dump-telemetry failed: {ex}");
         return 1;
     }
 }

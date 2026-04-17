@@ -212,9 +212,8 @@ Coexists with in-flight training; no disruption to v1 tasks mid-flight.
 
 1. Merge Phases 1–5 locally; build green; tests green.
 2. Commit + push to `azure`, mirror to `origin`.
-3. Redeploy coordinator DLL via the existing
-   `.claude/scripts/tmp-deploy-coord.ps1` (robocopy + service
-   restart).
+3. Redeploy coordinator DLL via
+   `scripts/deploy-coord.ps1` (robocopy + service restart).
 4. Run `scripts/Generate-TruckMateCorpusV2.ps1 -Coordinator <host>
    -RepoRoot <path> [-DataRoot <path>]`. The wrapper:
    - Deploys the DLL (unless `-SkipDeploy`).

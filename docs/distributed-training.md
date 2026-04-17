@@ -178,9 +178,10 @@ difference.
 
 ### P3: Clean up throwaway scripts
 
-`.claude/scripts/tmp-*.ps1` accumulates fast. Delete the ones that
-are no longer useful; promote anything still needed to a
-non-`tmp-*` name and document it here.
+Keep `scripts/*.ps1` tidy. The active remote helpers are
+`deploy-coord.ps1`, `purge-and-reseed.ps1`, `purge-telemetry.ps1`,
+`dump-events.ps1`, and `check-telemetry.ps1`. Anything throwaway
+should stay out of source control.
 
 ### P4: Investigate the 1605 "Done" tasks
 
