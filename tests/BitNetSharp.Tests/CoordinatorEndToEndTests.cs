@@ -1,4 +1,3 @@
-#if NET10_0_OR_GREATER
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -209,4 +208,3 @@ public sealed class CoordinatorEndToEndTests : IClassFixture<CoordinatorEndToEnd
         Assert.Equal(0, queueStore.CountByState(WorkTaskState.Pending));
     }
 }
-#endif

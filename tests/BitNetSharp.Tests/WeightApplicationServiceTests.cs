@@ -1,4 +1,3 @@
-#if NET10_0_OR_GREATER
 using System;
 using System.IO;
 using System.Linq;
@@ -353,4 +352,3 @@ public sealed class WeightApplicationServiceTests : IDisposable
         Assert.Equal(expected, second.Snapshot());
     }
 }
-#endif

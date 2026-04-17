@@ -1,4 +1,3 @@
-#if NET10_0_OR_GREATER
 using System;
 using System.Collections.Concurrent;
 using System.IO;
@@ -456,4 +455,3 @@ internal sealed class FakeTimeProvider : TimeProvider
 
     public void Advance(TimeSpan by) => _now = _now.Add(by);
 }
-#endif

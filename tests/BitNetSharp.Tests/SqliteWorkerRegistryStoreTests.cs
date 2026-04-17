@@ -1,4 +1,3 @@
-#if NET10_0_OR_GREATER
 using System;
 using System.IO;
 using System.Linq;
@@ -218,4 +217,3 @@ public sealed class SqliteWorkerRegistryStoreTests : IDisposable
         Assert.Equal("worker-third",  all[2].WorkerId);
     }
 }
-#endif

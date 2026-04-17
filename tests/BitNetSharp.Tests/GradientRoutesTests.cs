@@ -1,4 +1,3 @@
-#if NET10_0_OR_GREATER
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -157,4 +156,3 @@ public sealed class GradientRoutesTests
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 }
-#endif

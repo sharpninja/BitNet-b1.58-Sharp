@@ -1,4 +1,3 @@
-#if NET10_0_OR_GREATER
 using System;
 using System.Buffers.Binary;
 using System.IO;
@@ -970,4 +969,3 @@ public sealed class CqrsHandlerTests : IDisposable
         Assert.Equal(1, result.Value.Tasks.Assigned);
     }
 }
-#endif

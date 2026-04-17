@@ -1,4 +1,3 @@
-#if NET10_0_OR_GREATER
 using System;
 using System.IO;
 using System.Linq;
@@ -176,4 +175,3 @@ public sealed class TruckMateCorpusGeneratorTests : IDisposable
         Assert.True(File.Exists(Path.Combine(dir, "manifest.truckmate-v2.json")));
     }
 }
-#endif

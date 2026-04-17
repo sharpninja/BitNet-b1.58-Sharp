@@ -1,4 +1,3 @@
-#if NET10_0_OR_GREATER
 using System;
 using System.Threading;
 using System.Threading.Tasks;
@@ -102,4 +101,3 @@ public sealed class RegistrationGateTests
         await Assert.ThrowsAnyAsync<OperationCanceledException>(async () => await waiter);
     }
 }
-#endif

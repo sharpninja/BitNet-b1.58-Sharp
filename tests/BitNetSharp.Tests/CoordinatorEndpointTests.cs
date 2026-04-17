@@ -1,4 +1,3 @@
-#if NET10_0_OR_GREATER
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -171,4 +170,3 @@ public sealed class CoordinatorEndpointTests : IClassFixture<CoordinatorEndpoint
     /// </summary>
     private sealed record HealthPayload(string status, DateTimeOffset time, string phase);
 }
-#endif

@@ -48,7 +48,7 @@ jobs:
       - name: Generate default model weights
         run: |
           mkdir -p "${{ github.workspace }}/src/BitNetSharp.Core/Data/Models"
-          dotnet run --framework net9.0 --project "${{ github.workspace }}/src/BitNetSharp.App/BitNetSharp.App.csproj" --configuration Release --no-build -- export --output="${{ github.workspace }}/src/BitNetSharp.Core/Data/Models/bitnet-b1.58-default.gguf"
+          dotnet run --framework net10.0 --project "${{ github.workspace }}/src/BitNetSharp.App/BitNetSharp.App.csproj" --configuration Release --no-build -- export --output="${{ github.workspace }}/src/BitNetSharp.Core/Data/Models/bitnet-b1.58-default.gguf"
 
       - name: Pack BitNetSharp.Core
         run: dotnet pack "${{ github.workspace }}/src/BitNetSharp.Core/BitNetSharp.Core.csproj" --configuration Release --no-build --no-restore -p:PackageVersion=${{ steps.gitversion.outputs.semVer }} --output "${{ github.workspace }}/artifacts/packages/core"

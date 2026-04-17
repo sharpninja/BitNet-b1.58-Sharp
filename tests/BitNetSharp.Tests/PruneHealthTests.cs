@@ -1,4 +1,3 @@
-#if NET10_0_OR_GREATER
 using System;
 using BitNetSharp.Distributed.Coordinator.Services;
 using Xunit;
@@ -76,4 +75,3 @@ public sealed class PruneHealthTests
         Assert.Equal("second", snap.LastFailureMessage);
     }
 }
-#endif

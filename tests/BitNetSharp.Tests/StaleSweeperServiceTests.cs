@@ -1,4 +1,3 @@
-#if NET10_0_OR_GREATER
 using System;
 using System.IO;
 using BitNetSharp.Distributed.Coordinator.Configuration;
@@ -164,4 +163,3 @@ internal sealed class StaticOptionsMonitor<T> : IOptionsMonitor<T>
 
     public IDisposable? OnChange(Action<T, string?> listener) => null;
 }
-#endif
