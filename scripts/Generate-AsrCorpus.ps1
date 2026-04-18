@@ -57,11 +57,28 @@
 .PARAMETER SkipSeed
   Stop after tokenization; do not enqueue work.
 
+.PARAMETER SkipGenerate
+  Skip the generate-asr-corpus step entirely. Use when shards were
+  produced out-of-band (e.g. via cline + bytedance/seed-2-0-pro or
+  another operator-supplied pipeline). Requires -ShardSource.
+
+.PARAMETER ShardSource
+  Local directory containing pre-built asr-v1-shard-*.txt files.
+  When -SkipGenerate is set, the script copies every matching file
+  from this directory into {DataRoot}\corpus on the remote, then
+  proceeds with tokenize + seed. Ignored otherwise.
+
 .EXAMPLE
   .\Generate-AsrCorpus.ps1 -Coordinator PAYTON-DESKTOP `
       -RepoRoot 'F:\GitHub\BitNet-b1.58-Sharp' `
       -DataRoot 'F:\ProgramData\BitNetCoordinator' `
       -TargetCount 500
+
+.EXAMPLE
+  .\Generate-AsrCorpus.ps1 -Coordinator PAYTON-DESKTOP `
+      -RepoRoot 'F:\GitHub\BitNet-b1.58-Sharp' `
+      -DataRoot 'F:\ProgramData\BitNetCoordinator' `
+      -SkipGenerate -ShardSource 'F:\tmp\asr-v1-gen'
 #>
 [CmdletBinding()]
 param(
@@ -82,8 +99,23 @@ param(
 
     [switch]$DryRun,
     [switch]$SkipDeploy,
-    [switch]$SkipSeed
+    [switch]$SkipSeed,
+    [switch]$SkipGenerate,
+    [string]$ShardSource
 )
+
+if ($SkipGenerate) {
+    if (-not $ShardSource) {
+        throw "-SkipGenerate requires -ShardSource pointing to a local dir with asr-v1-shard-*.txt files."
+    }
+    if (-not (Test-Path $ShardSource -PathType Container)) {
+        throw "-ShardSource '$ShardSource' does not exist or is not a directory."
+    }
+    $preShards = Get-ChildItem -Path $ShardSource -Filter 'asr-v1-shard-*.txt' -File
+    if ($preShards.Count -eq 0) {
+        throw "-ShardSource '$ShardSource' contains no asr-v1-shard-*.txt files."
+    }
+}
 
 $ErrorActionPreference = 'Stop'
 
@@ -153,32 +185,51 @@ if (-not $SkipDeploy) {
     }
 }
 
-if (-not $DryRun) {
-    Write-Host "==> Preflight: checking Coordinator__AnthropicApiKey on $Coordinator..."
-    $hasKey = Test-RemoteAnthropicKey -HostName $Coordinator
-    if (-not $hasKey) {
-        throw "Coordinator__AnthropicApiKey is not set in the BitNetCoordinator service environment on $Coordinator. Set it and restart the service before rerunning. (Use -DryRun to price a run without the key.)"
+if ($SkipGenerate) {
+    if ($DryRun) {
+        Write-Host "==> -SkipGenerate + -DryRun: nothing to price; exiting."
+        return
     }
-    Write-Host "    key present."
+    $remoteCorpus = Join-Path $DataRoot 'corpus'
+    Write-Host ("==> Copying " + $preShards.Count + " shard(s) from " + $ShardSource + " -> \\" + $Coordinator + "\" + ($remoteCorpus -replace ':','$'))
+    $uncCorpus = '\\' + $Coordinator + '\' + ($remoteCorpus -replace ':','$')
+    Invoke-Command -ComputerName $Coordinator -ScriptBlock {
+        param($corpus)
+        New-Item -ItemType Directory -Path $corpus -Force | Out-Null
+    } -ArgumentList $remoteCorpus
+    foreach ($f in $preShards) {
+        Copy-Item -Path $f.FullName -Destination $uncCorpus -Force
+        Write-Host ("    " + $f.Name + " (" + $f.Length + "B)")
+    }
 }
+else {
+    if (-not $DryRun) {
+        Write-Host "==> Preflight: checking Coordinator__AnthropicApiKey on $Coordinator..."
+        $hasKey = Test-RemoteAnthropicKey -HostName $Coordinator
+        if (-not $hasKey) {
+            throw "Coordinator__AnthropicApiKey is not set in the BitNetCoordinator service environment on $Coordinator. Set it and restart the service before rerunning. (Use -DryRun to price a run without the key.)"
+        }
+        Write-Host "    key present."
+    }
 
-Write-Host "==> Generating $TargetCount ASR examples (epc=$ExamplesPerShard, batch=$BatchSize, seed=$Seed)..."
-$genArgs = @('generate-asr-corpus', "$TargetCount",
-    '--seed', "$Seed",
-    '--examples-per-shard', "$ExamplesPerShard",
-    '--batch-size', "$BatchSize")
-if ($DryRun) { $genArgs += '--dry-run' }
+    Write-Host "==> Generating $TargetCount ASR examples (epc=$ExamplesPerShard, batch=$BatchSize, seed=$Seed)..."
+    $genArgs = @('generate-asr-corpus', "$TargetCount",
+        '--seed', "$Seed",
+        '--examples-per-shard', "$ExamplesPerShard",
+        '--batch-size', "$BatchSize")
+    if ($DryRun) { $genArgs += '--dry-run' }
 
-$genResult = Invoke-Coord -CoordArgs $genArgs
-$genExit = $genResult[-1]
-$genResult[0..($genResult.Count - 2)] | Write-Host
-if ($genExit -ne 0) {
-    throw "generate-asr-corpus failed with exit code $genExit."
-}
+    $genResult = Invoke-Coord -CoordArgs $genArgs
+    $genExit = $genResult[-1]
+    $genResult[0..($genResult.Count - 2)] | Write-Host
+    if ($genExit -ne 0) {
+        throw "generate-asr-corpus failed with exit code $genExit."
+    }
 
-if ($DryRun) {
-    Write-Host "==> Dry-run complete. No shards written, no vocab changes, no tasks seeded."
-    return
+    if ($DryRun) {
+        Write-Host "==> Dry-run complete. No shards written, no vocab changes, no tasks seeded."
+        return
+    }
 }
 
 Write-Host "==> Backing up existing vocab.json -> vocab.v1.json (idempotent)..."
