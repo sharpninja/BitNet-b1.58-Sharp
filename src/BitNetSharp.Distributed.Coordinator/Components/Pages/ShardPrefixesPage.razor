@@ -1,0 +1,97 @@
+@page "/admin/config/shard-prefixes"
+@attribute [Authorize(Policy = "AdminPolicy")]
+@rendermode RenderMode.InteractiveServer
+@using BitNetSharp.Distributed.Coordinator.ViewModels
+@inject ShardPrefixesPageViewModel ViewModel
+
+<h2>Shard prefixes</h2>
+<p style="color:#999; font-size:12px;">
+    Edit the list of shard-prefix buckets that drive the training-status
+    rollup and corpus ETA math. Saves write
+    <code>appsettings.json</code> atomically; <code>IOptionsMonitor</code>
+    picks up the change within a second — no restart.
+</p>
+
+@if (!string.IsNullOrWhiteSpace(ViewModel.LastError))
+{
+    <p class="warn" style="color:#f66;">@ViewModel.LastError</p>
+}
+@if (!string.IsNullOrWhiteSpace(ViewModel.LastSuccess))
+{
+    <p style="color:#4caf50;">@ViewModel.LastSuccess</p>
+}
+
+<table style="width:100%; border-collapse:collapse; font-size:13px; margin-top:8px;">
+    <thead>
+        <tr style="border-bottom:1px solid #333; text-align:left;">
+            <th style="padding:4px 8px; width:4%;">#</th>
+            <th style="padding:4px 8px; width:25%;">Prefix</th>
+            <th style="padding:4px 8px; width:35%;">Display label</th>
+            <th style="padding:4px 8px; width:12%; text-align:right;">Pending tasks</th>
+            <th style="padding:4px 8px; width:24%;">Actions</th>
+        </tr>
+    </thead>
+    <tbody>
+        @for (var i = 0; i < ViewModel.Rows.Count; i++)
+        {
+            var row = ViewModel.Rows[i];
+            var idx = i;
+            <tr style="border-bottom:1px solid #222;">
+                <td style="padding:4px 8px; color:#aaa;">@(idx + 1)</td>
+                <td style="padding:4px 8px;">
+                    <input type="text" value="@row.Prefix"
+                           @oninput="@(e => row.Prefix = e.Value?.ToString() ?? string.Empty)"
+                           style="width:100%; background:#111; color:#ddd; border:1px solid #333; padding:4px;" />
+                </td>
+                <td style="padding:4px 8px;">
+                    <input type="text" value="@row.DisplayLabel"
+                           @oninput="@(e => row.DisplayLabel = e.Value?.ToString() ?? string.Empty)"
+                           style="width:100%; background:#111; color:#ddd; border:1px solid #333; padding:4px;" />
+                </td>
+                <td style="padding:4px 8px; text-align:right; font-family:ui-monospace,monospace;">@row.PendingCount.ToString("N0")</td>
+                <td style="padding:4px 8px;">
+                    <button type="button" class="btn" @onclick="() => ViewModel.MoveUp(row)">↑</button>
+                    <button type="button" class="btn" @onclick="() => ViewModel.MoveDown(row)">↓</button>
+                    <button type="button" class="btn" @onclick="() => ViewModel.RemoveRow(row)">Remove</button>
+                </td>
+            </tr>
+        }
+    </tbody>
+</table>
+
+<div style="margin-top:10px; display:flex; gap:8px;">
+    <button type="button" class="btn" @onclick="ViewModel.AddRow">+ Add prefix</button>
+    <button type="button" class="btn" @onclick="ViewModel.RefreshPreviewCounts">Refresh counts</button>
+    <button type="button" class="btn" style="background:#2d5;" @onclick="OnSaveAsync" disabled="@_saving">
+        @(_saving ? "Saving…" : "Save & reload")
+    </button>
+    <a href="/admin/training-status" style="margin-left:auto;">← Back to training</a>
+</div>
+
+<style>
+    .btn { background:#222; color:#ddd; border:1px solid #444; padding:4px 10px; cursor:pointer; }
+    .btn:hover { background:#2a2a2a; }
+    .btn:disabled { opacity:0.5; cursor:default; }
+</style>
+
+@code {
+    private bool _saving;
+
+    protected override void OnInitialized()
+    {
+        ViewModel.LoadFromOptions();
+    }
+
+    private async Task OnSaveAsync()
+    {
+        _saving = true;
+        try
+        {
+            await ViewModel.SaveAsync();
+        }
+        finally
+        {
+            _saving = false;
+        }
+    }
+}

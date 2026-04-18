@@ -316,6 +316,13 @@ builder.Services.AddTransient<DashboardPageViewModel>();
 builder.Services.AddTransient<LogViewerPageViewModel>();
 builder.Services.AddTransient<TaskBrowserPageViewModel>();
 builder.Services.AddTransient<TrainingStatusPageViewModel>();
+builder.Services.AddTransient<ShardPrefixesPageViewModel>();
+
+// Writable appsettings.json helper for the /admin/config/shard-prefixes
+// page. Scoped to the app's ContentRootPath so the writer edits the
+// same file the configuration builder's reloadOnChange watcher reads.
+builder.Services.AddSingleton(sp => new AppSettingsWriter(
+    sp.GetRequiredService<IHostEnvironment>().ContentRootPath));
 
 // Hosted service that transitions stale workers to Gone and
 // recycles timed-out task assignments back to Pending.
