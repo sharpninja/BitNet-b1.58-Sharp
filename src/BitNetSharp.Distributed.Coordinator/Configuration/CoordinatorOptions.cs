@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 
 namespace BitNetSharp.Distributed.Coordinator.Configuration;
 
@@ -187,6 +188,33 @@ public sealed class CoordinatorOptions
     /// deterministic <c>truckmate-v2-</c> corpus.
     /// </summary>
     public string AsrShardPrefix { get; set; } = "asr-v1-";
+
+    /// <summary>
+    /// Ordered list of shard-id prefixes the admin training-status
+    /// page surfaces as per-corpus rollup rows. Editable live via
+    /// <c>/admin/config/shard-prefixes</c>; changes land via
+    /// <see cref="Microsoft.Extensions.Options.IOptionsMonitor{TOptions}"/>
+    /// without a coordinator restart.
+    /// </summary>
+    public IReadOnlyList<ShardPrefixConfig> ActiveShardPrefixes { get; set; } = new[]
+    {
+        new ShardPrefixConfig("asr-v1-", "ASR v1"),
+        new ShardPrefixConfig("truckmate-v2-", "TruckMate v2"),
+        new ShardPrefixConfig("truckmate-v1-", "TruckMate v1"),
+    };
+}
+
+/// <summary>
+/// A single shard-prefix entry in
+/// <see cref="CoordinatorOptions.ActiveShardPrefixes"/>. <c>Prefix</c>
+/// is the literal <c>shard_id</c> starts-with match; <c>DisplayLabel</c>
+/// is what the admin UI surfaces.
+/// </summary>
+public sealed record ShardPrefixConfig(string Prefix, string DisplayLabel)
+{
+    // Parameterless ctor so ConfigurationBinder can bind array entries
+    // from json without manual ctor-arg mapping.
+    public ShardPrefixConfig() : this(string.Empty, string.Empty) { }
 }
 
 /// <summary>

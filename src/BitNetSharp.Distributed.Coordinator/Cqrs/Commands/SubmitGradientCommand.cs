@@ -2,6 +2,7 @@ using System;
 using System.Threading.Tasks;
 using BitNetSharp.Distributed.Contracts;
 using BitNetSharp.Distributed.Coordinator.Persistence;
+using BitNetSharp.Distributed.Coordinator.Realtime;
 using BitNetSharp.Distributed.Coordinator.Services;
 using McpServer.Cqrs;
 using Microsoft.Extensions.Logging;
@@ -40,6 +41,8 @@ public sealed class SubmitGradientCommandHandler : ICommandHandler<SubmitGradien
     private readonly SqliteWorkQueueStore _workQueue;
     private readonly WeightApplicationService _weights;
     private readonly SqliteTelemetryStore _telemetry;
+    private readonly ITrainingEventsBroadcaster _broadcaster;
+    private readonly TimeProvider _timeProvider;
     private readonly ILogger<SubmitGradientCommandHandler> _logger;
 
     /// <summary>Returned when the submission's worker_id does not match the JWT.</summary>
@@ -64,11 +67,15 @@ public sealed class SubmitGradientCommandHandler : ICommandHandler<SubmitGradien
         SqliteWorkQueueStore workQueue,
         WeightApplicationService weights,
         SqliteTelemetryStore telemetry,
+        ITrainingEventsBroadcaster broadcaster,
+        TimeProvider timeProvider,
         ILogger<SubmitGradientCommandHandler> logger)
     {
         _workQueue = workQueue;
         _weights = weights;
         _telemetry = telemetry;
+        _broadcaster = broadcaster;
+        _timeProvider = timeProvider;
         _logger = logger;
     }
 
@@ -170,6 +177,41 @@ public sealed class SubmitGradientCommandHandler : ICommandHandler<SubmitGradien
             newVersion: newVersion,
             lossAfter: command.Submission.LossAfter,
             measuredTokensPerSecond: command.Submission.MeasuredTokensPerSecond);
+
+        // Fire-and-forget SignalR push to the admin training-status page.
+        // Failures must not poison the gradient-accept response — a dead
+        // hub or a flaky client subscription would otherwise turn every
+        // gradient submission into a 500.
+        try
+        {
+            var shardId = _workQueue.GetShardId(command.Submission.TaskId) ?? string.Empty;
+            var broadcast = new GradientAcceptedBroadcast(
+                ReceivedAtUtc: _timeProvider.GetUtcNow(),
+                ClientId: command.ClientId,
+                TaskId: command.Submission.TaskId,
+                ShardId: shardId,
+                TokensSeen: command.Submission.TokensSeen,
+                WallClockMs: command.Submission.WallClockMs,
+                MeasuredTokensPerSecond: command.Submission.MeasuredTokensPerSecond,
+                NewVersion: newVersion,
+                LossAfter: command.Submission.LossAfter);
+            _ = _broadcaster.BroadcastGradientAcceptedAsync(broadcast)
+                .ContinueWith(t =>
+                {
+                    if (t.Exception is not null)
+                    {
+                        _logger.LogWarning(t.Exception,
+                            "GradientAccepted broadcast failed for task {TaskId}",
+                            command.Submission.TaskId);
+                    }
+                }, TaskScheduler.Default);
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex,
+                "GradientAccepted broadcast setup failed for task {TaskId}",
+                command.Submission.TaskId);
+        }
 
         _logger.LogInformation(
             "Accepted gradient for task {TaskId} from worker {ClientId}: format={Format}, bytes={Size}, tokens={Tokens}, loss={Loss}, staleness={Staleness}, new_version={NewVersion}, effective_lr={EffectiveLr:F4}",

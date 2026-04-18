@@ -1,0 +1,268 @@
+@page "/admin/training-status"
+@attribute [Authorize(Policy = "AdminPolicy")]
+@rendermode RenderMode.InteractiveServer
+@using BitNetSharp.Distributed.Coordinator.Cqrs.Queries
+@using BitNetSharp.Distributed.Coordinator.Persistence
+@using BitNetSharp.Distributed.Coordinator.ViewModels
+@inject TrainingStatusPageViewModel ViewModel
+@implements IDisposable
+
+<h2>Training status</h2>
+<p style="color:#999; font-size:12px;">
+    Live view of per-shard-prefix progress, per-worker contribution,
+    60-minute throughput sparklines, and the last 20 gradient submissions.
+    Auto-refreshes every 2 s over the InteractiveServer circuit.
+</p>
+
+@if (!string.IsNullOrWhiteSpace(ViewModel.LastError))
+{
+    <p class="warn">@ViewModel.LastError</p>
+}
+
+@if (ViewModel.Snapshot is null)
+{
+    <p>Loading…</p>
+}
+else
+{
+    var s = ViewModel.Snapshot;
+
+    <section style="display:flex; gap:12px; flex-wrap:wrap; margin:12px 0;">
+        <div class="card">
+            <div class="card-label">Weight version</div>
+            <div class="card-value">@s.CurrentWeightVersion</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Active workers</div>
+            <div class="card-value">@s.ActiveWorkerCount</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Global tok/s (1 min)</div>
+            <div class="card-value">@s.GlobalTokensPerSecond.ToString("N0")</div>
+        </div>
+        <div class="card">
+            <div class="card-label">Fleet ETA</div>
+            <div class="card-value">
+                @if (s.FleetEtaSeconds is { } eta)
+                {
+                    <text>@FormatDuration(eta)</text>
+                }
+                else
+                {
+                    <em style="color:#888;">idle</em>
+                }
+            </div>
+        </div>
+    </section>
+
+    <h3 style="margin-top:18px;">Corpus rollup</h3>
+    <table style="width:100%; border-collapse:collapse; font-size:13px;">
+        <thead>
+            <tr style="border-bottom:1px solid #333; text-align:left;">
+                <th style="padding:4px 8px;">Prefix</th>
+                <th style="padding:4px 8px;">Label</th>
+                <th style="padding:4px 8px; text-align:right;">Queued</th>
+                <th style="padding:4px 8px; text-align:right;">Assigned</th>
+                <th style="padding:4px 8px; text-align:right;">Done</th>
+                <th style="padding:4px 8px; text-align:right;">Failed</th>
+                <th style="padding:4px 8px; text-align:right;">%</th>
+                <th style="padding:4px 8px; text-align:right;">tok/s</th>
+                <th style="padding:4px 8px; text-align:right;">ETA</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (var r in s.Rollups)
+            {
+                <tr style="border-bottom:1px solid #222;">
+                    <td style="padding:4px 8px; font-family:ui-monospace,monospace;">@r.Prefix</td>
+                    <td style="padding:4px 8px;">@r.DisplayLabel</td>
+                    <td style="padding:4px 8px; text-align:right;">@r.Queued.ToString("N0")</td>
+                    <td style="padding:4px 8px; text-align:right;">@r.Assigned.ToString("N0")</td>
+                    <td style="padding:4px 8px; text-align:right;">@r.Done.ToString("N0")</td>
+                    <td style="padding:4px 8px; text-align:right;">@r.Failed.ToString("N0")</td>
+                    <td style="padding:4px 8px; text-align:right;">@r.PercentComplete.ToString("F1")%</td>
+                    <td style="padding:4px 8px; text-align:right;">@r.TokensPerSecond.ToString("N0")</td>
+                    <td style="padding:4px 8px; text-align:right;">
+                        @if (r.EtaSeconds is { } rowEta) { <text>@FormatDuration(rowEta)</text> }
+                        else { <em style="color:#888;">—</em> }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+    <p style="margin-top:6px;">
+        <a href="/admin/config/shard-prefixes">Edit prefixes →</a>
+    </p>
+
+    <h3 style="margin-top:18px;">Fleet throughput — last 60 min</h3>
+    var fleet = s.Sparklines.FirstOrDefault(x => x.Key == "fleet");
+    @if (fleet is not null)
+    {
+        @RenderSparkline(fleet, 480, 48)
+    }
+
+    <h3 style="margin-top:18px;">Per-worker × per-shard activity (1 min window)</h3>
+    @if (s.WorkerShardCells.Count == 0)
+    {
+        <p style="color:#888;"><em>No gradient activity in the last minute.</em></p>
+    }
+    else
+    {
+        var workers = s.WorkerShardCells.Select(c => c.ClientId).Distinct().OrderBy(w => w).ToArray();
+        var rowPrefixes = s.Rollups.Select(r => r.Prefix).ToArray();
+        <table style="border-collapse:collapse; font-size:12px;">
+            <thead>
+                <tr style="border-bottom:1px solid #333;">
+                    <th style="padding:4px 8px; text-align:left;">Worker</th>
+                    @foreach (var p in rowPrefixes)
+                    {
+                        <th style="padding:4px 8px; text-align:right;">@p</th>
+                    }
+                    <th style="padding:4px 8px; text-align:right;">Sparkline</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var w in workers)
+                {
+                    var row = s.WorkerShardCells.Where(c => c.ClientId == w).ToDictionary(c => c.ShardPrefix);
+                    var spark = s.Sparklines.FirstOrDefault(x => x.Key == w);
+                    <tr style="border-bottom:1px solid #222;">
+                        <td style="padding:4px 8px; font-family:ui-monospace,monospace;">@w</td>
+                        @foreach (var p in rowPrefixes)
+                        {
+                            <td style="padding:4px 8px; text-align:right;">
+                                @if (row.TryGetValue(p, out var cell))
+                                {
+                                    <text>@cell.TasksCompleted · @cell.TokensPerSecond.ToString("N0") tok/s</text>
+                                }
+                                else
+                                {
+                                    <em style="color:#555;">—</em>
+                                }
+                            </td>
+                        }
+                        <td style="padding:4px 8px; text-align:right;">
+                            @if (spark is not null) { @RenderSparkline(spark, 160, 24) }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+
+    <h3 style="margin-top:18px;">Recent gradient submissions</h3>
+    @if (s.RecentEvents.Count == 0)
+    {
+        <p style="color:#888;"><em>No gradient events recorded yet.</em></p>
+    }
+    else
+    {
+        <table style="border-collapse:collapse; font-size:12px;">
+            <thead>
+                <tr style="border-bottom:1px solid #333; text-align:left;">
+                    <th style="padding:4px 8px;">Time</th>
+                    <th style="padding:4px 8px;">Worker</th>
+                    <th style="padding:4px 8px;">Task</th>
+                    <th style="padding:4px 8px;">Shard</th>
+                    <th style="padding:4px 8px; text-align:right;">Tokens</th>
+                    <th style="padding:4px 8px; text-align:right;">tok/s</th>
+                    <th style="padding:4px 8px; text-align:right;">Version</th>
+                    <th style="padding:4px 8px; text-align:right;">Loss</th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (var e in s.RecentEvents)
+                {
+                    <tr style="border-bottom:1px solid #222;">
+                        <td style="padding:4px 8px; color:#aaa;">@e.ReceivedAt.ToString("HH:mm:ss")</td>
+                        <td style="padding:4px 8px; font-family:ui-monospace,monospace;">@e.ClientId</td>
+                        <td style="padding:4px 8px; font-family:ui-monospace,monospace;">@e.TaskId</td>
+                        <td style="padding:4px 8px; color:#bbb;">@(string.IsNullOrEmpty(e.ShardId) ? "—" : e.ShardId)</td>
+                        <td style="padding:4px 8px; text-align:right;">@e.TokensSeen.ToString("N0")</td>
+                        <td style="padding:4px 8px; text-align:right;">@e.MeasuredTps.ToString("N0")</td>
+                        <td style="padding:4px 8px; text-align:right;">@e.NewVersion</td>
+                        <td style="padding:4px 8px; text-align:right;">@e.LossAfter.ToString("F4")</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    }
+
+    <p style="color:#666; font-size:11px; margin-top:12px;">
+        Snapshot generated <time data-utc="@s.GeneratedAtUtc.ToString("O")">@s.GeneratedAtUtc.ToString("u")</time>.
+    </p>
+
+    <style>
+        .card { background:#1c1c1c; border:1px solid #333; padding:12px 16px; min-width:150px; }
+        .card-label { font-size:11px; color:#888; text-transform:uppercase; letter-spacing:0.05em; }
+        .card-value { font-size:24px; font-family:ui-monospace,monospace; margin-top:4px; }
+        .warn { color:#f66; }
+    </style>
+}
+
+@code {
+    private System.Threading.Timer? _refreshTimer;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await ViewModel.LoadAsync();
+        _refreshTimer = new System.Threading.Timer(async _ =>
+        {
+            try
+            {
+                await InvokeAsync(async () =>
+                {
+                    await ViewModel.LoadAsync();
+                    StateHasChanged();
+                });
+            }
+            catch
+            {
+                // circuit errors must not crash the timer
+            }
+        }, null, TimeSpan.FromSeconds(2), TimeSpan.FromSeconds(2));
+    }
+
+    public void Dispose()
+    {
+        _refreshTimer?.Dispose();
+    }
+
+    private static string FormatDuration(double seconds)
+    {
+        if (double.IsNaN(seconds) || double.IsInfinity(seconds) || seconds < 0d) return "—";
+        var span = TimeSpan.FromSeconds(seconds);
+        if (span.TotalHours >= 1d) return $"{(int)span.TotalHours}h {span.Minutes}m";
+        if (span.TotalMinutes >= 1d) return $"{(int)span.TotalMinutes}m {span.Seconds}s";
+        return $"{span.TotalSeconds:F1}s";
+    }
+
+    private static RenderFragment RenderSparkline(SparklineSeries series, int width, int height) => builder =>
+    {
+        var values = series.TokensPerSecondBuckets;
+        if (values.Count == 0) return;
+        var max = values.Count == 0 ? 1d : Math.Max(1d, values.Max());
+        var stepX = (double)width / Math.Max(1, values.Count - 1);
+        var points = new System.Text.StringBuilder();
+        for (var i = 0; i < values.Count; i++)
+        {
+            var x = i * stepX;
+            var y = height - (values[i] / max) * height;
+            if (i > 0) points.Append(' ');
+            points.Append($"{x:F1},{y:F1}");
+        }
+
+        builder.OpenElement(0, "svg");
+        builder.AddAttribute(1, "width", width);
+        builder.AddAttribute(2, "height", height);
+        builder.AddAttribute(3, "viewBox", $"0 0 {width} {height}");
+        builder.AddAttribute(4, "style", "background:#111; border:1px solid #333;");
+        builder.OpenElement(5, "polyline");
+        builder.AddAttribute(6, "fill", "none");
+        builder.AddAttribute(7, "stroke", "#4caf50");
+        builder.AddAttribute(8, "stroke-width", "1.5");
+        builder.AddAttribute(9, "points", points.ToString());
+        builder.CloseElement();
+        builder.CloseElement();
+    };
+}

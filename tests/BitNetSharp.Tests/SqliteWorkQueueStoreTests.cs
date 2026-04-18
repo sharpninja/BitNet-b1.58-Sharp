@@ -435,6 +435,78 @@ public sealed class SqliteWorkQueueStoreTests : IDisposable
         Assert.Equal(4096, row.TokensPerTask);
         Assert.Equal(WorkTaskState.Pending, row.State);
     }
+
+    // ── CountByShardPrefixAndState (training-status rollup) ────────
+
+    private WorkTaskRecord NewPendingTaskWithShard(string taskId, string shardId)
+    {
+        return new WorkTaskRecord(
+            TaskId: taskId,
+            WeightVersion: 1,
+            ShardId: shardId,
+            ShardOffset: 0,
+            ShardLength: 1024,
+            TokensPerTask: 4096,
+            KLocalSteps: 4,
+            HyperparametersJson: "{}",
+            State: WorkTaskState.Pending,
+            AssignedWorkerId: null,
+            AssignedAtUtc: null,
+            DeadlineUtc: null,
+            Attempt: 0,
+            CreatedAtUtc: _time.GetUtcNow(),
+            CompletedAtUtc: null);
+    }
+
+    [Fact]
+    public void CountByShardPrefixAndState_matches_prefix_only()
+    {
+        _store.EnqueuePending(NewPendingTaskWithShard("t-a1", "asr-v1-shard-0"));
+        _store.EnqueuePending(NewPendingTaskWithShard("t-a2", "asr-v1-shard-1"));
+        _store.EnqueuePending(NewPendingTaskWithShard("t-b1", "truckmate-v2-shard-0"));
+
+        Assert.Equal(2, _store.CountByShardPrefixAndState("asr-v1-", WorkTaskState.Pending));
+        Assert.Equal(1, _store.CountByShardPrefixAndState("truckmate-v2-", WorkTaskState.Pending));
+        Assert.Equal(0, _store.CountByShardPrefixAndState("nomatch-", WorkTaskState.Pending));
+    }
+
+    [Fact]
+    public void CountByShardPrefixAndState_excludes_legacy_rows()
+    {
+        _store.EnqueuePending(NewPendingTaskWithShard("t-a1", "asr-v1-shard-0"));
+        _store.EnqueuePending(NewPendingTaskWithShard("t-a2", "asr-v1-shard-1"));
+
+        Assert.Equal(1, _store.MarkLegacyByTaskIdPrefix("t-a1"));
+
+        Assert.Equal(1, _store.CountByShardPrefixAndState("asr-v1-", WorkTaskState.Pending));
+    }
+
+    [Fact]
+    public void CountByShardPrefixAndState_blank_prefix_throws()
+    {
+        Assert.Throws<ArgumentException>(() =>
+            _store.CountByShardPrefixAndState("", WorkTaskState.Pending));
+        Assert.Throws<ArgumentException>(() =>
+            _store.CountByShardPrefixAndState("   ", WorkTaskState.Pending));
+    }
+
+    // ── GetShardId (SignalR broadcast lookup) ───────────────────────
+
+    [Fact]
+    public void GetShardId_returns_shard_for_existing_task()
+    {
+        _store.EnqueuePending(NewPendingTask("task-shard-lookup"));
+
+        var shardId = _store.GetShardId("task-shard-lookup");
+
+        Assert.Equal("shard-A", shardId);
+    }
+
+    [Fact]
+    public void GetShardId_returns_null_for_missing_task()
+    {
+        Assert.Null(_store.GetShardId("never-enqueued"));
+    }
 }
 
 /// <summary>

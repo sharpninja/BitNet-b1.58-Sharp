@@ -278,6 +278,139 @@ WHERE received_at >= $cutoff;";
     }
 
     /// <summary>
+    /// Returns the most recent <paramref name="limit"/> gradient events
+    /// joined to <c>tasks.shard_id</c>. Left join so orphan events
+    /// (task row pruned) still surface with an empty shard id. Feeds
+    /// the training-status page's live event feed.
+    /// </summary>
+    public IReadOnlyList<RecentGradientEvent> GetRecentGradientEvents(int limit)
+    {
+        if (limit <= 0) return Array.Empty<RecentGradientEvent>();
+        var results = new List<RecentGradientEvent>(limit);
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+SELECT e.id, e.received_at, e.client_id, e.task_id,
+       COALESCE(t.shard_id, ''),
+       e.tokens_seen, e.wall_clock_ms,
+       COALESCE(e.measured_tps, 0),
+       e.new_version, e.loss_after
+FROM gradient_events e
+LEFT JOIN tasks t ON t.task_id = e.task_id
+ORDER BY e.received_at DESC, e.id DESC
+LIMIT $limit;";
+        cmd.Parameters.AddWithValue("$limit", limit);
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            results.Add(new RecentGradientEvent(
+                Id: reader.GetInt64(0),
+                ReceivedAt: DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(1)),
+                ClientId: reader.GetString(2),
+                TaskId: reader.GetString(3),
+                ShardId: reader.GetString(4),
+                TokensSeen: reader.GetInt64(5),
+                WallClockMs: reader.GetInt64(6),
+                MeasuredTps: reader.GetDouble(7),
+                NewVersion: reader.GetInt64(8),
+                LossAfter: reader.GetDouble(9)));
+        }
+        return results;
+    }
+
+    /// <summary>
+    /// Rolls up gradient events by <c>(client_id, shard_prefix)</c>
+    /// inside <paramref name="since"/>. One SQL query per prefix keeps
+    /// the parameter binding simple + portable; callers pass the
+    /// <c>CoordinatorOptions.ActiveShardPrefixes</c> list (typically
+    /// 2–5 entries, so N-queries is fine). Events whose task row was
+    /// pruned drop out via the INNER JOIN.
+    /// </summary>
+    public IReadOnlyList<WorkerShardAggregate> AggregateByWorkerAndShardPrefix(
+        DateTimeOffset since,
+        IReadOnlyList<string> prefixes)
+    {
+        ArgumentNullException.ThrowIfNull(prefixes);
+        if (prefixes.Count == 0) return Array.Empty<WorkerShardAggregate>();
+        var results = new List<WorkerShardAggregate>();
+        var sinceUnix = since.ToUnixTimeSeconds();
+        foreach (var prefix in prefixes)
+        {
+            if (string.IsNullOrWhiteSpace(prefix)) continue;
+            using var cmd = _connection.CreateCommand();
+            cmd.CommandText = @"
+SELECT e.client_id,
+       COUNT(1),
+       COALESCE(SUM(e.tokens_seen), 0),
+       COALESCE(SUM(e.wall_clock_ms), 0)
+FROM gradient_events e
+JOIN tasks t ON t.task_id = e.task_id
+WHERE e.received_at >= $since
+  AND t.shard_id LIKE $prefix
+GROUP BY e.client_id;";
+            cmd.Parameters.AddWithValue("$since", sinceUnix);
+            cmd.Parameters.AddWithValue("$prefix", prefix + "%");
+            using var reader = cmd.ExecuteReader();
+            while (reader.Read())
+            {
+                results.Add(new WorkerShardAggregate(
+                    ClientId: reader.GetString(0),
+                    ShardPrefix: prefix,
+                    TasksCompleted: reader.GetInt64(1),
+                    TokensSeen: reader.GetInt64(2),
+                    WallClockMs: reader.GetInt64(3)));
+            }
+        }
+        return results;
+    }
+
+    /// <summary>
+    /// Buckets gradient-event tokens into fixed-width time buckets so
+    /// the training-status sparklines can render without reading every
+    /// event row. Only buckets with at least one event are returned —
+    /// consumers gap-fill client-side when animating the series.
+    /// </summary>
+    public IReadOnlyList<ThroughputBucket> GetThroughputBuckets(
+        DateTimeOffset since,
+        TimeSpan bucketSize,
+        string? clientId = null)
+    {
+        if (bucketSize <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(bucketSize), "Bucket size must be positive.");
+        }
+        var bucketSec = (long)bucketSize.TotalSeconds;
+        if (bucketSec <= 0) bucketSec = 1;
+        var sinceUnix = since.ToUnixTimeSeconds();
+
+        var results = new List<ThroughputBucket>();
+        using var cmd = _connection.CreateCommand();
+        var clientFilter = clientId is null ? "" : " AND client_id = $client";
+        cmd.CommandText = $@"
+SELECT (received_at / $bucket) * $bucket AS b,
+       COALESCE(SUM(tokens_seen), 0),
+       COALESCE(SUM(wall_clock_ms), 0)
+FROM gradient_events
+WHERE received_at >= $since{clientFilter}
+GROUP BY b
+ORDER BY b ASC;";
+        cmd.Parameters.AddWithValue("$bucket", bucketSec);
+        cmd.Parameters.AddWithValue("$since", sinceUnix);
+        if (clientId is not null)
+        {
+            cmd.Parameters.AddWithValue("$client", clientId);
+        }
+        using var reader = cmd.ExecuteReader();
+        while (reader.Read())
+        {
+            results.Add(new ThroughputBucket(
+                BucketStartUtc: DateTimeOffset.FromUnixTimeSeconds(reader.GetInt64(0)),
+                TokensSeen: reader.GetInt64(1),
+                WallClockMs: reader.GetInt64(2)));
+        }
+        return results;
+    }
+
+    /// <summary>
     /// Total row count in the telemetry table; handy for sanity
     /// checks in tests.
     /// </summary>
@@ -323,3 +456,41 @@ public sealed record GlobalTelemetryAggregate(
     long WallClockMs,
     double AverageStaleness,
     double AverageLossAfter);
+
+/// <summary>
+/// A single recent gradient-event row joined to its originating
+/// task's shard_id. Feeds the training-status live event feed.
+/// <see cref="ShardId"/> is empty when the task row was pruned
+/// between acceptance and the read.
+/// </summary>
+public sealed record RecentGradientEvent(
+    long Id,
+    DateTimeOffset ReceivedAt,
+    string ClientId,
+    string TaskId,
+    string ShardId,
+    long TokensSeen,
+    long WallClockMs,
+    double MeasuredTps,
+    long NewVersion,
+    double LossAfter);
+
+/// <summary>
+/// Per-worker × per-shard-prefix rollup cell for the training-status
+/// page's per-worker grid.
+/// </summary>
+public sealed record WorkerShardAggregate(
+    string ClientId,
+    string ShardPrefix,
+    long TasksCompleted,
+    long TokensSeen,
+    long WallClockMs);
+
+/// <summary>
+/// A single time-bucket point in a throughput sparkline. Bucket start
+/// is the unix-seconds boundary the SQL division truncated to.
+/// </summary>
+public sealed record ThroughputBucket(
+    DateTimeOffset BucketStartUtc,
+    long TokensSeen,
+    long WallClockMs);

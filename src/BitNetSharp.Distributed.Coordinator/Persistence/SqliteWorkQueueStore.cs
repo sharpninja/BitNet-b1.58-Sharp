@@ -374,6 +374,27 @@ WHERE state = 'Assigned'
     }
 
     /// <summary>
+    /// Counts tasks whose <c>shard_id</c> begins with the given literal
+    /// prefix and which are in <paramref name="state"/>. Excludes legacy
+    /// rows. Feeds the per-shard-prefix rollup on the training-status
+    /// page — one call per (prefix × state) cell.
+    /// </summary>
+    public int CountByShardPrefixAndState(string shardPrefix, WorkTaskState state)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(shardPrefix);
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = @"
+SELECT COUNT(1) FROM tasks
+WHERE state = $state
+  AND shard_id LIKE $prefix
+  AND legacy = 0;";
+        cmd.Parameters.AddWithValue("$state", state.ToString());
+        cmd.Parameters.AddWithValue("$prefix", shardPrefix + "%");
+        var result = cmd.ExecuteScalar();
+        return result is null or DBNull ? 0 : Convert.ToInt32(result, CultureInfo.InvariantCulture);
+    }
+
+    /// <summary>
     /// Deletes pending tasks whose shard_id begins with the given
     /// literal prefix. Used by the <c>purge-shards</c> CLI to remove
     /// an abandoned corpus (e.g. v1) from the queue while leaving
@@ -704,6 +725,23 @@ WHERE state = 'Assigned'
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(taskId);
         return LoadById(taskId, transaction: null);
+    }
+
+    /// <summary>
+    /// Cheap targeted lookup that returns only the <c>shard_id</c> for a
+    /// task, or null if the task row was pruned. The SignalR broadcast
+    /// path calls this after <c>RecordAccepted</c> to attach the shard
+    /// label to <c>GradientAcceptedBroadcast</c> without paying the
+    /// full <see cref="GetById"/> column-read cost.
+    /// </summary>
+    public string? GetShardId(string taskId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(taskId);
+        using var cmd = _connection.CreateCommand();
+        cmd.CommandText = "SELECT shard_id FROM tasks WHERE task_id = $task_id;";
+        cmd.Parameters.AddWithValue("$task_id", taskId);
+        var result = cmd.ExecuteScalar();
+        return result is null or DBNull ? null : Convert.ToString(result, CultureInfo.InvariantCulture);
     }
 
     private WorkTaskRecord? LoadById(string taskId, SqliteTransaction? transaction)

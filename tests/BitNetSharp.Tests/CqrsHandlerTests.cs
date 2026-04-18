@@ -9,6 +9,7 @@ using BitNetSharp.Distributed.Coordinator.Cqrs.Queries;
 using BitNetSharp.Distributed.Coordinator.Services;
 using GetTaskQueueSnapshotQueryHandler = BitNetSharp.Distributed.Coordinator.Cqrs.Queries.GetTaskQueueSnapshotQueryHandler;
 using BitNetSharp.Distributed.Coordinator.Persistence;
+using BitNetSharp.Distributed.Coordinator.Realtime;
 using McpServer.Cqrs;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
@@ -240,8 +241,12 @@ public sealed class CqrsHandlerTests : IDisposable
 
     // ── SubmitGradientCommand ───────────────────────────────────────
 
+    private readonly CapturingTrainingEventsBroadcaster _broadcaster = new();
+
     private SubmitGradientCommandHandler BuildGradientHandler() =>
-        new(_queueStore, _weightApplication, _telemetry, NullLogger<SubmitGradientCommandHandler>.Instance);
+        new(_queueStore, _weightApplication, _telemetry,
+            _broadcaster, _time,
+            NullLogger<SubmitGradientCommandHandler>.Instance);
 
     [Fact]
     public async Task SubmitGradient_marks_task_done_on_happy_path()
@@ -971,6 +976,223 @@ public sealed class CqrsHandlerTests : IDisposable
         Assert.True(result.IsSuccess);
         Assert.Equal(1, result.Value!.Tasks.SoftExpiredButAlive);
         Assert.Equal(1, result.Value.Tasks.Assigned);
+    }
+
+    // ── GetTrainingStatusQuery ──────────────────────────────────────
+
+    private WorkTaskRecord NewPendingTaskWithShard(string taskId, string shardId) => new(
+        TaskId: taskId,
+        WeightVersion: 1,
+        ShardId: shardId,
+        ShardOffset: 0,
+        ShardLength: 1024,
+        TokensPerTask: 4096,
+        KLocalSteps: 4,
+        HyperparametersJson: "{}",
+        State: WorkTaskState.Pending,
+        AssignedWorkerId: null,
+        AssignedAtUtc: null,
+        DeadlineUtc: null,
+        Attempt: 0,
+        CreatedAtUtc: _time.GetUtcNow(),
+        CompletedAtUtc: null);
+
+    private GetTrainingStatusQueryHandler BuildTrainingHandler(CoordinatorOptions? overrideOptions = null)
+    {
+        IOptionsMonitor<CoordinatorOptions> opts = overrideOptions is null
+            ? _options
+            : new StaticOptionsMonitor<CoordinatorOptions>(overrideOptions);
+        return new GetTrainingStatusQueryHandler(
+            _queueStore, _workerStore, _telemetry, _weightApplication, opts, _time);
+    }
+
+    private void UpsertActiveWorker(string id)
+    {
+        _workerStore.Upsert(new WorkerRecord(
+            WorkerId: id,
+            Name: id,
+            CpuThreads: 4,
+            TokensPerSecond: 1000d,
+            RecommendedTokensPerTask: 4096L,
+            ProcessArchitecture: "X64",
+            OsDescription: "TestOS",
+            RegisteredAtUtc: _time.GetUtcNow(),
+            LastHeartbeatUtc: _time.GetUtcNow(),
+            State: WorkerState.Active));
+    }
+
+    private static CoordinatorOptions OptionsWithPrefixes(params (string Prefix, string Label)[] prefixes)
+    {
+        var list = prefixes
+            .Select(p => new ShardPrefixConfig { Prefix = p.Prefix, DisplayLabel = p.Label })
+            .ToList();
+        return new CoordinatorOptions
+        {
+            TargetTaskDurationSeconds = 600,
+            FullStepEfficiency = 0.25d,
+            HeartbeatIntervalSeconds = 30,
+            InitialWeightVersion = 1,
+            ModelPreset = "", InitialWeightDimension = 8,
+            BaseLearningRate = 0.1d,
+            StalenessAlpha = 0.5d,
+            MaxStalenessSteps = 5,
+            BaseUrl = "http://localhost",
+            ActiveShardPrefixes = list,
+        };
+    }
+
+    [Fact]
+    public async Task GetTrainingStatusQueryHandler_rollup_splits_by_prefix()
+    {
+        var opts = OptionsWithPrefixes(("asr-v1-", "ASR v1"), ("truckmate-v2-", "TruckMate"));
+
+        _queueStore.EnqueuePending(NewPendingTaskWithShard("ta-1", "asr-v1-s0"));
+        _queueStore.EnqueuePending(NewPendingTaskWithShard("ta-2", "asr-v1-s1"));
+        _queueStore.EnqueuePending(NewPendingTaskWithShard("tt-1", "truckmate-v2-s0"));
+
+        var handler = BuildTrainingHandler(opts);
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(new GetTrainingStatusQuery(), context);
+
+        Assert.True(result.IsSuccess);
+        var snap = result.Value!;
+        Assert.Equal(2, snap.Rollups.Count);
+        var asr = snap.Rollups.Single(r => r.Prefix == "asr-v1-");
+        Assert.Equal(2, asr.Queued);
+        Assert.Equal("ASR v1", asr.DisplayLabel);
+        var tm = snap.Rollups.Single(r => r.Prefix == "truckmate-v2-");
+        Assert.Equal(1, tm.Queued);
+    }
+
+    [Fact]
+    public async Task GetTrainingStatusQueryHandler_eta_null_when_global_tps_zero()
+    {
+        var opts = OptionsWithPrefixes(("asr-v1-", "ASR v1"));
+        _queueStore.EnqueuePending(NewPendingTaskWithShard("ta-1", "asr-v1-s0"));
+
+        var handler = BuildTrainingHandler(opts);
+
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(new GetTrainingStatusQuery(), context);
+
+        Assert.True(result.IsSuccess);
+        var snap = result.Value!;
+        Assert.Null(snap.FleetEtaSeconds);
+        Assert.Null(snap.Rollups[0].EtaSeconds);
+        Assert.Equal(0d, snap.GlobalTokensPerSecond);
+    }
+
+    [Fact]
+    public async Task GetTrainingStatusQueryHandler_recent_events_capped_at_limit()
+    {
+        var opts = OptionsWithPrefixes(("asr-v1-", "ASR"));
+        for (var i = 0; i < 25; i++)
+        {
+            _queueStore.EnqueuePending(NewPendingTaskWithShard($"t-{i}", "asr-v1-s0"));
+            _telemetry.RecordAccepted("w-1", $"t-{i}", 100, 10, 0, 0.1f, i + 1, 1.0);
+            _time.Advance(TimeSpan.FromSeconds(1));
+        }
+
+        var handler = BuildTrainingHandler(opts);
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(
+            new GetTrainingStatusQuery { RecentEventsLimit = 20 }, context);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(20, result.Value!.RecentEvents.Count);
+    }
+
+    [Fact]
+    public async Task GetTrainingStatusQueryHandler_returns_per_worker_per_shard_cells()
+    {
+        var opts = OptionsWithPrefixes(("asr-v1-", "ASR"), ("truckmate-v2-", "TM"));
+        _queueStore.EnqueuePending(NewPendingTaskWithShard("ta-1", "asr-v1-s0"));
+        _queueStore.EnqueuePending(NewPendingTaskWithShard("tt-1", "truckmate-v2-s0"));
+        _telemetry.RecordAccepted("w-1", "ta-1", 100, 10, 0, 0.1f, 1, 1.0);
+        _telemetry.RecordAccepted("w-2", "tt-1", 200, 20, 0, 0.1f, 2, 1.0);
+
+        var handler = BuildTrainingHandler(opts);
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(new GetTrainingStatusQuery(), context);
+
+        Assert.True(result.IsSuccess);
+        var cells = result.Value!.WorkerShardCells;
+        Assert.Equal(2, cells.Count);
+        Assert.Contains(cells, c => c.ClientId == "w-1" && c.ShardPrefix == "asr-v1-");
+        Assert.Contains(cells, c => c.ClientId == "w-2" && c.ShardPrefix == "truckmate-v2-");
+    }
+
+    [Fact]
+    public async Task GetTrainingStatusQueryHandler_fleet_sparkline_has_configured_bucket_count()
+    {
+        var opts = OptionsWithPrefixes(("asr-v1-", "ASR"));
+        _queueStore.EnqueuePending(NewPendingTaskWithShard("ta-1", "asr-v1-s0"));
+        _telemetry.RecordAccepted("w-1", "ta-1", 100, 10, 0, 0.1f, 1, 1.0);
+
+        var handler = BuildTrainingHandler(opts);
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(
+            new GetTrainingStatusQuery
+            {
+                SparklineBucketCount = 30,
+                SparklineBucketSize = TimeSpan.FromMinutes(1),
+            }, context);
+
+        Assert.True(result.IsSuccess);
+        var fleet = result.Value!.Sparklines.First(s => s.Key == "fleet");
+        Assert.Equal(30, fleet.TokensPerSecondBuckets.Count);
+    }
+
+    [Fact]
+    public async Task GetTrainingStatusQueryHandler_caps_per_worker_sparklines()
+    {
+        var opts = OptionsWithPrefixes(("asr-v1-", "ASR"));
+        for (var i = 0; i < 20; i++)
+        {
+            var taskId = $"t-{i}";
+            _queueStore.EnqueuePending(NewPendingTaskWithShard(taskId, "asr-v1-s0"));
+            _telemetry.RecordAccepted($"w-{i}", taskId, 100 + i, 10, 0, 0.1f, i + 1, 1.0);
+        }
+
+        var handler = BuildTrainingHandler(opts);
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(
+            new GetTrainingStatusQuery { MaxPerWorkerSparklines = 5 }, context);
+
+        Assert.True(result.IsSuccess);
+        var snap = result.Value!;
+        // fleet + 5 worker series = 6.
+        Assert.Equal(6, snap.Sparklines.Count);
+        Assert.Equal("fleet", snap.Sparklines[0].Key);
+    }
+
+    [Fact]
+    public async Task GetTrainingStatusQueryHandler_active_workers_matches_registry()
+    {
+        var opts = OptionsWithPrefixes(("asr-v1-", "ASR"));
+        UpsertActiveWorker("w-1");
+        UpsertActiveWorker("w-2");
+
+        var handler = BuildTrainingHandler(opts);
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(new GetTrainingStatusQuery(), context);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(2, result.Value!.ActiveWorkerCount);
+    }
+
+    [Fact]
+    public async Task GetTrainingStatusQueryHandler_weight_version_reflects_service()
+    {
+        var opts = OptionsWithPrefixes(("asr-v1-", "ASR"));
+
+        var handler = BuildTrainingHandler(opts);
+        using var context = new CallContext();
+        var result = await handler.HandleAsync(new GetTrainingStatusQuery(), context);
+
+        Assert.True(result.IsSuccess);
+        Assert.Equal(_weightApplication.CurrentVersion, result.Value!.CurrentWeightVersion);
     }
 
     [Fact]

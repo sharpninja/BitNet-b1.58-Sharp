@@ -13,6 +13,7 @@ using BitNetSharp.Distributed.Coordinator.Identity;
 using BitNetSharp.Distributed.Coordinator.Cqrs.Commands;
 using BitNetSharp.Distributed.Coordinator.Cqrs.Queries;
 using BitNetSharp.Distributed.Coordinator.Persistence;
+using BitNetSharp.Distributed.Coordinator.Realtime;
 using BitNetSharp.Distributed.Coordinator.Services;
 using BitNetSharp.Distributed.Coordinator.ViewModels;
 using McpServer.Cqrs;
@@ -297,6 +298,12 @@ builder.Services.AddAuthorization(options =>
 builder.Services.AddRazorComponents()
     .AddInteractiveServerComponents();
 
+// SignalR push surface for the admin /admin/training-status page.
+// The hub is gated by AdminPolicy so only admin cookies can subscribe.
+builder.Services.AddSignalR();
+builder.Services.AddSingleton<ITrainingEventsBroadcaster, SignalRTrainingEventsBroadcaster>();
+builder.Services.AddHostedService<SnapshotBroadcaster>();
+
 // CQRS dispatcher + assembly scan.
 builder.Services.AddCqrsDispatcher();
 builder.Services.AddCqrsHandlers(typeof(CoordinatorHostMarker).Assembly);
@@ -308,6 +315,7 @@ builder.Services.AddTransient<TasksPageViewModel>();
 builder.Services.AddTransient<DashboardPageViewModel>();
 builder.Services.AddTransient<LogViewerPageViewModel>();
 builder.Services.AddTransient<TaskBrowserPageViewModel>();
+builder.Services.AddTransient<TrainingStatusPageViewModel>();
 
 // Hosted service that transitions stale workers to Gone and
 // recycles timed-out task assignments back to Pending.
@@ -608,6 +616,10 @@ app.MapGet("/weights/{version:long}", (
         fileDownloadName: $"bitnet-weights-v{version}.bin",
         enableRangeProcessing: true);
 }).RequireAuthorization(WorkerApiKeyAuth.PolicyName);
+
+// ── SignalR hub for live training events ──────────────────────────
+app.MapHub<TrainingEventsHub>("/hubs/training")
+    .RequireAuthorization("AdminPolicy");
 
 // ── Admin Blazor UI (cookie + OIDC) ───────────────────────────────
 app.MapRazorComponents<App>()
