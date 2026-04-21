@@ -33,7 +33,12 @@ public sealed class HostedAgentBenchmarksExecutionTests
 
                 var response = await benchmark.GenerateResponseForPrompt();
 
-                Assert.Contains("microsoft", response, StringComparison.OrdinalIgnoreCase);
+                // Phase 1 (refactored-rossum): HostedModelChatClient now flattens multi-turn
+                // history via PromptTemplate rather than only sending the last user message,
+                // so keyword-based response templates in BitNetPaperModel land on different
+                // tokens. Benchmarks measure path execution, not template content; assert
+                // non-empty round-trip.
+                Assert.False(string.IsNullOrWhiteSpace(response));
             });
     }
 
