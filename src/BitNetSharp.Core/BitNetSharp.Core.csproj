@@ -9,6 +9,18 @@
     <GenerateDocumentationFile>false</GenerateDocumentationFile>
     <PackageId>BitNetSharp.Core</PackageId>
     <Description>Paper-aligned BitNet b1.58 transformer runtime for .NET.</Description>
+    <!--
+      Core serves both the coordinator (full CLR, reflection-based checkpoint + GGUF
+      + training serialization) AND transitively the AOT Runtime slice. The reflection
+      JSON sites (BitNetPaperCheckpoint, BitNetPaperGguf, TraditionalLocalCheckpoint,
+      ModelScaleProfile, DataGenGenerator, BitNetDataLoader) are NOT called from the
+      AOT inference path (InProcessBitNetModel only touches BitNetPaperModel ctor +
+      FlatParameterPack). Suppress the analyzer errors here rather than spraying
+      [RequiresUnreferencedCode]/[RequiresDynamicCode] up every call chain. Follow-up
+      TODO: migrate to System.Text.Json source generators so the AOT analyzer can
+      verify the Runtime slice independently.
+    -->
+    <NoWarn>$(NoWarn);IL2026;IL3050</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

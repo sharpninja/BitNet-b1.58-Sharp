@@ -6,6 +6,7 @@
     <Project Path="src/BitNetSharp.Distributed.Coordinator/BitNetSharp.Distributed.Coordinator.csproj" />
     <Project Path="src/BitNetSharp.Distributed.Worker/BitNetSharp.Distributed.Worker.csproj" />
     <Project Path="src/BitNetSharp.Runtime/BitNetSharp.Runtime.csproj" />
+    <Project Path="src/BitNetSharp.Runtime.AotSmoke/BitNetSharp.Runtime.AotSmoke.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/BitNetSharp.Tests/BitNetSharp.Tests.csproj" />
