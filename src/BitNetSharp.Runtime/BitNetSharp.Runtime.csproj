@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <IsAotCompatible>true</IsAotCompatible>
+    <IsTrimmable>true</IsTrimmable>
+    <EnableTrimAnalyzer>true</EnableTrimAnalyzer>
+    <EnableAotAnalyzer>true</EnableAotAnalyzer>
+    <PackageId>BitNetSharp.Runtime</PackageId>
+    <Description>AOT-compatible in-process BitNet b1.58 runtime for hosting inside end-user apps (TruckMate etc.) without MAF or DI-host dependencies.</Description>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\BitNetSharp.Core\BitNetSharp.Core.csproj" />
+    <ProjectReference Include="..\BitNetSharp.Distributed.Contracts\BitNetSharp.Distributed.Contracts.csproj" />
+  </ItemGroup>
+
+</Project>
