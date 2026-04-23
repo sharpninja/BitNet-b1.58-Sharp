@@ -17,7 +17,7 @@ public sealed record OllamaChatRequest(
     string Model,
     IReadOnlyList<OllamaChatMessage> Messages,
     bool? Stream = true,
-    [property: JsonPropertyName("keep_alive")] string? KeepAlive = null,
+    [property: JsonPropertyName("keep_alive")] System.Text.Json.JsonElement? KeepAlive = null,
     IReadOnlyDictionary<string, object?>? Options = null,
     string? Format = null);
 
@@ -25,7 +25,7 @@ public sealed record OllamaGenerateRequest(
     string Model,
     string Prompt,
     bool? Stream = true,
-    [property: JsonPropertyName("keep_alive")] string? KeepAlive = null,
+    [property: JsonPropertyName("keep_alive")] System.Text.Json.JsonElement? KeepAlive = null,
     IReadOnlyDictionary<string, object?>? Options = null,
     string? Format = null,
     string? Suffix = null,
@@ -39,4 +39,4 @@ public sealed record OllamaShowRequest(string Model, bool Verbose = false);
 public sealed record OllamaEmbeddingsRequest(
     string Model,
     string Prompt,
-    [property: JsonPropertyName("keep_alive")] string? KeepAlive = null);
+    [property: JsonPropertyName("keep_alive")] System.Text.Json.JsonElement? KeepAlive = null);

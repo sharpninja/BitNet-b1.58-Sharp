@@ -155,4 +155,53 @@ public sealed class OllamaRouteShapeTests : IClassFixture<ServeFixture>
         var doc = JsonDocument.Parse(await response.Content.ReadAsStringAsync());
         Assert.Contains("embeddings", doc.RootElement.GetProperty("error").GetString());
     }
+
+    // Ollama wire allows keep_alive as either a duration string ("5m", "10s",
+    // "-1", "0") or an integer number of seconds. Real ollama CLI sends a
+    // number; open-webui sends a string. We accept and ignore both rather
+    // than 500ing on type mismatch.
+    [Fact]
+    public async Task PostApiChat_KeepAliveAsNumber_Accepted()
+    {
+        _fixture.Stub.CannedText = "ok";
+        var client = _fixture.Client;
+        var response = await client.PostAsJsonAsync("/api/chat", new
+        {
+            model = "bitnet-b1.58-sharp",
+            messages = new[] { new { role = "user", content = "hi" } },
+            stream = false,
+            keep_alive = 300,
+        });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PostApiChat_KeepAliveAsString_Accepted()
+    {
+        _fixture.Stub.CannedText = "ok";
+        var client = _fixture.Client;
+        var response = await client.PostAsJsonAsync("/api/chat", new
+        {
+            model = "bitnet-b1.58-sharp",
+            messages = new[] { new { role = "user", content = "hi" } },
+            stream = false,
+            keep_alive = "5m",
+        });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PostApiGenerate_KeepAliveAsNumber_Accepted()
+    {
+        _fixture.Stub.CannedText = "ok";
+        var client = _fixture.Client;
+        var response = await client.PostAsJsonAsync("/api/generate", new
+        {
+            model = "bitnet-b1.58-sharp",
+            prompt = "hi",
+            stream = false,
+            keep_alive = 0,
+        });
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+    }
 }
