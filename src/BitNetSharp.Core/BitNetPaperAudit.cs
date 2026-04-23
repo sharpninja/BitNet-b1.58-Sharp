@@ -186,15 +186,16 @@ public static class BitNetPaperAuditor
             $"Norm count={norms.Count}, epsilon={config.RmsNormEpsilon:0.#####}, learnable scale only={biasFree}.");
     }
 
-    private static BitNetPaperAuditCheck CreateAttentionCheck(BitNetConfig config, IReadOnlyList<MultiHeadAttention> attentionLayers)
+    private static BitNetPaperAuditCheck CreateAttentionCheck(BitNetConfig config, IReadOnlyList<AttentionModule> attentionLayers)
     {
+        int kvDim = config.KvHeadCount * config.HeadDimension;
         var dimensionsMatch = attentionLayers.All(attention =>
             attention.QueryProjection.Config.InputDimension == config.Dimension
             && attention.QueryProjection.Config.OutputDimension == config.Dimension
             && attention.KeyProjection.Config.InputDimension == config.Dimension
-            && attention.KeyProjection.Config.OutputDimension == config.Dimension
+            && attention.KeyProjection.Config.OutputDimension == kvDim
             && attention.ValueProjection.Config.InputDimension == config.Dimension
-            && attention.ValueProjection.Config.OutputDimension == config.Dimension
+            && attention.ValueProjection.Config.OutputDimension == kvDim
             && attention.OutputProjection.Config.InputDimension == config.Dimension
             && attention.OutputProjection.Config.OutputDimension == config.Dimension);
         var ropeAndCausalityMatch = attentionLayers.All(static attention =>
@@ -315,7 +316,7 @@ public static class BitNetPaperAuditor
             + CalculateEntropy(stats.PositiveCount, stats.TotalCount);
     }
 
-    private static double CalculateEntropy(int count, int total)
+    private static double CalculateEntropy(long count, long total)
     {
         if (count == 0 || total == 0)
         {

@@ -26,6 +26,8 @@
   <ItemGroup>
     <EmbeddedResource Include="Data/WikiText2/wiki.*.tokens" />
     <PackageReference Include="System.Numerics.Tensors" Version="10.0.3" />
+    <InternalsVisibleTo Include="BitNetSharp.Converter.Tests" />
+    <InternalsVisibleTo Include="BitNetSharp.Tests" />
   </ItemGroup>
 
   <ItemGroup Condition="Exists('Data/Models/bitnet-b1.58-default.gguf')">

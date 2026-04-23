@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using System.Text.Json;
 using BitNetSharp.Core.Bucketing;
 using BitNetSharp.Core.Models;
@@ -7,23 +8,27 @@ namespace BitNetSharp.Core;
 
 public static class BitNetPaperGguf
 {
-    private const string FormatName = "bitnet-b1.58-sharp.gguf.v1";
+    private const string FormatNameV1 = "bitnet-b1.58-sharp.gguf.v1";
+    private const string FormatNameV2 = "bitnet-b1.58-sharp.gguf.v2";
+    private const uint FormatVersionV1 = 1;
+    private const uint FormatVersionV2 = 2;
+    private const string FormatVersionMetadataKey = "bitnetsharp.format_version";
     private const string ArchitectureName = "bitnetsharp";
     private const string TokenEmbeddingsTensorName = "token_embeddings";
     private const string OutputNormTensorName = "output_norm.weight";
     private const string OutputTensorName = "output.weight";
     private const string VocabularyMetadataKey = "bitnetsharp.vocabulary";
     private const string MemorizedResponsesMetadataKey = "bitnetsharp.memorized_responses";
+    private const int DefaultBootstrapSeed = 42;
 
     public static void Save(BitNetPaperModel model, string path)
     {
         ArgumentNullException.ThrowIfNull(model);
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
 
-        var snapshot = BitNetPaperModelSnapshot.Capture(model);
-        ValidateSnapshot(snapshot);
-
-        GgufWriter.Write(path, CreateMetadata(snapshot), CreateTensors(snapshot));
+        var metadata = CreateMetadataFromModel(model);
+        var tensors = CreateStreamingTensors(model);
+        GgufStreamingWriter.Write(path, metadata, tensors);
         SaveBucketSidecar(model.BucketTable, GetBucketSidecarPath(path));
         SaveHeatMapSidecar(model.RecallHeatMap, GetHeatMapSidecarPath(path));
     }
@@ -32,56 +37,69 @@ public static class BitNetPaperGguf
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
 
-        var document = GgufReader.Read(path);
-        ValidateMetadata(document.Metadata);
+        using var reader = GgufStreamingReader.Open(path);
+        ValidateMetadata(reader.Metadata);
 
-        var config = ReadConfig(document.Metadata);
-        var vocabulary = DeserializeVocabulary(GetRequiredString(document.Metadata, VocabularyMetadataKey));
+        var config = ReadConfig(reader.Metadata);
+        var vocabulary = DeserializeVocabulary(GetRequiredString(reader.Metadata, VocabularyMetadataKey));
+        var memorizedResponses = DeserializeMemorizedResponses(GetRequiredString(reader.Metadata, MemorizedResponsesMetadataKey));
 
+        var tensorByName = reader.Tensors.ToDictionary(static t => t.Name, StringComparer.Ordinal);
         var expectedTensorNames = CreateExpectedTensorNames(config);
-        var tensors = document.Tensors.ToDictionary(tensor => tensor.Name, StringComparer.Ordinal);
-        var missingTensorNames = expectedTensorNames.Where(name => !tensors.ContainsKey(name)).ToArray();
-        var unexpectedTensorNames = tensors.Keys.Where(name => !expectedTensorNames.Contains(name, StringComparer.Ordinal)).ToArray();
+        var missingTensorNames = expectedTensorNames.Where(name => !tensorByName.ContainsKey(name)).ToArray();
+        var unexpectedTensorNames = tensorByName.Keys.Where(name => !expectedTensorNames.Contains(name, StringComparer.Ordinal)).ToArray();
         if (missingTensorNames.Length > 0 || unexpectedTensorNames.Length > 0)
         {
             throw new InvalidDataException(
                 $"GGUF tensor set does not match the repo-authored contract. Missing=[{string.Join(", ", missingTensorNames)}], unexpected=[{string.Join(", ", unexpectedTensorNames)}].");
         }
 
-        var transformerProjectionWeights = new List<float[,]>(config.LayerCount * 7);
-        var normScales = new List<float[]>(config.LayerCount * 2 + 1);
+        var options = new BitNetOptions(
+            [.. vocabulary],
+            verbosity,
+            GetRequiredInt32(reader.Metadata, "bitnetsharp.max_response_tokens"),
+            GetRequiredString(reader.Metadata, "bitnetsharp.primary_language"),
+            GetRequiredBool(reader.Metadata, "bitnetsharp.enable_chain_buckets"),
+            GetRequiredBool(reader.Metadata, "bitnetsharp.enable_sequence_compression"),
+            ReadAcceptanceThreshold(reader.Metadata),
+            ReadOptionalBool(reader.Metadata, "bitnetsharp.enable_recall_heat_map", defaultValue: true));
+
+        var bootstrapSeed = GetRequiredInt32(reader.Metadata, "bitnetsharp.bootstrap_seed");
+        var model = new BitNetPaperModel(options, config, bootstrapSeed);
+
+        var formatVersion = DetectFormatVersion(reader.Metadata);
+
+        // Stream tensors one at a time. v2 (packed): each BitLinear read is
+        // O(packed_stride * out_dim) ~= 1/20th FP32; Gamma round-trips
+        // bit-exact (no quantize pass). v1 (FP32): each ReadMatrix allocates
+        // the full FP32 buffer, QuantizeFromFullPrecision immediately repacks
+        // into trits, and the float[,] becomes GC-eligible before the next
+        // tensor is read. In either case peak additional RAM is bounded by
+        // the largest single projection.
+        model.ImportTokenEmbeddings(reader.ReadMatrix(tensorByName[TokenEmbeddingsTensorName], config.VocabSize, config.Dimension));
+
+        var linearLayers = model.GetTransformerBitLinearLayers().ToArray();
+        var normLayers = model.GetNormLayers().ToArray();
+        var kvDim = config.KvHeadCount * config.HeadDimension;
+        var linearIndex = 0;
+        var normIndex = 0;
         for (var layer = 0; layer < config.LayerCount; layer++)
         {
-            normScales.Add(ReadVector(tensors[GetAttentionNormTensorName(layer)], config.Dimension));
-            transformerProjectionWeights.Add(ReadMatrix(tensors[GetAttentionProjectionTensorName(layer, "q")], config.Dimension, config.Dimension));
-            transformerProjectionWeights.Add(ReadMatrix(tensors[GetAttentionProjectionTensorName(layer, "k")], config.Dimension, config.Dimension));
-            transformerProjectionWeights.Add(ReadMatrix(tensors[GetAttentionProjectionTensorName(layer, "v")], config.Dimension, config.Dimension));
-            transformerProjectionWeights.Add(ReadMatrix(tensors[GetAttentionProjectionTensorName(layer, "out")], config.Dimension, config.Dimension));
-            normScales.Add(ReadVector(tensors[GetFeedForwardNormTensorName(layer)], config.Dimension));
-            transformerProjectionWeights.Add(ReadMatrix(tensors[GetFeedForwardProjectionTensorName(layer, "gate")], config.HiddenDimension, config.Dimension));
-            transformerProjectionWeights.Add(ReadMatrix(tensors[GetFeedForwardProjectionTensorName(layer, "up")], config.HiddenDimension, config.Dimension));
-            transformerProjectionWeights.Add(ReadMatrix(tensors[GetFeedForwardProjectionTensorName(layer, "down")], config.Dimension, config.HiddenDimension));
+            normLayers[normIndex++].ImportScale(reader.ReadVector(tensorByName[GetAttentionNormTensorName(layer)], config.Dimension));
+            ImportBitLinear(reader, tensorByName[GetAttentionProjectionTensorName(layer, "q")], linearLayers[linearIndex++], config.Dimension, config.Dimension, formatVersion);
+            ImportBitLinear(reader, tensorByName[GetAttentionProjectionTensorName(layer, "k")], linearLayers[linearIndex++], kvDim, config.Dimension, formatVersion);
+            ImportBitLinear(reader, tensorByName[GetAttentionProjectionTensorName(layer, "v")], linearLayers[linearIndex++], kvDim, config.Dimension, formatVersion);
+            ImportBitLinear(reader, tensorByName[GetAttentionProjectionTensorName(layer, "out")], linearLayers[linearIndex++], config.Dimension, config.Dimension, formatVersion);
+            normLayers[normIndex++].ImportScale(reader.ReadVector(tensorByName[GetFeedForwardNormTensorName(layer)], config.Dimension));
+            ImportBitLinear(reader, tensorByName[GetFeedForwardProjectionTensorName(layer, "gate")], linearLayers[linearIndex++], config.HiddenDimension, config.Dimension, formatVersion);
+            ImportBitLinear(reader, tensorByName[GetFeedForwardProjectionTensorName(layer, "up")], linearLayers[linearIndex++], config.HiddenDimension, config.Dimension, formatVersion);
+            ImportBitLinear(reader, tensorByName[GetFeedForwardProjectionTensorName(layer, "down")], linearLayers[linearIndex++], config.Dimension, config.HiddenDimension, formatVersion);
         }
 
-        normScales.Add(ReadVector(tensors[OutputNormTensorName], config.Dimension));
+        normLayers[normIndex].ImportScale(reader.ReadVector(tensorByName[OutputNormTensorName], config.Dimension));
+        ImportBitLinear(reader, tensorByName[OutputTensorName], model.GetOutputHead(), config.VocabSize, config.Dimension, formatVersion);
 
-        var snapshot = new BitNetPaperModelSnapshot(
-            GetRequiredString(document.Metadata, "bitnetsharp.model_id"),
-            GetRequiredInt32(document.Metadata, "bitnetsharp.bootstrap_seed"),
-            config,
-            vocabulary,
-            GetRequiredInt32(document.Metadata, "bitnetsharp.max_response_tokens"),
-            GetRequiredString(document.Metadata, "bitnetsharp.primary_language"),
-            GetRequiredBool(document.Metadata, "bitnetsharp.enable_chain_buckets"),
-            GetRequiredBool(document.Metadata, "bitnetsharp.enable_sequence_compression"),
-            ReadAcceptanceThreshold(document.Metadata),
-            ReadMatrix(tensors[TokenEmbeddingsTensorName], config.VocabSize, config.Dimension),
-            transformerProjectionWeights,
-            normScales,
-            ReadMatrix(tensors[OutputTensorName], config.VocabSize, config.Dimension),
-            DeserializeMemorizedResponses(GetRequiredString(document.Metadata, MemorizedResponsesMetadataKey)),
-            ReadOptionalBool(document.Metadata, "bitnetsharp.enable_recall_heat_map", defaultValue: true));
-        var model = snapshot.Restore(verbosity);
+        model.ImportMemorizedResponses(memorizedResponses);
 
         var bucketSidecarPath = GetBucketSidecarPath(path);
         if ((model.Options.EnableChainBuckets || model.Options.EnableSequenceCompression) && File.Exists(bucketSidecarPath))
@@ -98,6 +116,142 @@ public static class BitNetPaperGguf
         return model;
     }
 
+    private static Dictionary<string, object> CreateMetadataFromModel(BitNetPaperModel model)
+    {
+        var config = model.Config;
+        var options = model.Options;
+        var memorized = BitNetPaperModelSnapshot.CloneMemorizedResponses(model.ExportMemorizedResponses());
+        return new Dictionary<string, object>(StringComparer.Ordinal)
+        {
+            ["general.architecture"] = ArchitectureName,
+            ["general.name"] = model.ModelId,
+            ["general.alignment"] = (uint)32,
+            ["bitnetsharp.format"] = FormatNameV2,
+            [FormatVersionMetadataKey] = FormatVersionV2,
+            ["bitnetsharp.model_id"] = model.ModelId,
+            ["bitnetsharp.bootstrap_seed"] = DefaultBootstrapSeed,
+            [VocabularyMetadataKey] = JsonSerializer.Serialize(options.Vocabulary),
+            [MemorizedResponsesMetadataKey] = JsonSerializer.Serialize(memorized),
+            ["bitnetsharp.max_response_tokens"] = options.MaxResponseTokens,
+            ["bitnetsharp.primary_language"] = options.PrimaryLanguage,
+            ["bitnetsharp.enable_chain_buckets"] = options.EnableChainBuckets,
+            ["bitnetsharp.enable_sequence_compression"] = options.EnableSequenceCompression,
+            ["bitnetsharp.enable_recall_heat_map"] = options.EnableRecallHeatMap,
+            ["bitnetsharp.chain_bucket_acceptance_threshold"] = options.ChainBucketAcceptanceThreshold,
+            ["bitnetsharp.config.vocab_size"] = config.VocabSize,
+            ["bitnetsharp.config.dimension"] = config.Dimension,
+            ["bitnetsharp.config.hidden_dimension"] = config.HiddenDimension,
+            ["bitnetsharp.config.layer_count"] = config.LayerCount,
+            ["bitnetsharp.config.head_count"] = config.HeadCount,
+            ["bitnetsharp.config.kv_head_count"] = config.KvHeadCount,
+            ["bitnetsharp.config.rope_theta"] = (double)config.RopeTheta,
+            ["bitnetsharp.config.max_sequence_length"] = config.MaxSequenceLength,
+            ["bitnetsharp.config.rms_norm_epsilon"] = (double)config.RmsNormEpsilon
+        };
+    }
+
+    private static IReadOnlyList<GgufStreamingTensor> CreateStreamingTensors(BitNetPaperModel model)
+    {
+        var config = model.Config;
+        var tensors = new List<GgufStreamingTensor>(config.LayerCount * 9 + 3);
+
+        var tokenEmbeddings = model.GetTokenEmbeddingsMatrix();
+        tensors.Add(CreateStreamingMatrixTensor(TokenEmbeddingsTensorName, tokenEmbeddings));
+
+        var linearLayers = model.GetTransformerBitLinearLayers().ToArray();
+        var normLayers = model.GetNormLayers().ToArray();
+
+        var expectedLinearCount = config.LayerCount * 7;
+        if (linearLayers.Length != expectedLinearCount)
+        {
+            throw new InvalidDataException(
+                $"Expected {expectedLinearCount} transformer BitLinear layers, but found {linearLayers.Length}.");
+        }
+
+        var expectedNormCount = config.LayerCount * 2 + 1;
+        if (normLayers.Length != expectedNormCount)
+        {
+            throw new InvalidDataException($"Expected {expectedNormCount} norm layers, but found {normLayers.Length}.");
+        }
+
+        var linearIndex = 0;
+        var normIndex = 0;
+        for (var layer = 0; layer < config.LayerCount; layer++)
+        {
+            tensors.Add(CreateStreamingVectorTensor(GetAttentionNormTensorName(layer), normLayers[normIndex++].ExportScale()));
+            tensors.Add(CreateStreamingBitLinearTensor(GetAttentionProjectionTensorName(layer, "q"), linearLayers[linearIndex++]));
+            tensors.Add(CreateStreamingBitLinearTensor(GetAttentionProjectionTensorName(layer, "k"), linearLayers[linearIndex++]));
+            tensors.Add(CreateStreamingBitLinearTensor(GetAttentionProjectionTensorName(layer, "v"), linearLayers[linearIndex++]));
+            tensors.Add(CreateStreamingBitLinearTensor(GetAttentionProjectionTensorName(layer, "out"), linearLayers[linearIndex++]));
+            tensors.Add(CreateStreamingVectorTensor(GetFeedForwardNormTensorName(layer), normLayers[normIndex++].ExportScale()));
+            tensors.Add(CreateStreamingBitLinearTensor(GetFeedForwardProjectionTensorName(layer, "gate"), linearLayers[linearIndex++]));
+            tensors.Add(CreateStreamingBitLinearTensor(GetFeedForwardProjectionTensorName(layer, "up"), linearLayers[linearIndex++]));
+            tensors.Add(CreateStreamingBitLinearTensor(GetFeedForwardProjectionTensorName(layer, "down"), linearLayers[linearIndex++]));
+        }
+
+        tensors.Add(CreateStreamingVectorTensor(OutputNormTensorName, normLayers[normIndex].ExportScale()));
+        tensors.Add(CreateStreamingBitLinearTensor(OutputTensorName, model.GetOutputHead()));
+        return tensors;
+    }
+
+    private static GgufStreamingTensor CreateStreamingMatrixTensor(string name, float[,] matrix)
+    {
+        var rows = matrix.GetLength(0);
+        var cols = matrix.GetLength(1);
+        var payloadBytes = checked((long)rows * cols * sizeof(float));
+        var captured = matrix;
+        return new GgufStreamingTensor(
+            name,
+            new[] { rows, cols },
+            GgufTensorTypes.Float32,
+            payloadBytes,
+            writer =>
+            {
+                var rowBuffer = new float[cols];
+                for (var row = 0; row < rows; row++)
+                {
+                    for (var column = 0; column < cols; column++)
+                    {
+                        rowBuffer[column] = captured[row, column];
+                    }
+
+                    writer.Write(MemoryMarshal.AsBytes(rowBuffer.AsSpan()));
+                }
+            });
+    }
+
+    private static GgufStreamingTensor CreateStreamingVectorTensor(string name, float[] values)
+    {
+        var captured = values;
+        var payloadBytes = checked((long)values.Length * sizeof(float));
+        return new GgufStreamingTensor(
+            name,
+            new[] { values.Length },
+            GgufTensorTypes.Float32,
+            payloadBytes,
+            writer => writer.Write(MemoryMarshal.AsBytes(captured.AsSpan())));
+    }
+
+    private static GgufStreamingTensor CreateStreamingBitLinearTensor(string name, Layers.BitLinear layer)
+    {
+        var rows = layer.Config.OutputDimension;
+        var cols = layer.Config.InputDimension;
+        // v2 layout: [float32 gamma][byte[] packed_trits]. 5 trits per byte.
+        var packedBytes = checked((long)layer.PackedStride * rows);
+        var payloadBytes = checked(sizeof(float) + packedBytes);
+        var captured = layer;
+        return new GgufStreamingTensor(
+            name,
+            new[] { rows, cols },
+            GgufTensorTypes.BitNetSharpPackedTernary,
+            payloadBytes,
+            writer =>
+            {
+                writer.Write(captured.Gamma);
+                captured.WritePackedTritsTo(writer);
+            });
+    }
+
     private static Dictionary<string, object> CreateMetadata(BitNetPaperModelSnapshot snapshot)
     {
         return new Dictionary<string, object>(StringComparer.Ordinal)
@@ -105,7 +259,8 @@ public static class BitNetPaperGguf
             ["general.architecture"] = ArchitectureName,
             ["general.name"] = snapshot.ModelId,
             ["general.alignment"] = (uint)32,
-            ["bitnetsharp.format"] = FormatName,
+            ["bitnetsharp.format"] = FormatNameV2,
+            [FormatVersionMetadataKey] = FormatVersionV2,
             ["bitnetsharp.model_id"] = snapshot.ModelId,
             ["bitnetsharp.bootstrap_seed"] = snapshot.BootstrapSeed,
             [VocabularyMetadataKey] = JsonSerializer.Serialize(snapshot.Vocabulary),
@@ -121,6 +276,8 @@ public static class BitNetPaperGguf
             ["bitnetsharp.config.hidden_dimension"] = snapshot.Config.HiddenDimension,
             ["bitnetsharp.config.layer_count"] = snapshot.Config.LayerCount,
             ["bitnetsharp.config.head_count"] = snapshot.Config.HeadCount,
+            ["bitnetsharp.config.kv_head_count"] = snapshot.Config.KvHeadCount,
+            ["bitnetsharp.config.rope_theta"] = (double)snapshot.Config.RopeTheta,
             ["bitnetsharp.config.max_sequence_length"] = snapshot.Config.MaxSequenceLength,
             ["bitnetsharp.config.rms_norm_epsilon"] = (double)snapshot.Config.RmsNormEpsilon
         };
@@ -182,9 +339,11 @@ public static class BitNetPaperGguf
 
     private static void ValidateMetadata(IReadOnlyDictionary<string, object> metadata)
     {
-        if (!string.Equals(GetRequiredString(metadata, "bitnetsharp.format"), FormatName, StringComparison.Ordinal))
+        var format = GetRequiredString(metadata, "bitnetsharp.format");
+        if (!string.Equals(format, FormatNameV1, StringComparison.Ordinal)
+            && !string.Equals(format, FormatNameV2, StringComparison.Ordinal))
         {
-            throw new InvalidDataException($"Unsupported BitNet GGUF format '{GetRequiredString(metadata, "bitnetsharp.format")}'.");
+            throw new InvalidDataException($"Unsupported BitNet GGUF format '{format}'.");
         }
 
         if (!string.Equals(GetRequiredString(metadata, "general.architecture"), ArchitectureName, StringComparison.Ordinal))
@@ -194,16 +353,86 @@ public static class BitNetPaperGguf
         }
     }
 
+    private static uint DetectFormatVersion(IReadOnlyDictionary<string, object> metadata)
+    {
+        if (metadata.TryGetValue(FormatVersionMetadataKey, out var raw))
+        {
+            return raw switch
+            {
+                uint u => u,
+                int i when i >= 0 => (uint)i,
+                ulong ul when ul <= uint.MaxValue => (uint)ul,
+                long l when l >= 0 && l <= uint.MaxValue => (uint)l,
+                _ => throw new InvalidDataException($"GGUF metadata key '{FormatVersionMetadataKey}' is not a supported integer value."),
+            };
+        }
+
+        // Legacy files predating the version key are v1 (FP32-on-disk).
+        var format = GetRequiredString(metadata, "bitnetsharp.format");
+        return string.Equals(format, FormatNameV2, StringComparison.Ordinal)
+            ? FormatVersionV2
+            : FormatVersionV1;
+    }
+
+    private static void ImportBitLinear(
+        GgufStreamingReader reader,
+        GgufTensorInfo tensorInfo,
+        Layers.BitLinear layer,
+        int outputDim,
+        int inputDim,
+        uint formatVersion)
+    {
+        if (formatVersion >= FormatVersionV2 && tensorInfo.TensorType == GgufTensorTypes.BitNetSharpPackedTernary)
+        {
+            var (packed, gamma) = reader.ReadPackedTernary(tensorInfo, outputDim, inputDim);
+            layer.ImportPacked(packed, gamma);
+            return;
+        }
+
+        // v1 FP32 path. Also covers v2 files that emitted F32 tensors for
+        // back-compat (none do today, but the dispatch is cheap).
+        layer.QuantizeFromFullPrecision(reader.ReadMatrix(tensorInfo, outputDim, inputDim));
+    }
+
     private static BitNetConfig ReadConfig(IReadOnlyDictionary<string, object> metadata)
     {
+        int headCount = GetRequiredInt32(metadata, "bitnetsharp.config.head_count");
+        int kvHeadCount = ReadOptionalInt32(metadata, "bitnetsharp.config.kv_head_count", headCount);
+        float ropeTheta = (float)ReadOptionalDouble(metadata, "bitnetsharp.config.rope_theta", 10_000d);
         return new BitNetConfig(
             vocabSize: GetRequiredInt32(metadata, "bitnetsharp.config.vocab_size"),
             dimension: GetRequiredInt32(metadata, "bitnetsharp.config.dimension"),
             hiddenDimension: GetRequiredInt32(metadata, "bitnetsharp.config.hidden_dimension"),
             layerCount: GetRequiredInt32(metadata, "bitnetsharp.config.layer_count"),
-            headCount: GetRequiredInt32(metadata, "bitnetsharp.config.head_count"),
+            headCount: headCount,
             maxSequenceLength: GetRequiredInt32(metadata, "bitnetsharp.config.max_sequence_length"),
-            rmsNormEpsilon: (float)GetRequiredDouble(metadata, "bitnetsharp.config.rms_norm_epsilon"));
+            rmsNormEpsilon: (float)GetRequiredDouble(metadata, "bitnetsharp.config.rms_norm_epsilon"),
+            kvHeadCount: kvHeadCount,
+            ropeTheta: ropeTheta);
+    }
+
+    private static int ReadOptionalInt32(IReadOnlyDictionary<string, object> metadata, string key, int defaultValue)
+    {
+        if (!metadata.TryGetValue(key, out var raw)) return defaultValue;
+        return raw switch
+        {
+            int i => i,
+            uint u => checked((int)u),
+            long l => checked((int)l),
+            ulong ul => checked((int)ul),
+            _ => defaultValue,
+        };
+    }
+
+    private static double ReadOptionalDouble(IReadOnlyDictionary<string, object> metadata, string key, double defaultValue)
+    {
+        if (!metadata.TryGetValue(key, out var raw)) return defaultValue;
+        return raw switch
+        {
+            double d => d,
+            float f => f,
+            _ => defaultValue,
+        };
     }
 
     private static string[] DeserializeVocabulary(string json) =>

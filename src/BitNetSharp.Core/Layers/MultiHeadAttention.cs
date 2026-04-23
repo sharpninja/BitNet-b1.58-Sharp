@@ -4,7 +4,7 @@ using BitNetSharp.Core.Utils;
 
 namespace BitNetSharp.Core.Layers;
 
-public sealed class MultiHeadAttention : Module
+public sealed class MultiHeadAttention : AttentionModule
 {
     private readonly RotaryPositionEmbedding _rotaryPositionEmbedding;
     private readonly float _attentionScale;
@@ -25,23 +25,23 @@ public sealed class MultiHeadAttention : Module
 
     public BitNetConfig Config { get; }
 
-    public BitLinear QueryProjection { get; }
+    public override BitLinear QueryProjection { get; }
 
-    public BitLinear KeyProjection { get; }
+    public override BitLinear KeyProjection { get; }
 
-    public BitLinear ValueProjection { get; }
+    public override BitLinear ValueProjection { get; }
 
-    public BitLinear OutputProjection { get; }
+    public override BitLinear OutputProjection { get; }
 
-    public bool UsesRotaryPositionEmbedding => true;
+    public override bool UsesRotaryPositionEmbedding => true;
 
-    public bool AppliesRotaryPositionEmbeddingToQueriesAndKeysOnly => true;
+    public override bool AppliesRotaryPositionEmbeddingToQueriesAndKeysOnly => true;
 
-    public bool UsesCausalAttentionMask => true;
+    public override bool UsesCausalAttentionMask => true;
 
-    public float AttentionScale => _attentionScale;
+    public override float AttentionScale => _attentionScale;
 
-    public long EstimateResidentParameterBytes() =>
+    public override long EstimateResidentParameterBytes() =>
         QueryProjection.EstimateResidentParameterBytes()
         + KeyProjection.EstimateResidentParameterBytes()
         + ValueProjection.EstimateResidentParameterBytes()

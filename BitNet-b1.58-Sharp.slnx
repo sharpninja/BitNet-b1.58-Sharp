@@ -10,6 +10,7 @@
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/BitNetSharp.Tests/BitNetSharp.Tests.csproj" />
+    <Project Path="tests/BitNetSharp.Converter.Tests/BitNetSharp.Converter.Tests.csproj" />
     <Project Path="tests/BitNetSharp.Runtime.Tests/BitNetSharp.Runtime.Tests.csproj" />
   </Folder>
 </Solution>

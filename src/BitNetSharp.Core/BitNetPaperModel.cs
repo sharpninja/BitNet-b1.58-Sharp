@@ -514,9 +514,9 @@ public sealed class BitNetPaperModel
 
     public TernaryWeightStats GetTernaryWeightStats()
     {
-        var negative = 0;
-        var zero = 0;
-        var positive = 0;
+        long negative = 0;
+        long zero = 0;
+        long positive = 0;
 
         foreach (var layer in EnumerateBitLinearLayers())
         {
@@ -606,6 +606,32 @@ public sealed class BitNetPaperModel
         EnumerateNormLayers()
             .Select(static norm => norm.ExportScale())
             .ToArray();
+
+    /// <summary>
+    /// Lazy enumerator over the 7 projection BitLinear layers per transformer block,
+    /// in the canonical (q, k, v, out, gate, up, down) order. Enables streaming
+    /// serializers to walk weights without materializing them all as FP32 first.
+    /// </summary>
+    internal IEnumerable<Layers.BitLinear> GetTransformerBitLinearLayers() => EnumerateTransformerBitLinearLayers();
+
+    /// <summary>
+    /// Lazy enumerator over RmsNorm layers in canonical order: per block
+    /// (pre-attention, pre-feedforward) then final norm.
+    /// </summary>
+    internal IEnumerable<Layers.RmsNorm> GetNormLayers() => EnumerateNormLayers();
+
+    /// <summary>
+    /// Direct reference to the output-head BitLinear. Used by streaming
+    /// serializers to avoid a ToFullPrecision allocation of the full weight
+    /// matrix.
+    /// </summary>
+    internal Layers.BitLinear GetOutputHead() => Transformer.OutputHead;
+
+    /// <summary>
+    /// Returns the token-embedding matrix. Callers must treat the result as
+    /// read-only.
+    /// </summary>
+    internal float[,] GetTokenEmbeddingsMatrix() => Transformer.ExportTokenEmbeddings();
 
     internal void ImportMemorizedResponses(IReadOnlyDictionary<string, int[]> memorizedResponses)
     {

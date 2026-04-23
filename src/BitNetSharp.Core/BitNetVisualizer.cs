@@ -31,7 +31,7 @@ public sealed class BitNetVisualizer
     private static string RenderWeightHistogram(TrainingReport trainingReport)
     {
         var max = new[] { trainingReport.NegativeWeights, trainingReport.ZeroWeights, trainingReport.PositiveWeights }.Max();
-        max = Math.Max(max, 1);
+        max = Math.Max(max, 1L);
 
         return string.Join(
             Environment.NewLine,
@@ -57,7 +57,7 @@ public sealed class BitNetVisualizer
         return builder.ToString();
     }
 
-    private static string FormatBar(string label, int value, int max)
+    private static string FormatBar(string label, long value, long max)
     {
         var width = Math.Max(1, (int)Math.Round(value / (double)max * 20d));
         return $"{label}: {new string('#', width)} {value}";
