@@ -100,6 +100,18 @@ if (command == "train")
     return;
 }
 
+if (command == "import-gguf")
+{
+    ImportGgufCommand.Run(args, verbosity);
+    return;
+}
+
+if (command == "serve")
+{
+    await ServeCommand.RunAsync(args, verbosity);
+    return;
+}
+
 if (command == "export")
 {
     var outputPath = ParseOption(args, "--output=");
@@ -206,7 +218,7 @@ static string FormatModelSummary(IHostedAgentModel model) => string.Join(Environ
 static string FormatWeightHistogram(TernaryWeightStats stats)
 {
     var max = Math.Max(stats.NegativeCount, Math.Max(stats.ZeroCount, stats.PositiveCount));
-    max = Math.Max(max, 1);
+    max = Math.Max(max, 1L);
     var scale = DefaultHistogramWidth / (double)max;
 
     return string.Join(
@@ -219,7 +231,7 @@ static string FormatWeightHistogram(TernaryWeightStats stats)
         ]);
 }
 
-static string FormatBar(string label, int value, int max, double scale)
+static string FormatBar(string label, long value, long max, double scale)
 {
     if (max <= 0)
     {

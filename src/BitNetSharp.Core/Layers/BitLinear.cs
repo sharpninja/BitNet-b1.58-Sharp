@@ -239,6 +239,51 @@ public sealed class BitLinear : Module
         weights.CopyTo(_masterWeights, 0);
     }
 
+    /// <summary>
+    /// Directly installs a pre-ternarized weight tensor plus per-tensor Gamma
+    /// without running quantization. Used by external GGUF importers that have
+    /// already decoded integer codes to ternary trits.
+    /// </summary>
+    /// <param name="ternary">
+    /// Row-major flat trits (length == OutputDimension * InputDimension).
+    /// Each value must be in {-1, 0, +1}.
+    /// </param>
+    /// <param name="gamma">Per-tensor absmean scale (must be >= 0).</param>
+    public void ImportTernary(sbyte[] ternary, float gamma)
+    {
+        ArgumentNullException.ThrowIfNull(ternary);
+
+        if (ternary.Length != _totalWeights)
+        {
+            throw new ArgumentException(
+                $"Expected {_totalWeights} trits, got {ternary.Length}.",
+                nameof(ternary));
+        }
+
+        ArgumentOutOfRangeException.ThrowIfNegative(gamma);
+
+        for (var i = 0; i < ternary.Length; i++)
+        {
+            var t = ternary[i];
+            if (t < -1 || t > 1)
+            {
+                throw new ArgumentException(
+                    $"Trit at index {i} is out of range: {t}. Must be in {{-1, 0, +1}}.",
+                    nameof(ternary));
+            }
+        }
+
+        Gamma = gamma;
+
+        if (gamma == 0f)
+        {
+            Array.Clear(_packedWeights);
+            return;
+        }
+
+        PackRowMajor(ternary);
+    }
+
     public void ApplyRowPermutation(int[] permutation)
     {
         ArgumentNullException.ThrowIfNull(permutation);
@@ -316,6 +361,78 @@ public sealed class BitLinear : Module
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Streams ternary weights as FP32 float values directly to a BinaryWriter,
+    /// one output row at a time. Peak resident memory is O(InputDimension)
+    /// instead of O(OutputDimension * InputDimension), so multi-GB projection
+    /// matrices can be serialized without materializing a contiguous FP32 buffer.
+    /// </summary>
+    public void WriteFullPrecisionTo(BinaryWriter writer)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+
+        var inputDim = Config.InputDimension;
+        var tritBuffer = new sbyte[inputDim];
+        var rowBuffer = new float[inputDim];
+
+        for (var row = 0; row < Config.OutputDimension; row++)
+        {
+            TritPacking.UnpackRowInto(_packedWeights, row * _packedStride, _packedStride, tritBuffer, inputDim);
+            for (var column = 0; column < inputDim; column++)
+            {
+                rowBuffer[column] = tritBuffer[column] * Gamma;
+            }
+
+            writer.Write(System.Runtime.InteropServices.MemoryMarshal.AsBytes(rowBuffer.AsSpan()));
+        }
+    }
+
+    /// <summary>
+    /// Number of packed bytes per output row (5 trits/byte, base-3 packing).
+    /// Total bytes in the packed representation = <see cref="PackedStride"/>
+    /// * <see cref="BitLinearConfig.OutputDimension"/>.
+    /// </summary>
+    public int PackedStride => _packedStride;
+
+    /// <summary>
+    /// Streams the raw packed-trit bytes (no Gamma, no FP32 expansion) directly
+    /// to a BinaryWriter. Used by the v2 BitNetSharp GGUF serializer. Byte layout
+    /// matches <see cref="ImportPacked"/>'s expected input: row-major, with
+    /// <see cref="PackedStride"/> bytes per output row.
+    /// </summary>
+    public void WritePackedTritsTo(BinaryWriter writer)
+    {
+        ArgumentNullException.ThrowIfNull(writer);
+        writer.Write(_packedWeights);
+    }
+
+    /// <summary>
+    /// Directly installs a pre-packed trit buffer plus per-tensor Gamma without
+    /// any unpack/repack round trip. Used by the v2 BitNetSharp GGUF loader
+    /// where the on-disk layout already matches our in-memory packing.
+    /// </summary>
+    /// <param name="packed">
+    /// Raw packed bytes, length == <see cref="PackedStride"/> *
+    /// <see cref="BitLinearConfig.OutputDimension"/>.
+    /// </param>
+    /// <param name="gamma">Per-tensor absmean scale (must be >= 0).</param>
+    public void ImportPacked(byte[] packed, float gamma)
+    {
+        ArgumentNullException.ThrowIfNull(packed);
+
+        if (packed.Length != _packedWeights.Length)
+        {
+            throw new ArgumentException(
+                $"Expected {_packedWeights.Length} packed bytes, got {packed.Length}.",
+                nameof(packed));
+        }
+
+        ArgumentOutOfRangeException.ThrowIfNegative(gamma);
+
+        Gamma = gamma;
+        Buffer.BlockCopy(packed, 0, _packedWeights, 0, packed.Length);
     }
 
     public TernaryWeightStats GetTernaryStats()

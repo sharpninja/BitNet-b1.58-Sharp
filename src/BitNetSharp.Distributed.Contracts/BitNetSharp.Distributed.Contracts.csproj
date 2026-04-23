@@ -9,6 +9,9 @@
     <RootNamespace>BitNetSharp.Distributed.Contracts</RootNamespace>
     <AssemblyName>BitNetSharp.Distributed.Contracts</AssemblyName>
     <Description>Wire-format DTOs shared between the BitNet distributed training coordinator and its workers.</Description>
+    <!-- See BitNetSharp.Core.csproj for rationale: WordLevelTokenizer tokenizer-file I/O is
+         coordinator-side (full CLR), not called from the AOT inference path. -->
+    <NoWarn>$(NoWarn);IL2026;IL3050</NoWarn>
   </PropertyGroup>
 
 </Project>

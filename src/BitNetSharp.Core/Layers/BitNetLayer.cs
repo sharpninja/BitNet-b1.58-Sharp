@@ -12,7 +12,9 @@ public sealed class BitNetLayer : Module
 
         Config = config;
         PreAttentionNorm = new RmsNorm(config.Dimension, config.RmsNormEpsilon);
-        Attention = new MultiHeadAttention(config, random);
+        Attention = config.UsesGroupedQueryAttention
+            ? new GroupedQueryAttention(config, random)
+            : new MultiHeadAttention(config, random);
         PreFeedForwardNorm = new RmsNorm(config.Dimension, config.RmsNormEpsilon);
         FeedForward = new SwiGLUFeedForward(config, random);
     }
@@ -21,7 +23,7 @@ public sealed class BitNetLayer : Module
 
     public RmsNorm PreAttentionNorm { get; }
 
-    public MultiHeadAttention Attention { get; }
+    public AttentionModule Attention { get; }
 
     public RmsNorm PreFeedForwardNorm { get; }
 

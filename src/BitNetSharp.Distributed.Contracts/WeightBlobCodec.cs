@@ -71,6 +71,21 @@ public static class WeightBlobCodec
     }
 
     /// <summary>
+    /// Async convenience: reads <paramref name="path"/> into memory and decodes. For blobs
+    /// small enough to fit in memory; streaming decode is future work.
+    /// </summary>
+    public static async Task<(long Version, float[] Weights)> DecodeAsync(
+        string path,
+        CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(path);
+        var payload = await File.ReadAllBytesAsync(path, cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        var weights = Decode(payload, out var version);
+        return (version, weights);
+    }
+
+    /// <summary>
     /// Attempts to deserialize the blob. Returns <c>false</c> + a
     /// user-readable <paramref name="error"/> instead of throwing.
     /// </summary>

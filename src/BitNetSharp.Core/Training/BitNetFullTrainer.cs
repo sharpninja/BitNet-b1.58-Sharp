@@ -198,9 +198,9 @@ public sealed class BitNetFullTrainer
 
     private TernaryWeightStats GetTransformerTernaryStats()
     {
-        var negative = 0;
-        var zero = 0;
-        var positive = 0;
+        long negative = 0;
+        long zero = 0;
+        long positive = 0;
 
         foreach (var layer in _transformer.EnumerateBitLinearLayers())
         {
