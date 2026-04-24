@@ -3,8 +3,10 @@ using System.Collections.Generic;
 using System.IO;
 using BitNetSharp.Core;
 using BitNetSharp.Core.Converters;
+using BitNetSharp.Core.Inference;
 using BitNetSharp.Core.Layers;
 using BitNetSharp.Core.Models;
+using BitNetSharp.Core.Quantization;
 using BitNetSharp.Core.Serialization.Gguf;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -114,6 +116,48 @@ public sealed class Qwen3BonsaiConverterTests
         var target = BuildMiniModel(overrideLayerCount: LayerCount + 1);
 
         Assert.Throws<InvalidDataException>(() => Qwen3BonsaiConverter.Import(doc, target));
+    }
+
+    [Fact]
+    public void Import_ConvertedBitLinear_ForwardInt32_EmitsIntegerBlock()
+    {
+        // After conversion, every BitLinear should be ready to consume the
+        // integer inference path directly: ForwardInt32 on a QuantizedActivationBlock
+        // must produce an Int32ActivationBlock whose dequantised output matches
+        // ForwardQuantized bit-for-bit (no float weights in between).
+        var doc = BuildSyntheticGguf("qwen3", q2Scale: 0.25f, q2Pattern: 0xE4);
+        var target = BuildMiniModel();
+        Qwen3BonsaiConverter.Import(doc, target);
+
+        var q = target.Transformer.Layers[0].Attention.QueryProjection;
+        var rng = new Random(31);
+        var input = new float[2, Dim];
+        for (int r = 0; r < 2; r++)
+        {
+            for (int c = 0; c < Dim; c++)
+            {
+                input[r, c] = ((float)rng.NextDouble() - 0.5f) * 2f;
+            }
+        }
+
+        var quant = QuantizedActivationBlock.FromFloat(input);
+        float[,] floatOut = q.ForwardQuantized(quant);
+        Int32ActivationBlock intBlock = q.ForwardInt32(quant);
+        float[,] intAsFloat = intBlock.ToFloat();
+
+        for (int r = 0; r < 2; r++)
+        {
+            for (int c = 0; c < Dim; c++)
+            {
+                Assert.InRange(intAsFloat[r, c] - floatOut[r, c], -1e-5f, 1e-5f);
+            }
+        }
+
+        // Row scale must be Gamma * activation row scale (no extra float pass).
+        for (int r = 0; r < 2; r++)
+        {
+            Assert.InRange(intBlock.RowScales[r] - q.Gamma * quant.RowScales[r], -1e-7f, 1e-7f);
+        }
     }
 
     [Fact]
