@@ -42,6 +42,23 @@ public interface IHostedAgentModel : IDisposable
     {
         ArgumentNullException.ThrowIfNull(history);
         var prompt = PromptTemplate.FlattenHistory(SystemPrompt, history);
+        await foreach (var chunk in StreamResponseAsync(prompt, maxOutputTokens, cancellationToken).ConfigureAwait(false))
+        {
+            yield return chunk;
+        }
+    }
+
+    /// <summary>
+    /// Streams assistant-side tokens for an already-assembled prompt. Default implementation
+    /// blocks on <see cref="GetResponseAsync"/> and emits the full response in one chunk.
+    /// Implementations with native per-token streaming should override this overload.
+    /// </summary>
+    async IAsyncEnumerable<string> StreamResponseAsync(
+        string prompt,
+        int? maxOutputTokens = null,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(prompt);
         var response = await GetResponseAsync(prompt, maxOutputTokens, cancellationToken).ConfigureAwait(false);
         cancellationToken.ThrowIfCancellationRequested();
         if (!string.IsNullOrEmpty(response.Text))

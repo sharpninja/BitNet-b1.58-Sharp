@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using BitNetSharp.Core.Inference;
 using BitNetSharp.Core.Layers;
 using BitNetSharp.Core.Quantization;
 using BitNetSharp.Core.Utils;
@@ -74,6 +75,93 @@ public sealed partial class BitNetTransformer
     }
 
     public long EstimateTokenEmbeddingBytes() => (long)_tokenEmbeddings.Length * sizeof(float);
+
+    /// <summary>
+    /// Allocates a KV cache sized for this model's attention topology. Each
+    /// layer gets a K and V slab of shape [capacity, kvDim] where kvDim is
+    /// <c>KvHeadCount * HeadDimension</c> for GQA and
+    /// <c>HeadCount * HeadDimension</c> for plain MHA.
+    /// </summary>
+    public TransformerCache CreateCache(int capacity)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
+
+        var kvDim = Config.UsesGroupedQueryAttention
+            ? Config.KvHeadCount * Config.HeadDimension
+            : Config.HeadCount * Config.HeadDimension;
+
+        var layers = new LayerKvCache[Layers.Length];
+        for (var i = 0; i < Layers.Length; i++)
+        {
+            layers[i] = new LayerKvCache(capacity, kvDim);
+        }
+
+        return new TransformerCache(layers, capacity);
+    }
+
+    /// <summary>
+    /// Cache-aware forward over new tokens only. Embeds just
+    /// <paramref name="newTokenIds"/>, processes each layer with its per-layer
+    /// cache slot starting at <see cref="TransformerCache.PastLength"/>, then
+    /// advances the cache past length. Returns logits with one row per new
+    /// token.
+    /// </summary>
+    public float[,] Forward(IReadOnlyList<int> newTokenIds, TransformerCache cache)
+    {
+        ArgumentNullException.ThrowIfNull(newTokenIds);
+        ArgumentNullException.ThrowIfNull(cache);
+
+        if (newTokenIds.Count == 0)
+        {
+            throw new ArgumentException("At least one token is required.", nameof(newTokenIds));
+        }
+
+        if (cache.Layers.Length != Layers.Length)
+        {
+            throw new ArgumentException(
+                $"Cache layer count {cache.Layers.Length} does not match transformer layer count {Layers.Length}.",
+                nameof(cache));
+        }
+
+        var positionOffset = cache.PastLength;
+        var totalLength = positionOffset + newTokenIds.Count;
+        if (totalLength > Config.MaxSequenceLength)
+        {
+            throw new ArgumentException(
+                $"Total length {totalLength} exceeds configured max sequence length {Config.MaxSequenceLength}.",
+                nameof(newTokenIds));
+        }
+        if (totalLength > cache.Capacity)
+        {
+            throw new ArgumentException(
+                $"Total length {totalLength} exceeds cache capacity {cache.Capacity}.",
+                nameof(newTokenIds));
+        }
+
+        var hidden = Embed(newTokenIds);
+
+        var sw = Stopwatch.StartNew();
+        for (var i = 0; i < Layers.Length; i++)
+        {
+            var layerStart = sw.Elapsed.TotalMilliseconds;
+            hidden = Layers[i].Forward(hidden, cache.Layers[i], positionOffset);
+            if (_logger.IsEnabled(LogLevel.Trace))
+            {
+                _logger.LogTrace(
+                    "Layer[{Layer}].ForwardCached new_rows={NewRows} past_length={PastLength} ms={LayerMs:F2}",
+                    i,
+                    newTokenIds.Count,
+                    positionOffset,
+                    sw.Elapsed.TotalMilliseconds - layerStart);
+            }
+        }
+        sw.Stop();
+
+        cache.PastLength = totalLength;
+
+        var finalHidden = FinalNorm.Forward(hidden);
+        return OutputHead.Forward(finalHidden);
+    }
 
     public float[,] Forward(IReadOnlyList<int> tokenIds)
     {

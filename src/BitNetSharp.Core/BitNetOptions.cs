@@ -8,4 +8,6 @@ public sealed record BitNetOptions(
     bool EnableChainBuckets = false,
     bool EnableSequenceCompression = false,
     double ChainBucketAcceptanceThreshold = 0.85d,
-    bool EnableRecallHeatMap = true);
+    bool EnableRecallHeatMap = true,
+    float RepetitionPenalty = 1.3f,
+    int RepetitionPenaltyWindow = 64);

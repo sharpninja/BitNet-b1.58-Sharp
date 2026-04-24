@@ -47,6 +47,13 @@ public sealed class BitLinear : Module
     public long EstimateResidentParameterBytes() =>
         (long)_packedWeights.Length + (long)_simdPackedWeights.Length + sizeof(float);
 
+    /// <summary>
+    /// True when this layer participates in training (master weights were
+    /// initialised). Inference-only models skip the backward cache so callers
+    /// that share a pre-quantised block can safely bypass <see cref="Forward"/>.
+    /// </summary>
+    public bool IsTraining => _masterWeights is not null;
+
     public override float[,] Forward(float[,] input)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -58,22 +65,38 @@ public sealed class BitLinear : Module
             throw new ArgumentException($"Expected input dimension {inputDim}, but received {input.GetLength(1)}.", nameof(input));
         }
 
-        if (_masterWeights is not null)
+        return ForwardQuantized(QuantizedActivationBlock.FromFloat(input), input);
+    }
+
+    /// <summary>
+    /// Fast path for callers that have already quantised the shared input
+    /// (attention Q/K/V sharing the pre-norm output, FFN Gate/Up sharing the
+    /// residual). Skips the per-row absmax scan, which is otherwise repeated
+    /// 3x per attention layer and 2x per FFN layer on the same activations.
+    /// Pass <paramref name="rawInputForBackward"/> when training so the
+    /// backward cache can be populated; pure inference callers pass null.
+    /// </summary>
+    public float[,] ForwardQuantized(QuantizedActivationBlock input, float[,]? rawInputForBackward = null)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+
+        var inputDim = Config.InputDimension;
+        if (input.Cols != inputDim)
         {
-            _cachedInput = (float[,])input.Clone();
+            throw new ArgumentException($"Expected input dimension {inputDim}, but received {input.Cols}.", nameof(input));
         }
 
-        var (quantizedInput, rowScales) = QuantizeActivations(input);
-        var rows = input.GetLength(0);
+        if (_masterWeights is not null && rawInputForBackward is not null)
+        {
+            _cachedInput = (float[,])rawInputForBackward.Clone();
+        }
+
+        var rows = input.Rows;
         var outDim = Config.OutputDimension;
         var output = new float[rows, outDim];
 
-        // SIMD hot path: outer loop over output columns; decode each
-        // 4-trit packed row to an sbyte trit buffer ONCE, then run
-        // Vector<sbyte> dot against each input row. Amortizes the
-        // 2-bit-signed decode cost across seq_len activations (big win
-        // at prefill, modest at single-token decode).
         var simdWeights = _simdPackedWeights.AsSpan();
+        var quantizedSpan = input.Quantized.AsSpan();
         var decodedBuffer = ArrayPool<sbyte>.Shared.Rent(inputDim);
         try
         {
@@ -86,9 +109,9 @@ public sealed class BitLinear : Module
 
                 for (var row = 0; row < rows; row++)
                 {
-                    var activationSpan = quantizedInput.AsSpan(row * inputDim, inputDim);
+                    var activationSpan = quantizedSpan.Slice(row * inputDim, inputDim);
                     var isum = TritPacking.TernaryDotSimdUnpacked(decodedSpan, activationSpan);
-                    output[row, outputColumn] = isum * Gamma * rowScales[row];
+                    output[row, outputColumn] = isum * Gamma * input.RowScales[row];
                 }
             }
         }

@@ -1,3 +1,5 @@
+using BitNetSharp.Core.Inference;
+
 namespace BitNetSharp.Core.Layers;
 
 /// <summary>
@@ -24,4 +26,23 @@ public abstract class AttentionModule : Module
     public virtual bool UsesCausalAttentionMask => true;
 
     public abstract long EstimateResidentParameterBytes();
+
+    /// <summary>
+    /// Cache-aware forward for inference. Processes rows of <paramref name="input"/>
+    /// as positions [positionOffset, positionOffset + input.Rows), appending new
+    /// K/V rows into <paramref name="cache"/>, and attends against all cached K/V
+    /// rows [0, positionOffset + input.Rows). Default implementation throws; each
+    /// attention flavor provides its own override.
+    /// </summary>
+    public virtual float[,] Forward(float[,] input, LayerKvCache cache, int positionOffset)
+        => throw new NotSupportedException($"{GetType().Name} does not implement cache-aware Forward.");
+
+    /// <summary>
+    /// Fused flash-style single-row decode. Skips materialising the
+    /// [headCount, 1, pastLength] weights tensor that the standard dense
+    /// path produces. Input must be exactly one row (query length == 1);
+    /// use <see cref="Forward(float[,], LayerKvCache, int)"/> for prefill.
+    /// </summary>
+    public virtual float[,] ForwardFlashDecode(float[,] input, LayerKvCache cache, int positionOffset)
+        => throw new NotSupportedException($"{GetType().Name} does not implement flash decode.");
 }
