@@ -321,6 +321,38 @@ public sealed class BitLinear : Module
         _intMasterWeights.InitializeFromFloats(weights);
     }
 
+    /// <summary>
+    /// Applies a per-index float delta directly to the integer master-weight
+    /// accumulator. Unlike <see cref="ImportMasterWeights"/>, this routes each
+    /// delta through <see cref="IntegerMasterWeightLayer.ApplyDelta"/> so the
+    /// bucket+delta state retains sub-Epsilon precision across steps instead
+    /// of re-quantising the full tensor to the Epsilon grid every call. Used
+    /// by the trainer after an optimizer step to apply (updated - previous)
+    /// without the Import round-trip's quantisation loss.
+    /// </summary>
+    public void ApplyMasterWeightDeltas(float[] deltas)
+    {
+        ArgumentNullException.ThrowIfNull(deltas);
+
+        if (deltas.Length != _totalWeights)
+        {
+            throw new ArgumentException(
+                $"Expected {_totalWeights} deltas, got {deltas.Length}.",
+                nameof(deltas));
+        }
+
+        if (_intMasterWeights is null)
+        {
+            throw new InvalidOperationException(
+                "Master weights not initialised; call InitializeMasterWeights or ImportMasterWeights first.");
+        }
+
+        for (var i = 0; i < deltas.Length; i++)
+        {
+            _intMasterWeights.ApplyDelta(i, deltas[i]);
+        }
+    }
+
     private float[] ProjectIntMastersToFloat()
     {
         var buffer = new float[_totalWeights];
