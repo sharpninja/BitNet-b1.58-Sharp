@@ -71,9 +71,14 @@ public sealed class FlatParameterPackTests
         var repacked = FlatParameterPack.Pack(transformer);
 
         Assert.Equal(mutated.Length, repacked.Length);
+        // Master weights live in integer bucket+delta state (Epsilon=1e-5 step).
+        // Exact float round-trip is impossible by design; tolerate one quantisation
+        // step in each direction so the distributed-training protocol's payload
+        // still converges even after int-lossy Import/Export.
+        const float tolerance = 2e-5f;
         for (var i = 0; i < mutated.Length; i++)
         {
-            Assert.Equal(mutated[i], repacked[i]);
+            Assert.InRange(repacked[i] - mutated[i], -tolerance, tolerance);
         }
     }
 

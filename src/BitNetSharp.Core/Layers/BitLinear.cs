@@ -1,5 +1,6 @@
 using System.Buffers;
 using BitNetSharp.Core.Quantization;
+using BitNetSharp.Core.Training;
 
 namespace BitNetSharp.Core.Layers;
 
@@ -17,10 +18,19 @@ public sealed class BitLinear : Module
     // Row permutation for cache-aware token-row layout (null = identity)
     private int[]? _rowPermutation;
 
-    // Training state (null until InitializeMasterWeights is called)
-    private float[]? _masterWeights;
+    // Training state (null until InitializeMasterWeights / ImportMasterWeights is called).
+    // Master weights live in an integer bucket+delta accumulator (Epsilon-scaled);
+    // float Export/Import is kept as a compat boundary for the existing trainer
+    // (T2 replaces those callers with direct integer delta apply).
+    private IntegerMasterWeightLayer? _intMasterWeights;
+    private LayerScaleProfile? _scaleProfile;
     private float[]? _masterGradients;
     private float[,]? _cachedInput;
+
+    // Default epsilon for integer master-weight resolution when no calibration
+    // profile is supplied by the trainer. Small enough to resolve typical
+    // gradient magnitudes; T1 sets it here, T2 switches to calibrated profiles.
+    private const float DefaultMasterWeightEpsilon = 1e-5f;
 
     public BitLinear(BitLinearConfig config)
     {
@@ -52,7 +62,13 @@ public sealed class BitLinear : Module
     /// initialised). Inference-only models skip the backward cache so callers
     /// that share a pre-quantised block can safely bypass <see cref="Forward"/>.
     /// </summary>
-    public bool IsTraining => _masterWeights is not null;
+    public bool IsTraining => _intMasterWeights is not null;
+
+    /// <summary>
+    /// Returns the <see cref="LayerScaleProfile"/> backing the integer master
+    /// weight accumulator, or null if training has not been initialised.
+    /// </summary>
+    public LayerScaleProfile? GetMasterWeightScaleProfile() => _scaleProfile;
 
     public override float[,] Forward(float[,] input)
     {
@@ -86,7 +102,7 @@ public sealed class BitLinear : Module
             throw new ArgumentException($"Expected input dimension {inputDim}, but received {input.Cols}.", nameof(input));
         }
 
-        if (_masterWeights is not null && rawInputForBackward is not null)
+        if (_intMasterWeights is not null && rawInputForBackward is not null)
         {
             _cachedInput = (float[,])rawInputForBackward.Clone();
         }
@@ -188,20 +204,46 @@ public sealed class BitLinear : Module
 
     public void InitializeMasterWeights()
     {
-        _masterWeights = new float[_totalWeights];
+        _scaleProfile = BuildDefaultScaleProfile();
+        _intMasterWeights = new IntegerMasterWeightLayer(_scaleProfile);
         _masterGradients = new float[_totalWeights];
 
         var inputDim = Config.InputDimension;
-        var buffer = new sbyte[inputDim];
+        var unpackBuffer = new sbyte[inputDim];
+        var floatBuffer = new float[_totalWeights];
         for (var row = 0; row < Config.OutputDimension; row++)
         {
-            TritPacking.UnpackRowInto(_packedWeights, row * _packedStride, _packedStride, buffer, inputDim);
+            TritPacking.UnpackRowInto(_packedWeights, row * _packedStride, _packedStride, unpackBuffer, inputDim);
             var offset = row * inputDim;
             for (var col = 0; col < inputDim; col++)
             {
-                _masterWeights[offset + col] = buffer[col] * Gamma;
+                floatBuffer[offset + col] = unpackBuffer[col] * Gamma;
             }
         }
+
+        _intMasterWeights.InitializeFromFloats(floatBuffer);
+    }
+
+    private LayerScaleProfile BuildDefaultScaleProfile()
+    {
+        var epsilon = DefaultMasterWeightEpsilon;
+        var maxWeightMagnitude = MathF.Max(1f, Gamma * 2f);
+        var bucketSize = epsilon * 65536f;
+        var bucketCount = (int)MathF.Ceiling(MathF.Max(maxWeightMagnitude * 2f, 1f) / bucketSize);
+
+        return new LayerScaleProfile
+        {
+            LayerName = $"bitlinear[{Config.InputDimension}->{Config.OutputDimension}]",
+            OutputDimension = Config.OutputDimension,
+            InputDimension = Config.InputDimension,
+            MaxGradientMagnitude = epsilon * 1024f,
+            P99GradientMagnitude = epsilon * 256f,
+            MeanGradientMagnitude = epsilon * 64f,
+            ObservedWeightRange = maxWeightMagnitude * 2f,
+            MaxWeightMagnitude = maxWeightMagnitude,
+            Epsilon = epsilon,
+            BucketCount = bucketCount,
+        };
     }
 
     public void ZeroGradients()
@@ -214,18 +256,20 @@ public sealed class BitLinear : Module
 
     public void SyncTernaryFromMaster()
     {
-        if (_masterWeights is null)
+        if (_intMasterWeights is null)
         {
             return;
         }
 
+        var projected = ProjectIntMastersToFloat();
+
         var absSum = 0f;
-        for (var i = 0; i < _masterWeights.Length; i++)
+        for (var i = 0; i < projected.Length; i++)
         {
-            absSum += MathF.Abs(_masterWeights[i]);
+            absSum += MathF.Abs(projected[i]);
         }
 
-        Gamma = _masterWeights.Length > 0 ? absSum / _masterWeights.Length : 0f;
+        Gamma = projected.Length > 0 ? absSum / projected.Length : 0f;
 
         if (Gamma <= 0f)
         {
@@ -235,9 +279,9 @@ public sealed class BitLinear : Module
         }
 
         var ternary = new sbyte[_totalWeights];
-        for (var i = 0; i < _masterWeights.Length; i++)
+        for (var i = 0; i < projected.Length; i++)
         {
-            var normalized = _masterWeights[i] / Gamma + WeightQuantizationEpsilon;
+            var normalized = projected[i] / Gamma + WeightQuantizationEpsilon;
             ternary[i] = (sbyte)Math.Clamp(
                 (int)MathF.Round(normalized, MidpointRounding.AwayFromZero), -1, 1);
         }
@@ -245,7 +289,14 @@ public sealed class BitLinear : Module
         PackRowMajor(ternary);
     }
 
-    public float[]? ExportMasterWeights() => _masterWeights is null ? null : [.. _masterWeights];
+    public float[]? ExportMasterWeights()
+    {
+        if (_intMasterWeights is null)
+        {
+            return null;
+        }
+        return ProjectIntMastersToFloat();
+    }
 
     public float[]? ExportMasterGradients() => _masterGradients is null ? null : [.. _masterGradients];
 
@@ -260,9 +311,30 @@ public sealed class BitLinear : Module
                 nameof(weights));
         }
 
-        _masterWeights ??= new float[weights.Length];
+        if (_scaleProfile is null || _intMasterWeights is null)
+        {
+            _scaleProfile = BuildDefaultScaleProfile();
+            _intMasterWeights = new IntegerMasterWeightLayer(_scaleProfile);
+        }
+
         _masterGradients ??= new float[weights.Length];
-        weights.CopyTo(_masterWeights, 0);
+        _intMasterWeights.InitializeFromFloats(weights);
+    }
+
+    private float[] ProjectIntMastersToFloat()
+    {
+        var buffer = new float[_totalWeights];
+        if (_intMasterWeights is null)
+        {
+            return buffer;
+        }
+
+        for (var i = 0; i < _totalWeights; i++)
+        {
+            buffer[i] = _intMasterWeights.ToFloat(i);
+        }
+
+        return buffer;
     }
 
     /// <summary>
