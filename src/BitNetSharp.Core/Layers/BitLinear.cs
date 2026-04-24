@@ -19,18 +19,28 @@ public sealed class BitLinear : Module
     private int[]? _rowPermutation;
 
     // Training state (null until InitializeMasterWeights / ImportMasterWeights is called).
-    // Master weights live in an integer bucket+delta accumulator (Epsilon-scaled);
-    // float Export/Import is kept as a compat boundary for the existing trainer
-    // (T2 replaces those callers with direct integer delta apply).
+    // Both master weights and per-step gradient accumulator live in integer
+    // bucket+delta accumulators (Epsilon-scaled); float Export/Import stay as
+    // a compat boundary so AdamW keeps running in float. Sub-Epsilon gradient
+    // contributions accumulate via the delta field instead of rounding to 0
+    // like a float[] accumulator used to.
     private IntegerMasterWeightLayer? _intMasterWeights;
+    private IntegerMasterWeightLayer? _intMasterGradients;
     private LayerScaleProfile? _scaleProfile;
-    private float[]? _masterGradients;
     private float[,]? _cachedInput;
 
     // Default epsilon for integer master-weight resolution when no calibration
     // profile is supplied by the trainer. Small enough to resolve typical
     // gradient magnitudes; T1 sets it here, T2 switches to calibrated profiles.
     private const float DefaultMasterWeightEpsilon = 1e-5f;
+
+    // Gradient accumulator needs finer resolution than master weights: each
+    // ApplyDelta(grad * input[row,col]) rounds to int at this grid, and grad
+    // is the product of two already-small floats. At 1e-5 a per-row per-col
+    // contribution of 1e-6 rounds to 0 and vanishes; at 1e-8 it carries 100
+    // int units so contributions sum correctly across rows. Short-range at
+    // this epsilon still covers ~21.47 in fullValue, more than adequate.
+    private const float DefaultGradientEpsilon = 1e-8f;
 
     public BitLinear(BitLinearConfig config)
     {
@@ -178,24 +188,47 @@ public sealed class BitLinear : Module
             ArrayPool<sbyte>.Shared.Return(unpackBuffer);
         }
 
-        if (_masterGradients is not null && _cachedInput is not null)
+        if (_intMasterGradients is not null && _cachedInput is not null)
         {
-            for (var row = 0; row < rows; row++)
+            // Accumulate per-weight gradient sum in float first, then apply a
+            // single ApplyDelta per weight at the end. Quantising each row's
+            // (grad * input) individually injects N rounding errors per weight;
+            // summing first injects exactly one, which preserves training
+            // dynamics that a float[] accumulator used to deliver.
+            var perWeightSum = ArrayPool<float>.Shared.Rent(_totalWeights);
+            try
             {
-                for (var outCol = 0; outCol < outDim; outCol++)
-                {
-                    var grad = gradientOutput[row, outCol];
-                    if (grad == 0f)
-                    {
-                        continue;
-                    }
+                Array.Clear(perWeightSum, 0, _totalWeights);
 
-                    var weightOffset = outCol * inDim;
-                    for (var inCol = 0; inCol < inDim; inCol++)
+                for (var row = 0; row < rows; row++)
+                {
+                    for (var outCol = 0; outCol < outDim; outCol++)
                     {
-                        _masterGradients[weightOffset + inCol] += grad * _cachedInput[row, inCol];
+                        var grad = gradientOutput[row, outCol];
+                        if (grad == 0f)
+                        {
+                            continue;
+                        }
+
+                        var weightOffset = outCol * inDim;
+                        for (var inCol = 0; inCol < inDim; inCol++)
+                        {
+                            perWeightSum[weightOffset + inCol] += grad * _cachedInput[row, inCol];
+                        }
                     }
                 }
+
+                for (var i = 0; i < _totalWeights; i++)
+                {
+                    if (perWeightSum[i] != 0f)
+                    {
+                        _intMasterGradients.ApplyDelta(i, perWeightSum[i]);
+                    }
+                }
+            }
+            finally
+            {
+                ArrayPool<float>.Shared.Return(perWeightSum);
             }
         }
 
@@ -206,7 +239,7 @@ public sealed class BitLinear : Module
     {
         _scaleProfile = BuildDefaultScaleProfile();
         _intMasterWeights = new IntegerMasterWeightLayer(_scaleProfile);
-        _masterGradients = new float[_totalWeights];
+        _intMasterGradients = new IntegerMasterWeightLayer(BuildDefaultGradientScaleProfile());
 
         var inputDim = Config.InputDimension;
         var unpackBuffer = new sbyte[inputDim];
@@ -246,12 +279,31 @@ public sealed class BitLinear : Module
         };
     }
 
+    private LayerScaleProfile BuildDefaultGradientScaleProfile()
+    {
+        var epsilon = DefaultGradientEpsilon;
+        var maxGradMagnitude = MathF.Max(1f, Gamma * 2f);
+        var bucketSize = epsilon * 65536f;
+        var bucketCount = (int)MathF.Ceiling(MathF.Max(maxGradMagnitude * 2f, 1f) / bucketSize);
+
+        return new LayerScaleProfile
+        {
+            LayerName = $"bitlinear-grad[{Config.InputDimension}->{Config.OutputDimension}]",
+            OutputDimension = Config.OutputDimension,
+            InputDimension = Config.InputDimension,
+            MaxGradientMagnitude = epsilon * 1024f,
+            P99GradientMagnitude = epsilon * 256f,
+            MeanGradientMagnitude = epsilon * 64f,
+            ObservedWeightRange = maxGradMagnitude * 2f,
+            MaxWeightMagnitude = maxGradMagnitude,
+            Epsilon = epsilon,
+            BucketCount = bucketCount,
+        };
+    }
+
     public void ZeroGradients()
     {
-        if (_masterGradients is not null)
-        {
-            Array.Clear(_masterGradients);
-        }
+        _intMasterGradients?.Clear();
     }
 
     public void SyncTernaryFromMaster()
@@ -298,7 +350,20 @@ public sealed class BitLinear : Module
         return ProjectIntMastersToFloat();
     }
 
-    public float[]? ExportMasterGradients() => _masterGradients is null ? null : [.. _masterGradients];
+    public float[]? ExportMasterGradients()
+    {
+        if (_intMasterGradients is null)
+        {
+            return null;
+        }
+
+        var buffer = new float[_totalWeights];
+        for (var i = 0; i < _totalWeights; i++)
+        {
+            buffer[i] = _intMasterGradients.ToFloat(i);
+        }
+        return buffer;
+    }
 
     public void ImportMasterWeights(float[] weights)
     {
@@ -317,7 +382,7 @@ public sealed class BitLinear : Module
             _intMasterWeights = new IntegerMasterWeightLayer(_scaleProfile);
         }
 
-        _masterGradients ??= new float[weights.Length];
+        _intMasterGradients ??= new IntegerMasterWeightLayer(BuildDefaultGradientScaleProfile());
         _intMasterWeights.InitializeFromFloats(weights);
     }
 

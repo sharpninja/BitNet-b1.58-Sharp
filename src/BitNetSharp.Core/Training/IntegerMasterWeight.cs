@@ -131,4 +131,17 @@ public sealed class IntegerMasterWeightLayer
     }
 
     public void ResetCarryCount() => CarryCount = 0;
+
+    /// <summary>
+    /// Zeroes bucket and delta for every index, and resets the carry counter.
+    /// Used by gradient-accumulator callers between optimiser steps so the
+    /// same IntegerMasterWeightLayer can serve as a zero-float gradient buffer
+    /// that still accumulates sub-Epsilon contributions across rows.
+    /// </summary>
+    public void Clear()
+    {
+        Array.Clear(_buckets);
+        Array.Clear(_deltas);
+        CarryCount = 0;
+    }
 }
