@@ -28,10 +28,19 @@ public sealed class RotaryPositionEmbedding
 
     public int HeadDimension { get; }
 
-    public void ApplyInPlace(float[,] tensor, int headCount)
+    public void ApplyInPlace(float[,] tensor, int headCount) => ApplyInPlace(tensor, headCount, positionOffset: 0);
+
+    /// <summary>
+    /// Apply RoPE in-place treating row <c>r</c> as sequence position
+    /// <c>positionOffset + r</c>. Used at decode time so the single new row is
+    /// rotated by its true absolute position without rebuilding the sin/cos
+    /// table for every prior position.
+    /// </summary>
+    public void ApplyInPlace(float[,] tensor, int headCount, int positionOffset)
     {
         ArgumentNullException.ThrowIfNull(tensor);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(headCount);
+        ArgumentOutOfRangeException.ThrowIfNegative(positionOffset);
 
         if (tensor.GetLength(1) != headCount * HeadDimension)
         {
@@ -41,36 +50,24 @@ public sealed class RotaryPositionEmbedding
         var sequenceLength = tensor.GetLength(0);
         var halfDimension = HeadDimension / 2;
 
-        // Precompute sin and cos tables for all positions and dimension pairs.
-        var cosTable = new float[sequenceLength, halfDimension];
-        var sinTable = new float[sequenceLength, halfDimension];
-
-        for (var position = 0; position < sequenceLength; position++)
+        for (var row = 0; row < sequenceLength; row++)
         {
-            for (var pairIndex = 0; pairIndex < halfDimension; pairIndex++)
-            {
-                var angle = position * _inverseFrequencies[pairIndex];
-                cosTable[position, pairIndex] = (float)Math.Cos(angle);
-                sinTable[position, pairIndex] = (float)Math.Sin(angle);
-            }
-        }
-
-        for (var position = 0; position < sequenceLength; position++)
-        {
+            var absolutePosition = positionOffset + row;
             for (var head = 0; head < headCount; head++)
             {
                 var headOffset = head * HeadDimension;
                 for (var pairIndex = 0; pairIndex < halfDimension; pairIndex++)
                 {
                     var dimension = pairIndex * 2;
-                    var cos = cosTable[position, pairIndex];
-                    var sin = sinTable[position, pairIndex];
+                    var angle = absolutePosition * _inverseFrequencies[pairIndex];
+                    var cos = (float)Math.Cos(angle);
+                    var sin = (float)Math.Sin(angle);
 
-                    var evenValue = tensor[position, headOffset + dimension];
-                    var oddValue = tensor[position, headOffset + dimension + 1];
+                    var evenValue = tensor[row, headOffset + dimension];
+                    var oddValue = tensor[row, headOffset + dimension + 1];
 
-                    tensor[position, headOffset + dimension] = evenValue * cos - oddValue * sin;
-                    tensor[position, headOffset + dimension + 1] = evenValue * sin + oddValue * cos;
+                    tensor[row, headOffset + dimension] = evenValue * cos - oddValue * sin;
+                    tensor[row, headOffset + dimension + 1] = evenValue * sin + oddValue * cos;
                 }
             }
         }

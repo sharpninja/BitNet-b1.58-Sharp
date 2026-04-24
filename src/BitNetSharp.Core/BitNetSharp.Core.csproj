@@ -29,6 +29,7 @@
     <PackageReference Include="System.Numerics.Tensors" Version="10.0.3" />
     <InternalsVisibleTo Include="BitNetSharp.Converter.Tests" />
     <InternalsVisibleTo Include="BitNetSharp.Tests" />
+    <InternalsVisibleTo Include="BitNetSharp.Benchmarks" />
   </ItemGroup>
 
   <ItemGroup Condition="Exists('Data/Models/bitnet-b1.58-default.gguf')">

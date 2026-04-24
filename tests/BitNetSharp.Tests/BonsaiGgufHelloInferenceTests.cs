@@ -2,6 +2,9 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using BitNetSharp.Core;
+using BitNetSharp.Core.Inference;
+using BitNetSharp.Core.Layers;
+using BitNetSharp.Core.Quantization;
 using BitNetSharp.Tests.Logging;
 using Microsoft.Extensions.Logging;
 using Xunit.Abstractions;
@@ -64,6 +67,62 @@ public sealed class BonsaiGgufHelloInferenceTests
             $"Inference completed in {inferSw.Elapsed.TotalSeconds:F1}s. tokens={result.Tokens.Count} response_chars={result.ResponseText.Length} response=\"{result.ResponseText}\"");
 
         Assert.True(result.Tokens.Count >= 1, "Expected at least one generated token for maxTokens=1.");
+    }
+
+    [Fact]
+    [Trait(TestCategories.Category, TestCategories.SlowLane)]
+    public void BonsaiGguf_ForwardInt32_MatchesForwardQuantized_OnRealWeights()
+    {
+        // X2: sanity-check that the integer BitLinear path (I5 ForwardInt32)
+        // produces bit-equal outputs to the float-dequant ForwardQuantized
+        // path when applied to the actual 8B-derived Bonsai weights. Samples
+        // a few BitLinears across the model so a regression in TritPacking
+        // or Int32ActivationBlock would surface without a full forward pass.
+        string? modelPath = ResolveBonsaiGgufPath();
+        if (modelPath is null)
+        {
+            _output.WriteLine($"Skipped: {BonsaiGgufRelativePath} not found.");
+            return;
+        }
+
+        using var loggerFactory = XUnitLoggerExtensions.CreateXUnitLoggerFactory(_output, LogLevel.Warning);
+        var model = BitNetPaperGguf.Load(
+            modelPath,
+            loggerFactory.CreateLogger<BitNetPaperModel>(),
+            loggerFactory,
+            VerbosityLevel.Quiet);
+
+        int lastLayer = model.Config.LayerCount - 1;
+        var sampled = new (string label, BitLinear layer)[]
+        {
+            ("layer0.attn_q", model.Transformer.Layers[0].Attention.QueryProjection),
+            ("layer0.ffn_gate", model.Transformer.Layers[0].FeedForward.GateProjection),
+            ($"layer{lastLayer}.attn_output", model.Transformer.Layers[lastLayer].Attention.OutputProjection),
+            ($"layer{lastLayer}.ffn_down", model.Transformer.Layers[lastLayer].FeedForward.DownProjection),
+        };
+
+        var rng = new Random(97);
+        foreach (var (label, layer) in sampled)
+        {
+            int inDim = layer.Config.InputDimension;
+            int outDim = layer.Config.OutputDimension;
+            var input = new float[1, inDim];
+            for (int c = 0; c < inDim; c++)
+            {
+                input[0, c] = ((float)rng.NextDouble() - 0.5f) * 2f;
+            }
+
+            var quant = QuantizedActivationBlock.FromFloat(input);
+            float[,] floatOut = layer.ForwardQuantized(quant);
+            Int32ActivationBlock intBlock = layer.ForwardInt32(quant);
+            float[,] intAsFloat = intBlock.ToFloat();
+
+            for (int c = 0; c < outDim; c++)
+            {
+                Assert.InRange(intAsFloat[0, c] - floatOut[0, c], -1e-4f, 1e-4f);
+            }
+            _output.WriteLine($"{label}: {outDim} cols matched ForwardInt32==ForwardQuantized within 1e-4");
+        }
     }
 
     private static string? ResolveBonsaiGgufPath()

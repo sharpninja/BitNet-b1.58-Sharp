@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using BitNetSharp.Core;
 using BitNetSharp.Core.Quantization;
 
@@ -39,6 +40,21 @@ public sealed class BitNetHostedAgentModel(BitNetPaperModel model) : IHostedAgen
         cancellationToken.ThrowIfCancellationRequested();
         var result = Model.GenerateResponse(prompt, maxOutputTokens);
         return Task.FromResult(new HostedAgentModelResponse(result.ResponseText, result.Diagnostics));
+    }
+
+    public async IAsyncEnumerable<string> StreamResponseAsync(
+        string prompt,
+        int? maxOutputTokens = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(prompt);
+        await foreach (var token in Model.StreamGenerateAsync(prompt, maxOutputTokens, cancellationToken).ConfigureAwait(false))
+        {
+            if (!string.IsNullOrEmpty(token.TokenText))
+            {
+                yield return token.TokenText;
+            }
+        }
     }
 
     public TernaryWeightStats GetTernaryWeightStats() => Model.GetTernaryWeightStats();

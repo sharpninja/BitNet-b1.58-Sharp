@@ -35,26 +35,44 @@ internal static class OllamaChatEndpoints
             string prompt = ChatPromptAssembler.Assemble(entry.Model.SystemPrompt, request.Messages);
 
             int? maxOutputTokens = TryReadMaxOutputTokens(request.Options);
-            var response = await entry.Model.GetResponseAsync(prompt, maxOutputTokens, http.RequestAborted).ConfigureAwait(false);
 
             if (!stream)
             {
-                return Results.Json(BuildTerminalChat(entry.Card.Name, response.Text, start, prompt, response.Text), ServeJson.Options);
+                var sb = new System.Text.StringBuilder();
+                await foreach (var piece in entry.Model.StreamResponseAsync(prompt, maxOutputTokens, http.RequestAborted).ConfigureAwait(false))
+                {
+                    sb.Append(piece);
+                }
+                var fullText = sb.ToString();
+                return Results.Json(BuildTerminalChat(entry.Card.Name, fullText, start, prompt, fullText), ServeJson.Options);
             }
 
-            return Results.Stream(async (stream) =>
+            return Results.Stream(async (outputStream) =>
             {
-                var writer = new OllamaStreamWriter(stream);
-                if (!string.IsNullOrEmpty(response.Text))
+                var writer = new OllamaStreamWriter(outputStream);
+                var accumulated = new System.Text.StringBuilder();
+                try
                 {
-                    var chunk = new OllamaChatResponseChunk(
-                        Model: entry.Card.Name,
-                        CreatedAt: ServeTimings.UtcNow(),
-                        Message: new OllamaChatMessage(Role: "assistant", Content: response.Text),
-                        Done: false);
-                    await writer.WriteAsync(chunk, http.RequestAborted).ConfigureAwait(false);
+                    await foreach (var piece in entry.Model.StreamResponseAsync(prompt, maxOutputTokens, http.RequestAborted).ConfigureAwait(false))
+                    {
+                        if (string.IsNullOrEmpty(piece))
+                        {
+                            continue;
+                        }
+                        accumulated.Append(piece);
+                        var chunk = new OllamaChatResponseChunk(
+                            Model: entry.Card.Name,
+                            CreatedAt: ServeTimings.UtcNow(),
+                            Message: new OllamaChatMessage(Role: "assistant", Content: piece),
+                            Done: false);
+                        await writer.WriteAsync(chunk, http.RequestAborted).ConfigureAwait(false);
+                    }
                 }
-                await writer.WriteAsync(BuildTerminalChat(entry.Card.Name, string.Empty, start, prompt, response.Text), http.RequestAborted).ConfigureAwait(false);
+                catch (OperationCanceledException) when (http.RequestAborted.IsCancellationRequested)
+                {
+                    return;
+                }
+                await writer.WriteAsync(BuildTerminalChat(entry.Card.Name, string.Empty, start, prompt, accumulated.ToString()), http.RequestAborted).ConfigureAwait(false);
             }, contentType: "application/x-ndjson");
         });
     }

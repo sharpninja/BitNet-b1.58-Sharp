@@ -1,3 +1,4 @@
+using BitNetSharp.Core.Inference;
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Utils;
 
@@ -49,6 +50,20 @@ public sealed class BitNetLayer : Module
         var residual = TensorMath.Add(input, attentionOutput);
         _cachedResidual1 = (float[,])residual.Clone();
 
+        var feedForwardOutput = FeedForward.Forward(PreFeedForwardNorm.Forward(residual));
+        return TensorMath.Add(residual, feedForwardOutput);
+    }
+
+    public float[,] Forward(float[,] input, LayerKvCache cache, int positionOffset)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(cache);
+
+        var normed = PreAttentionNorm.Forward(input);
+        var attentionOutput = input.GetLength(0) == 1
+            ? Attention.ForwardFlashDecode(normed, cache, positionOffset)
+            : Attention.Forward(normed, cache, positionOffset);
+        var residual = TensorMath.Add(input, attentionOutput);
         var feedForwardOutput = FeedForward.Forward(PreFeedForwardNorm.Forward(residual));
         return TensorMath.Add(residual, feedForwardOutput);
     }

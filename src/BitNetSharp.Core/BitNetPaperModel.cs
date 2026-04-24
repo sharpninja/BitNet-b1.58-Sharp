@@ -1,6 +1,11 @@
+using System.Buffers;
+using System.Runtime.CompilerServices;
+using System.Threading.Channels;
 using BitNetSharp.Core.Bucketing;
+using BitNetSharp.Core.Inference;
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Quantization;
+using BitNetSharp.Core.Sampling;
 using BitNetSharp.Core.Training;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Logging.Abstractions;
@@ -251,11 +256,19 @@ public sealed class BitNetPaperModel
     }
 
     public BitNetGenerationResult GenerateResponse(string prompt, int? maxTokens = null)
+        => GenerateResponse(prompt, maxTokens, emitToken: null, cancellationToken: default);
+
+    public BitNetGenerationResult GenerateResponse(
+        string prompt,
+        int? maxTokens,
+        Action<int>? emitToken,
+        CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(prompt);
         var totalSw = System.Diagnostics.Stopwatch.StartNew();
         lock (_gate)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             _logger.LogInformation(
                 "GenerateResponse start prompt_chars={PromptChars} max_tokens={MaxTokens} default_max={DefaultMax}",
                 prompt.Length,
@@ -302,10 +315,21 @@ public sealed class BitNetPaperModel
             if (_memorizedResponses.TryGetValue(promptKey, out var memorizedResponse))
             {
                 _logger.LogInformation("Memorized response hit prompt_key_hash={PromptKeyHash}", promptKey.GetHashCode());
-                generatedTokenIds.AddRange(
-                    memorizedResponse
-                        .Take(Math.Max(1, maxTokens.GetValueOrDefault(Options.MaxResponseTokens)))
-                        .Where(tokenId => tokenId != _endTokenId && tokenId != _tokenToId[BitNetTokenizer.UnknownToken]));
+                var memorizedLimit = Math.Max(1, maxTokens.GetValueOrDefault(Options.MaxResponseTokens));
+                foreach (var tokenId in memorizedResponse)
+                {
+                    if (generatedTokenIds.Count >= memorizedLimit)
+                    {
+                        break;
+                    }
+                    if (tokenId == _endTokenId || tokenId == _tokenToId[BitNetTokenizer.UnknownToken])
+                    {
+                        continue;
+                    }
+                    cancellationToken.ThrowIfCancellationRequested();
+                    generatedTokenIds.Add(tokenId);
+                    emitToken?.Invoke(tokenId);
+                }
 
                 if (Options.Verbosity == VerbosityLevel.Verbose)
                 {
@@ -317,19 +341,27 @@ public sealed class BitNetPaperModel
                 var maxGeneratedTokens = Math.Max(1, maxTokens.GetValueOrDefault(Options.MaxResponseTokens));
                 _logger.LogInformation("Autoregressive loop start max_generated_tokens={MaxGeneratedTokens}", maxGeneratedTokens);
                 var exitReason = "cap";
+
+                var cache = Transformer.CreateCache(Config.MaxSequenceLength);
+                var prefillSw = System.Diagnostics.Stopwatch.StartNew();
+                var logits = Transformer.Forward(contextTokenIds, cache);
+                prefillSw.Stop();
+                _logger.LogInformation(
+                    "Prefill prompt_tokens={PromptTokens} prefill_ms={PrefillMs:F1}",
+                    contextTokenIds.Count,
+                    prefillSw.Elapsed.TotalMilliseconds);
+
                 for (var step = 0; step < maxGeneratedTokens; step++)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var stepSw = System.Diagnostics.Stopwatch.StartNew();
-                    var logits = Transformer.Forward(contextTokenIds);
-                    var forwardMs = stepSw.Elapsed.TotalMilliseconds;
-                    stepSw.Restart();
-                    var nextToken = SelectNextToken(logits);
+                    var nextToken = SelectNextToken(logits, contextTokenIds);
                     var selectMs = stepSw.Elapsed.TotalMilliseconds;
                     _logger.LogInformation(
                         "Step[{Step}] seq_len={SeqLen} forward_ms={ForwardMs:F1} select_ms={SelectMs:F1} token_id={TokenId} logit={Logit:F3}",
                         step,
                         contextTokenIds.Count,
-                        forwardMs,
+                        0d,
                         selectMs,
                         nextToken.TokenId,
                         nextToken.Logit);
@@ -342,26 +374,37 @@ public sealed class BitNetPaperModel
 
                     generatedTokenIds.Add(nextToken.TokenId);
                     contextTokenIds.Add(nextToken.TokenId);
-                    if (contextTokenIds.Count > Config.MaxSequenceLength)
-                    {
-                        contextTokenIds.RemoveAt(0);
-                    }
+                    emitToken?.Invoke(nextToken.TokenId);
 
                     if (Options.Verbosity == VerbosityLevel.Verbose)
                     {
                         diagnostics.Add($"Prediction: token={_idToToken[nextToken.TokenId]}, logit={nextToken.Logit:0.###}");
                     }
 
+                    if (contextTokenIds.Count >= Config.MaxSequenceLength)
+                    {
+                        exitReason = "context-full";
+                        _logger.LogInformation("Autoregressive loop exit reason={ExitReason} at step={Step}", exitReason, step);
+                        break;
+                    }
+
+                    // Decode step: feed just the newly selected token through the cache.
+                    var decodeSw = System.Diagnostics.Stopwatch.StartNew();
+                    logits = Transformer.Forward(new[] { nextToken.TokenId }, cache);
+                    _logger.LogDebug(
+                        "Step[{Step}] decode past_length={PastLength} decode_ms={DecodeMs:F1}",
+                        step,
+                        cache.PastLength,
+                        decodeSw.Elapsed.TotalMilliseconds);
+
                     // Chain-bucket speculative decoding: after each normally generated token,
                     // check if the current context tail matches a known chain prefix.
                     // If so, speculatively accept chain tokens that the model also predicts,
-                    // updating the KV context once per accepted chain rather than per token.
+                    // feeding each accepted token through the cache (one forward per accept).
                     if (Options.EnableChainBuckets && BucketTable is not null
                         && BucketTable.TryLookupPrefix(contextTokenIds, out var chain)
                         && chain is not null)
                     {
-                        // Determine how many tokens at the end of the current context
-                        // actually match the beginning of this chain (up to 3 tokens).
                         var maxPrefix = Math.Min(3, Math.Min(contextTokenIds.Count, chain.TokenIds.Length));
                         var matchedPrefixLen = 0;
                         for (var k = maxPrefix; k >= 1; k--)
@@ -384,13 +427,16 @@ public sealed class BitNetPaperModel
                             }
                         }
 
-                        // If nothing actually matches, skip speculative decoding for this step.
                         if (matchedPrefixLen > 0)
                         {
                             attemptedChains++;
                             _recallHeatMap?.RecordChainAttempt(chain.ChainId, chain.TokenIds, matchedPrefixLen);
                             var acceptedTokensForChain = 0;
-                            for (var ci = matchedPrefixLen; ci < chain.TokenIds.Length && step < maxGeneratedTokens - 1; ci++)
+                            for (var ci = matchedPrefixLen;
+                                 ci < chain.TokenIds.Length
+                                 && step < maxGeneratedTokens - 1
+                                 && contextTokenIds.Count < Config.MaxSequenceLength;
+                                 ci++)
                             {
                                 var speculativeId = chain.TokenIds[ci];
                                 if (speculativeId == _endTokenId || speculativeId == _tokenToId[BitNetTokenizer.UnknownToken])
@@ -398,11 +444,9 @@ public sealed class BitNetPaperModel
                                     break;
                                 }
 
-                                // Verification: confirm the model also predicts this token from current context.
-                                var verificationLogits = Transformer.Forward(contextTokenIds);
                                 attemptedChainTokens++;
-                                var verifyToken = SelectNextToken(verificationLogits);
-                                var verifyProbability = GetTargetProbability(verificationLogits, speculativeId);
+                                var verifyToken = SelectNextToken(logits, contextTokenIds);
+                                var verifyProbability = GetTargetProbability(logits, speculativeId);
                                 if (verifyToken.TokenId != speculativeId || verifyProbability < Options.ChainBucketAcceptanceThreshold)
                                 {
                                     break;
@@ -410,10 +454,7 @@ public sealed class BitNetPaperModel
 
                                 generatedTokenIds.Add(speculativeId);
                                 contextTokenIds.Add(speculativeId);
-                                if (contextTokenIds.Count > Config.MaxSequenceLength)
-                                {
-                                    contextTokenIds.RemoveAt(0);
-                                }
+                                emitToken?.Invoke(speculativeId);
 
                                 step++;
                                 acceptedTokensForChain++;
@@ -425,6 +466,8 @@ public sealed class BitNetPaperModel
                                     diagnostics.Add(
                                         $"Speculation accepted: token={_idToToken[speculativeId]}, chain={chain.ChainId}, probability={verifyProbability:0.###}");
                                 }
+
+                                logits = Transformer.Forward(new[] { speculativeId }, cache);
                             }
 
                             if (acceptedTokensForChain > 0)
@@ -491,6 +534,54 @@ public sealed class BitNetPaperModel
                 responseText.Length);
             return new BitNetGenerationResult(responseText, generatedTokens, diagnostics, chainBucketMetrics);
         }
+    }
+
+    /// <summary>
+    /// Streams generated tokens one at a time. Producer runs the existing
+    /// synchronous <see cref="GenerateResponse(string, int?, Action{int}?, CancellationToken)"/>
+    /// loop on a worker task and writes each token to a channel; the caller
+    /// consumes via <c>await foreach</c> and receives the detokenized piece.
+    /// </summary>
+    public async IAsyncEnumerable<GeneratedToken> StreamGenerateAsync(
+        string prompt,
+        int? maxTokens = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(prompt);
+        var channel = Channel.CreateUnbounded<GeneratedToken>(new UnboundedChannelOptions
+        {
+            SingleReader = true,
+            SingleWriter = true
+        });
+        var step = 0;
+        var pendingPrefix = new List<int>();
+        var producer = Task.Run(() =>
+        {
+            try
+            {
+                GenerateResponse(prompt, maxTokens, tokenId =>
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var localStep = step++;
+                    pendingPrefix.Add(tokenId);
+                    var joined = _tokenizer.Detokenize(pendingPrefix.Select(id => _idToToken[id]));
+                    var priorLength = localStep == 0 ? 0 : _tokenizer.Detokenize(pendingPrefix.Take(pendingPrefix.Count - 1).Select(id => _idToToken[id])).Length;
+                    var piece = priorLength <= joined.Length ? joined[priorLength..] : string.Empty;
+                    channel.Writer.TryWrite(new GeneratedToken(tokenId, piece, localStep));
+                }, cancellationToken);
+                channel.Writer.TryComplete();
+            }
+            catch (Exception ex)
+            {
+                channel.Writer.TryComplete(ex);
+            }
+        }, cancellationToken);
+
+        await foreach (var token in channel.Reader.ReadAllAsync(cancellationToken).ConfigureAwait(false))
+        {
+            yield return token;
+        }
+        await producer.ConfigureAwait(false);
     }
 
     public double CalculatePerplexity(IEnumerable<string> validationSamples)
@@ -900,28 +991,67 @@ public sealed class BitNetPaperModel
             .Select(id => (_idToToken[id], logits[lastRow, id]));
     }
 
-    private (int TokenId, float Logit) SelectNextToken(float[,] logits)
+    private (int TokenId, float Logit) SelectNextToken(float[,] logits, IReadOnlyList<int>? contextTokenIds = null)
     {
         var lastRow = logits.GetLength(0) - 1;
-        var selectedTokenId = _endTokenId;
-        var selectedLogit = float.NegativeInfinity;
+        var vocabSize = logits.GetLength(1);
 
-        for (var tokenId = 0; tokenId < logits.GetLength(1); tokenId++)
+        var penalty = Options.RepetitionPenalty;
+        var window = Options.RepetitionPenaltyWindow;
+        var penalized = ArrayPool<float>.Shared.Rent(vocabSize);
+        try
         {
-            if (tokenId == _beginTokenId)
+            for (var tokenId = 0; tokenId < vocabSize; tokenId++)
             {
-                continue;
+                penalized[tokenId] = logits[lastRow, tokenId];
             }
 
-            var logit = logits[lastRow, tokenId];
-            if (logit > selectedLogit)
+            if (penalty != 1f && window > 0 && contextTokenIds is { Count: > 0 })
             {
-                selectedTokenId = tokenId;
-                selectedLogit = logit;
+                var windowStart = Math.Max(0, contextTokenIds.Count - window);
+                var windowLength = contextTokenIds.Count - windowStart;
+                var contextSlice = ArrayPool<int>.Shared.Rent(windowLength);
+                try
+                {
+                    for (var i = 0; i < windowLength; i++)
+                    {
+                        contextSlice[i] = contextTokenIds[windowStart + i];
+                    }
+
+                    SamplingUtilities.ApplyRepetitionPenalty(
+                        penalized.AsSpan(0, vocabSize),
+                        contextSlice.AsSpan(0, windowLength),
+                        penalty);
+                }
+                finally
+                {
+                    ArrayPool<int>.Shared.Return(contextSlice);
+                }
             }
+
+            var selectedTokenId = _endTokenId;
+            var selectedLogit = float.NegativeInfinity;
+            for (var tokenId = 0; tokenId < vocabSize; tokenId++)
+            {
+                if (tokenId == _beginTokenId)
+                {
+                    continue;
+                }
+
+                var logit = penalized[tokenId];
+                if (logit > selectedLogit)
+                {
+                    selectedTokenId = tokenId;
+                    selectedLogit = logit;
+                }
+            }
+
+            return (selectedTokenId, selectedLogit);
         }
-
-        return (selectedTokenId, selectedLogit);
+        finally
+        {
+            ArrayPool<float>.Shared.Return(penalized);
+        }
     }
 
     private static BitNetPaperModel PrimeDefaultExamples(BitNetPaperModel model)
@@ -1010,3 +1140,9 @@ public sealed class BitNetPaperModel
 
     private int GetId(string token) => _tokenToId.TryGetValue(token, out var id) ? id : _tokenToId[BitNetTokenizer.UnknownToken];
 }
+
+/// <summary>
+/// Single token emission from <see cref="BitNetPaperModel.StreamGenerateAsync"/>.
+/// TokenText is the detokenized incremental slice (what the caller should append).
+/// </summary>
+public readonly record struct GeneratedToken(int TokenId, string TokenText, int Step);

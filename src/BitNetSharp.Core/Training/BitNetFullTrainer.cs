@@ -269,7 +269,14 @@ public sealed class BitNetFullTrainer
         // Backward pass drives gradients all the way to the token embeddings.
         _transformer.Backward(gradLogits);
 
-        // Optimizer step for every BitLinear layer.
+        // Optimizer step for every BitLinear layer. The AdamW step runs in
+        // float against the current Export snapshot, but the resulting update
+        // is pushed back as a per-index delta (updated - previous) through
+        // ApplyMasterWeightDeltas so the integer bucket+delta state retains
+        // sub-Epsilon gradient accumulation across steps. The previous
+        // ImportMasterWeights round-trip re-quantised the entire tensor to
+        // the Epsilon grid every step, which drops any gradient smaller than
+        // Epsilon even when consistently applied.
         foreach (var (layer, state) in _layerStates)
         {
             var masterWeights = layer.ExportMasterWeights();
@@ -286,7 +293,12 @@ public sealed class BitNetFullTrainer
             _optimizer.Step(weights2D, gradients2D, state);
 
             var updatedWeights = Flatten(weights2D);
-            layer.ImportMasterWeights(updatedWeights);
+            var deltas = new float[updatedWeights.Length];
+            for (var i = 0; i < deltas.Length; i++)
+            {
+                deltas[i] = updatedWeights[i] - masterWeights[i];
+            }
+            layer.ApplyMasterWeightDeltas(deltas);
             layer.SyncTernaryFromMaster();
         }
 

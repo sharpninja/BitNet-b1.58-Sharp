@@ -41,8 +41,9 @@ public sealed class SwiGLUFeedForward : Module
     {
         ArgumentNullException.ThrowIfNull(input);
 
-        var gated = GateProjection.Forward(input);
-        var up = UpProjection.Forward(input);
+        var sharedQuant = QuantizedActivationBlock.FromFloat(input);
+        var gated = GateProjection.ForwardQuantized(sharedQuant, input);
+        var up = UpProjection.ForwardQuantized(sharedQuant, input);
         var activated = new float[gated.GetLength(0), gated.GetLength(1)];
 
         for (var row = 0; row < gated.GetLength(0); row++)

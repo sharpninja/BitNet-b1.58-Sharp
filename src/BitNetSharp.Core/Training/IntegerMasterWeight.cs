@@ -38,9 +38,54 @@ public sealed class IntegerMasterWeightLayer
         for (var i = 0; i < _length && i < ternaryWeights.Length; i++)
         {
             var intValue = ternaryWeights[i] * _ternaryThreshold;
-            _buckets[i] = (short)(intValue >> 16);
-            _deltas[i] = (short)(intValue & 0xFFFF);
+            SplitCanonical(intValue, out var bucket, out var delta);
+            _buckets[i] = bucket;
+            _deltas[i] = delta;
         }
+    }
+
+    /// <summary>
+    /// Initialises the bucket/delta state from a float master-weight snapshot.
+    /// Each float is quantised to the nearest int step of size <see cref="_epsilon"/>
+    /// and split into bucket (upper 16 bits) + delta (lower 16 bits).
+    /// Used by BitLinear.InitializeMasterWeights and ImportMasterWeights to
+    /// migrate a float checkpoint into integer master state.
+    /// </summary>
+    public void InitializeFromFloats(float[] weights)
+    {
+        ArgumentNullException.ThrowIfNull(weights);
+
+        for (var i = 0; i < _length && i < weights.Length; i++)
+        {
+            var intValue = (int)MathF.Round(weights[i] * _epsilonInverse);
+            SplitCanonical(intValue, out var bucket, out var delta);
+            _buckets[i] = bucket;
+            _deltas[i] = delta;
+        }
+    }
+
+    /// <summary>
+    /// Splits an int32 into (bucket, delta) such that
+    /// bucket * 65536 + delta == intValue AND delta is in signed-short range.
+    /// The naive (int >> 16, int &amp; 0xFFFF) split corrupts values whose low
+    /// 16 bits interpret as a negative short under the 65536 factor: e.g.
+    /// 50000 -&gt; (0, -15536) -&gt; 0*65536 + (-15536) = -15536 (wrong).
+    /// Canonicalising pushes the 65536 overflow into the bucket.
+    /// </summary>
+    private static void SplitCanonical(int intValue, out short bucket, out short delta)
+    {
+        var loUnsigned = intValue & 0xFFFF;
+        var hi = intValue >> 16;
+        if (loUnsigned > short.MaxValue)
+        {
+            delta = (short)(loUnsigned - 65536);
+            hi += 1;
+        }
+        else
+        {
+            delta = (short)loUnsigned;
+        }
+        bucket = (short)hi;
     }
 
     public void ApplyDelta(int index, float gradient)
@@ -86,4 +131,17 @@ public sealed class IntegerMasterWeightLayer
     }
 
     public void ResetCarryCount() => CarryCount = 0;
+
+    /// <summary>
+    /// Zeroes bucket and delta for every index, and resets the carry counter.
+    /// Used by gradient-accumulator callers between optimiser steps so the
+    /// same IntegerMasterWeightLayer can serve as a zero-float gradient buffer
+    /// that still accumulates sub-Epsilon contributions across rows.
+    /// </summary>
+    public void Clear()
+    {
+        Array.Clear(_buckets);
+        Array.Clear(_deltas);
+        CarryCount = 0;
+    }
 }

@@ -1,3 +1,4 @@
+using BitNetSharp.Core.Inference;
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Quantization;
 using BitNetSharp.Core.Utils;
@@ -83,9 +84,10 @@ public sealed class GroupedQueryAttention : AttentionModule
                 $"Expected input dimension {Config.Dimension}, received {input.GetLength(1)}.", nameof(input));
         }
 
-        var queries = QueryProjection.Forward(input);
-        var keys = KeyProjection.Forward(input);
-        var values = ValueProjection.Forward(input);
+        var sharedQuant = QuantizedActivationBlock.FromFloat(input);
+        var queries = QueryProjection.ForwardQuantized(sharedQuant, input);
+        var keys = KeyProjection.ForwardQuantized(sharedQuant, input);
+        var values = ValueProjection.ForwardQuantized(sharedQuant, input);
 
         _rotaryPositionEmbedding.ApplyInPlace(queries, _headCount);
         _rotaryPositionEmbedding.ApplyInPlace(keys, _kvHeadCount);
@@ -148,6 +150,173 @@ public sealed class GroupedQueryAttention : AttentionModule
         _cachedKeys = keys;
         _cachedValues = values;
         _cachedAttentionWeights = attentionWeights;
+
+        return OutputProjection.Forward(attended);
+    }
+
+    public override float[,] Forward(float[,] input, LayerKvCache cache, int positionOffset)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(cache);
+        ArgumentOutOfRangeException.ThrowIfNegative(positionOffset);
+
+        if (input.GetLength(1) != Config.Dimension)
+        {
+            throw new ArgumentException(
+                $"Expected input dimension {Config.Dimension}, received {input.GetLength(1)}.", nameof(input));
+        }
+
+        var newRows = input.GetLength(0);
+        var kvDim = _kvHeadCount * _headDim;
+
+        if (cache.KvDimension != kvDim)
+        {
+            throw new ArgumentException(
+                $"Cache kv dimension {cache.KvDimension} does not match expected {kvDim}.", nameof(cache));
+        }
+
+        var totalLength = positionOffset + newRows;
+        if (totalLength > cache.Capacity)
+        {
+            throw new ArgumentException(
+                $"Cache capacity {cache.Capacity} too small for total length {totalLength}.", nameof(cache));
+        }
+
+        var sharedQuant = QuantizedActivationBlock.FromFloat(input);
+        var queries = QueryProjection.ForwardQuantized(sharedQuant);
+        var newKeys = KeyProjection.ForwardQuantized(sharedQuant);
+        var newValues = ValueProjection.ForwardQuantized(sharedQuant);
+
+        _rotaryPositionEmbedding.ApplyInPlace(queries, _headCount, positionOffset);
+        _rotaryPositionEmbedding.ApplyInPlace(newKeys, _kvHeadCount, positionOffset);
+
+        for (var row = 0; row < newRows; row++)
+        {
+            for (var col = 0; col < kvDim; col++)
+            {
+                cache.K[positionOffset + row, col] = newKeys[row, col];
+                cache.V[positionOffset + row, col] = newValues[row, col];
+            }
+        }
+
+        var attended = new float[newRows, Config.Dimension];
+        var attendedFlat = AttentionMath.AsFlatSpan(attended);
+        var queriesFlat = AttentionMath.AsFlatSpan(queries);
+        var cacheKFlat = AttentionMath.AsFlatSpan(cache.K);
+        var cacheVFlat = AttentionMath.AsFlatSpan(cache.V);
+        var dim = Config.Dimension;
+
+        for (var head = 0; head < _headCount; head++)
+        {
+            var kvHead = head / _groupSize;
+            var qOffset = head * _headDim;
+            var kvOffset = kvHead * _headDim;
+
+            for (var targetRow = 0; targetRow < newRows; targetRow++)
+            {
+                var absoluteTarget = positionOffset + targetRow;
+                var scoreCount = absoluteTarget + 1;
+                var scores = new float[scoreCount];
+                var maxScore = float.NegativeInfinity;
+                var qSlice = queriesFlat.Slice(targetRow * dim + qOffset, _headDim);
+
+                for (var source = 0; source < scoreCount; source++)
+                {
+                    var kSlice = cacheKFlat.Slice(source * kvDim + kvOffset, _headDim);
+                    var score = AttentionMath.Dot(qSlice, kSlice, _headDim) * _attentionScale;
+                    scores[source] = score;
+                    if (score > maxScore)
+                    {
+                        maxScore = score;
+                    }
+                }
+
+                var partition = 0f;
+                for (var source = 0; source < scoreCount; source++)
+                {
+                    scores[source] = MathF.Exp(scores[source] - maxScore);
+                    partition += scores[source];
+                }
+
+                if (partition <= 0f)
+                {
+                    continue;
+                }
+
+                var attendedSlice = attendedFlat.Slice(targetRow * dim + qOffset, _headDim);
+                var invPartition = 1f / partition;
+                for (var source = 0; source < scoreCount; source++)
+                {
+                    var weight = scores[source] * invPartition;
+                    var vSlice = cacheVFlat.Slice(source * kvDim + kvOffset, _headDim);
+                    AttentionMath.AccumulateWeighted(attendedSlice, vSlice, weight, _headDim);
+                }
+            }
+        }
+
+        return OutputProjection.Forward(attended);
+    }
+
+    public override float[,] ForwardFlashDecode(float[,] input, LayerKvCache cache, int positionOffset)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(cache);
+        ArgumentOutOfRangeException.ThrowIfNegative(positionOffset);
+
+        if (input.GetLength(0) != 1)
+        {
+            throw new ArgumentException("Flash decode expects exactly one query row.", nameof(input));
+        }
+        if (input.GetLength(1) != Config.Dimension)
+        {
+            throw new ArgumentException(
+                $"Expected input dimension {Config.Dimension}, received {input.GetLength(1)}.", nameof(input));
+        }
+
+        var kvDim = _kvHeadCount * _headDim;
+        if (cache.KvDimension != kvDim)
+        {
+            throw new ArgumentException(
+                $"Cache kv dimension {cache.KvDimension} does not match expected {kvDim}.", nameof(cache));
+        }
+
+        var totalLength = positionOffset + 1;
+        if (totalLength > cache.Capacity)
+        {
+            throw new ArgumentException(
+                $"Cache capacity {cache.Capacity} too small for total length {totalLength}.", nameof(cache));
+        }
+
+        var sharedQuant = QuantizedActivationBlock.FromFloat(input);
+        var queries = QueryProjection.ForwardQuantized(sharedQuant);
+        var newKeys = KeyProjection.ForwardQuantized(sharedQuant);
+        var newValues = ValueProjection.ForwardQuantized(sharedQuant);
+
+        _rotaryPositionEmbedding.ApplyInPlace(queries, _headCount, positionOffset);
+        _rotaryPositionEmbedding.ApplyInPlace(newKeys, _kvHeadCount, positionOffset);
+
+        for (var col = 0; col < kvDim; col++)
+        {
+            cache.K[positionOffset, col] = newKeys[0, col];
+            cache.V[positionOffset, col] = newValues[0, col];
+        }
+
+        var attended = new float[1, Config.Dimension];
+        var attendedFlat = AttentionMath.AsFlatSpan(attended);
+        var queriesFlat = AttentionMath.AsFlatSpan(queries);
+        var cacheKFlat = AttentionMath.AsFlatSpan(cache.K);
+        var cacheVFlat = AttentionMath.AsFlatSpan(cache.V);
+
+        FlashAttention.ForwardDecode(
+            queriesFlat,
+            cacheKFlat,
+            cacheVFlat,
+            attendedFlat,
+            _headCount,
+            _kvHeadCount,
+            _headDim,
+            totalLength,
+            _attentionScale);
 
         return OutputProjection.Forward(attended);
     }

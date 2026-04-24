@@ -1,5 +1,7 @@
 using System.Buffers;
+using BitNetSharp.Core.Inference;
 using BitNetSharp.Core.Quantization;
+using BitNetSharp.Core.Training;
 
 namespace BitNetSharp.Core.Layers;
 
@@ -17,10 +19,29 @@ public sealed class BitLinear : Module
     // Row permutation for cache-aware token-row layout (null = identity)
     private int[]? _rowPermutation;
 
-    // Training state (null until InitializeMasterWeights is called)
-    private float[]? _masterWeights;
-    private float[]? _masterGradients;
+    // Training state (null until InitializeMasterWeights / ImportMasterWeights is called).
+    // Both master weights and per-step gradient accumulator live in integer
+    // bucket+delta accumulators (Epsilon-scaled); float Export/Import stay as
+    // a compat boundary so AdamW keeps running in float. Sub-Epsilon gradient
+    // contributions accumulate via the delta field instead of rounding to 0
+    // like a float[] accumulator used to.
+    private IntegerMasterWeightLayer? _intMasterWeights;
+    private IntegerMasterWeightLayer? _intMasterGradients;
+    private LayerScaleProfile? _scaleProfile;
     private float[,]? _cachedInput;
+
+    // Default epsilon for integer master-weight resolution when no calibration
+    // profile is supplied by the trainer. Small enough to resolve typical
+    // gradient magnitudes; T1 sets it here, T2 switches to calibrated profiles.
+    private const float DefaultMasterWeightEpsilon = 1e-5f;
+
+    // Gradient accumulator needs finer resolution than master weights: each
+    // ApplyDelta(grad * input[row,col]) rounds to int at this grid, and grad
+    // is the product of two already-small floats. At 1e-5 a per-row per-col
+    // contribution of 1e-6 rounds to 0 and vanishes; at 1e-8 it carries 100
+    // int units so contributions sum correctly across rows. Short-range at
+    // this epsilon still covers ~21.47 in fullValue, more than adequate.
+    private const float DefaultGradientEpsilon = 1e-8f;
 
     public BitLinear(BitLinearConfig config)
     {
@@ -47,6 +68,19 @@ public sealed class BitLinear : Module
     public long EstimateResidentParameterBytes() =>
         (long)_packedWeights.Length + (long)_simdPackedWeights.Length + sizeof(float);
 
+    /// <summary>
+    /// True when this layer participates in training (master weights were
+    /// initialised). Inference-only models skip the backward cache so callers
+    /// that share a pre-quantised block can safely bypass <see cref="Forward"/>.
+    /// </summary>
+    public bool IsTraining => _intMasterWeights is not null;
+
+    /// <summary>
+    /// Returns the <see cref="LayerScaleProfile"/> backing the integer master
+    /// weight accumulator, or null if training has not been initialised.
+    /// </summary>
+    public LayerScaleProfile? GetMasterWeightScaleProfile() => _scaleProfile;
+
     public override float[,] Forward(float[,] input)
     {
         ArgumentNullException.ThrowIfNull(input);
@@ -58,22 +92,38 @@ public sealed class BitLinear : Module
             throw new ArgumentException($"Expected input dimension {inputDim}, but received {input.GetLength(1)}.", nameof(input));
         }
 
-        if (_masterWeights is not null)
+        return ForwardQuantized(QuantizedActivationBlock.FromFloat(input), input);
+    }
+
+    /// <summary>
+    /// Fast path for callers that have already quantised the shared input
+    /// (attention Q/K/V sharing the pre-norm output, FFN Gate/Up sharing the
+    /// residual). Skips the per-row absmax scan, which is otherwise repeated
+    /// 3x per attention layer and 2x per FFN layer on the same activations.
+    /// Pass <paramref name="rawInputForBackward"/> when training so the
+    /// backward cache can be populated; pure inference callers pass null.
+    /// </summary>
+    public float[,] ForwardQuantized(QuantizedActivationBlock input, float[,]? rawInputForBackward = null)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+
+        var inputDim = Config.InputDimension;
+        if (input.Cols != inputDim)
         {
-            _cachedInput = (float[,])input.Clone();
+            throw new ArgumentException($"Expected input dimension {inputDim}, but received {input.Cols}.", nameof(input));
         }
 
-        var (quantizedInput, rowScales) = QuantizeActivations(input);
-        var rows = input.GetLength(0);
+        if (_intMasterWeights is not null && rawInputForBackward is not null)
+        {
+            _cachedInput = (float[,])rawInputForBackward.Clone();
+        }
+
+        var rows = input.Rows;
         var outDim = Config.OutputDimension;
         var output = new float[rows, outDim];
 
-        // SIMD hot path: outer loop over output columns; decode each
-        // 4-trit packed row to an sbyte trit buffer ONCE, then run
-        // Vector<sbyte> dot against each input row. Amortizes the
-        // 2-bit-signed decode cost across seq_len activations (big win
-        // at prefill, modest at single-token decode).
         var simdWeights = _simdPackedWeights.AsSpan();
+        var quantizedSpan = input.Quantized.AsSpan();
         var decodedBuffer = ArrayPool<sbyte>.Shared.Rent(inputDim);
         try
         {
@@ -86,9 +136,9 @@ public sealed class BitLinear : Module
 
                 for (var row = 0; row < rows; row++)
                 {
-                    var activationSpan = quantizedInput.AsSpan(row * inputDim, inputDim);
+                    var activationSpan = quantizedSpan.Slice(row * inputDim, inputDim);
                     var isum = TritPacking.TernaryDotSimdUnpacked(decodedSpan, activationSpan);
-                    output[row, outputColumn] = isum * Gamma * rowScales[row];
+                    output[row, outputColumn] = isum * Gamma * input.RowScales[row];
                 }
             }
         }
@@ -98,6 +148,58 @@ public sealed class BitLinear : Module
         }
 
         return output;
+    }
+
+    /// <summary>
+    /// Zero-float forward path: emits an Int32ActivationBlock where values are
+    /// the raw int ternary-dot accumulators and RowScales combine Gamma with
+    /// the activation row scale. Downstream integer kernels consume Values
+    /// directly; ToFloat() materialises the equivalent float[,] on demand.
+    /// </summary>
+    public Int32ActivationBlock ForwardInt32(QuantizedActivationBlock input)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+
+        var inputDim = Config.InputDimension;
+        if (input.Cols != inputDim)
+        {
+            throw new ArgumentException($"Expected input dimension {inputDim}, but received {input.Cols}.", nameof(input));
+        }
+
+        var rows = input.Rows;
+        var outDim = Config.OutputDimension;
+        var values = new int[rows, outDim];
+        var rowScales = new float[rows];
+        for (var row = 0; row < rows; row++)
+        {
+            rowScales[row] = Gamma * input.RowScales[row];
+        }
+
+        var simdWeights = _simdPackedWeights.AsSpan();
+        var quantizedSpan = input.Quantized.AsSpan();
+        var decodedBuffer = ArrayPool<sbyte>.Shared.Rent(inputDim);
+        try
+        {
+            var decodedSpan = decodedBuffer.AsSpan(0, inputDim);
+            for (var outputColumn = 0; outputColumn < outDim; outputColumn++)
+            {
+                var physicalRow = _rowPermutation is not null ? _rowPermutation[outputColumn] : outputColumn;
+                var simdRow = simdWeights.Slice(physicalRow * _simdPackedStride, _simdPackedStride);
+                TritPacking.SimdUnpackLayer(simdRow, decodedSpan, inputDim);
+
+                for (var row = 0; row < rows; row++)
+                {
+                    var activationSpan = quantizedSpan.Slice(row * inputDim, inputDim);
+                    values[row, outputColumn] = TritPacking.TernaryDotSimdUnpacked(decodedSpan, activationSpan);
+                }
+            }
+        }
+        finally
+        {
+            ArrayPool<sbyte>.Shared.Return(decodedBuffer);
+        }
+
+        return new Int32ActivationBlock(values, rowScales);
     }
 
     public override float[,] BackwardSTE(float[,] gradientOutput)
@@ -139,24 +241,47 @@ public sealed class BitLinear : Module
             ArrayPool<sbyte>.Shared.Return(unpackBuffer);
         }
 
-        if (_masterGradients is not null && _cachedInput is not null)
+        if (_intMasterGradients is not null && _cachedInput is not null)
         {
-            for (var row = 0; row < rows; row++)
+            // Accumulate per-weight gradient sum in float first, then apply a
+            // single ApplyDelta per weight at the end. Quantising each row's
+            // (grad * input) individually injects N rounding errors per weight;
+            // summing first injects exactly one, which preserves training
+            // dynamics that a float[] accumulator used to deliver.
+            var perWeightSum = ArrayPool<float>.Shared.Rent(_totalWeights);
+            try
             {
-                for (var outCol = 0; outCol < outDim; outCol++)
-                {
-                    var grad = gradientOutput[row, outCol];
-                    if (grad == 0f)
-                    {
-                        continue;
-                    }
+                Array.Clear(perWeightSum, 0, _totalWeights);
 
-                    var weightOffset = outCol * inDim;
-                    for (var inCol = 0; inCol < inDim; inCol++)
+                for (var row = 0; row < rows; row++)
+                {
+                    for (var outCol = 0; outCol < outDim; outCol++)
                     {
-                        _masterGradients[weightOffset + inCol] += grad * _cachedInput[row, inCol];
+                        var grad = gradientOutput[row, outCol];
+                        if (grad == 0f)
+                        {
+                            continue;
+                        }
+
+                        var weightOffset = outCol * inDim;
+                        for (var inCol = 0; inCol < inDim; inCol++)
+                        {
+                            perWeightSum[weightOffset + inCol] += grad * _cachedInput[row, inCol];
+                        }
                     }
                 }
+
+                for (var i = 0; i < _totalWeights; i++)
+                {
+                    if (perWeightSum[i] != 0f)
+                    {
+                        _intMasterGradients.ApplyDelta(i, perWeightSum[i]);
+                    }
+                }
+            }
+            finally
+            {
+                ArrayPool<float>.Shared.Return(perWeightSum);
             }
         }
 
@@ -165,44 +290,91 @@ public sealed class BitLinear : Module
 
     public void InitializeMasterWeights()
     {
-        _masterWeights = new float[_totalWeights];
-        _masterGradients = new float[_totalWeights];
+        _scaleProfile = BuildDefaultScaleProfile();
+        _intMasterWeights = new IntegerMasterWeightLayer(_scaleProfile);
+        _intMasterGradients = new IntegerMasterWeightLayer(BuildDefaultGradientScaleProfile());
 
         var inputDim = Config.InputDimension;
-        var buffer = new sbyte[inputDim];
+        var unpackBuffer = new sbyte[inputDim];
+        var floatBuffer = new float[_totalWeights];
         for (var row = 0; row < Config.OutputDimension; row++)
         {
-            TritPacking.UnpackRowInto(_packedWeights, row * _packedStride, _packedStride, buffer, inputDim);
+            TritPacking.UnpackRowInto(_packedWeights, row * _packedStride, _packedStride, unpackBuffer, inputDim);
             var offset = row * inputDim;
             for (var col = 0; col < inputDim; col++)
             {
-                _masterWeights[offset + col] = buffer[col] * Gamma;
+                floatBuffer[offset + col] = unpackBuffer[col] * Gamma;
             }
         }
+
+        _intMasterWeights.InitializeFromFloats(floatBuffer);
+    }
+
+    private LayerScaleProfile BuildDefaultScaleProfile()
+    {
+        var epsilon = DefaultMasterWeightEpsilon;
+        var maxWeightMagnitude = MathF.Max(1f, Gamma * 2f);
+        var bucketSize = epsilon * 65536f;
+        var bucketCount = (int)MathF.Ceiling(MathF.Max(maxWeightMagnitude * 2f, 1f) / bucketSize);
+
+        return new LayerScaleProfile
+        {
+            LayerName = $"bitlinear[{Config.InputDimension}->{Config.OutputDimension}]",
+            OutputDimension = Config.OutputDimension,
+            InputDimension = Config.InputDimension,
+            MaxGradientMagnitude = epsilon * 1024f,
+            P99GradientMagnitude = epsilon * 256f,
+            MeanGradientMagnitude = epsilon * 64f,
+            ObservedWeightRange = maxWeightMagnitude * 2f,
+            MaxWeightMagnitude = maxWeightMagnitude,
+            Epsilon = epsilon,
+            BucketCount = bucketCount,
+        };
+    }
+
+    private LayerScaleProfile BuildDefaultGradientScaleProfile()
+    {
+        var epsilon = DefaultGradientEpsilon;
+        var maxGradMagnitude = MathF.Max(1f, Gamma * 2f);
+        var bucketSize = epsilon * 65536f;
+        var bucketCount = (int)MathF.Ceiling(MathF.Max(maxGradMagnitude * 2f, 1f) / bucketSize);
+
+        return new LayerScaleProfile
+        {
+            LayerName = $"bitlinear-grad[{Config.InputDimension}->{Config.OutputDimension}]",
+            OutputDimension = Config.OutputDimension,
+            InputDimension = Config.InputDimension,
+            MaxGradientMagnitude = epsilon * 1024f,
+            P99GradientMagnitude = epsilon * 256f,
+            MeanGradientMagnitude = epsilon * 64f,
+            ObservedWeightRange = maxGradMagnitude * 2f,
+            MaxWeightMagnitude = maxGradMagnitude,
+            Epsilon = epsilon,
+            BucketCount = bucketCount,
+        };
     }
 
     public void ZeroGradients()
     {
-        if (_masterGradients is not null)
-        {
-            Array.Clear(_masterGradients);
-        }
+        _intMasterGradients?.Clear();
     }
 
     public void SyncTernaryFromMaster()
     {
-        if (_masterWeights is null)
+        if (_intMasterWeights is null)
         {
             return;
         }
 
+        var projected = ProjectIntMastersToFloat();
+
         var absSum = 0f;
-        for (var i = 0; i < _masterWeights.Length; i++)
+        for (var i = 0; i < projected.Length; i++)
         {
-            absSum += MathF.Abs(_masterWeights[i]);
+            absSum += MathF.Abs(projected[i]);
         }
 
-        Gamma = _masterWeights.Length > 0 ? absSum / _masterWeights.Length : 0f;
+        Gamma = projected.Length > 0 ? absSum / projected.Length : 0f;
 
         if (Gamma <= 0f)
         {
@@ -212,9 +384,9 @@ public sealed class BitLinear : Module
         }
 
         var ternary = new sbyte[_totalWeights];
-        for (var i = 0; i < _masterWeights.Length; i++)
+        for (var i = 0; i < projected.Length; i++)
         {
-            var normalized = _masterWeights[i] / Gamma + WeightQuantizationEpsilon;
+            var normalized = projected[i] / Gamma + WeightQuantizationEpsilon;
             ternary[i] = (sbyte)Math.Clamp(
                 (int)MathF.Round(normalized, MidpointRounding.AwayFromZero), -1, 1);
         }
@@ -222,9 +394,29 @@ public sealed class BitLinear : Module
         PackRowMajor(ternary);
     }
 
-    public float[]? ExportMasterWeights() => _masterWeights is null ? null : [.. _masterWeights];
+    public float[]? ExportMasterWeights()
+    {
+        if (_intMasterWeights is null)
+        {
+            return null;
+        }
+        return ProjectIntMastersToFloat();
+    }
 
-    public float[]? ExportMasterGradients() => _masterGradients is null ? null : [.. _masterGradients];
+    public float[]? ExportMasterGradients()
+    {
+        if (_intMasterGradients is null)
+        {
+            return null;
+        }
+
+        var buffer = new float[_totalWeights];
+        for (var i = 0; i < _totalWeights; i++)
+        {
+            buffer[i] = _intMasterGradients.ToFloat(i);
+        }
+        return buffer;
+    }
 
     public void ImportMasterWeights(float[] weights)
     {
@@ -237,9 +429,62 @@ public sealed class BitLinear : Module
                 nameof(weights));
         }
 
-        _masterWeights ??= new float[weights.Length];
-        _masterGradients ??= new float[weights.Length];
-        weights.CopyTo(_masterWeights, 0);
+        if (_scaleProfile is null || _intMasterWeights is null)
+        {
+            _scaleProfile = BuildDefaultScaleProfile();
+            _intMasterWeights = new IntegerMasterWeightLayer(_scaleProfile);
+        }
+
+        _intMasterGradients ??= new IntegerMasterWeightLayer(BuildDefaultGradientScaleProfile());
+        _intMasterWeights.InitializeFromFloats(weights);
+    }
+
+    /// <summary>
+    /// Applies a per-index float delta directly to the integer master-weight
+    /// accumulator. Unlike <see cref="ImportMasterWeights"/>, this routes each
+    /// delta through <see cref="IntegerMasterWeightLayer.ApplyDelta"/> so the
+    /// bucket+delta state retains sub-Epsilon precision across steps instead
+    /// of re-quantising the full tensor to the Epsilon grid every call. Used
+    /// by the trainer after an optimizer step to apply (updated - previous)
+    /// without the Import round-trip's quantisation loss.
+    /// </summary>
+    public void ApplyMasterWeightDeltas(float[] deltas)
+    {
+        ArgumentNullException.ThrowIfNull(deltas);
+
+        if (deltas.Length != _totalWeights)
+        {
+            throw new ArgumentException(
+                $"Expected {_totalWeights} deltas, got {deltas.Length}.",
+                nameof(deltas));
+        }
+
+        if (_intMasterWeights is null)
+        {
+            throw new InvalidOperationException(
+                "Master weights not initialised; call InitializeMasterWeights or ImportMasterWeights first.");
+        }
+
+        for (var i = 0; i < deltas.Length; i++)
+        {
+            _intMasterWeights.ApplyDelta(i, deltas[i]);
+        }
+    }
+
+    private float[] ProjectIntMastersToFloat()
+    {
+        var buffer = new float[_totalWeights];
+        if (_intMasterWeights is null)
+        {
+            return buffer;
+        }
+
+        for (var i = 0; i < _totalWeights; i++)
+        {
+            buffer[i] = _intMasterWeights.ToFloat(i);
+        }
+
+        return buffer;
     }
 
     /// <summary>
