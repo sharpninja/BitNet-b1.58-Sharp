@@ -5,6 +5,7 @@ using BitNetSharp.Distributed.Contracts;
 using BitNetSharp.Distributed.Coordinator.Configuration;
 using BitNetSharp.Distributed.Coordinator.Persistence;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 
 namespace BitNetSharp.Distributed.Coordinator.Services;
@@ -222,7 +223,7 @@ public sealed class WeightApplicationService
             // guarantees the flat layout matches FlatParameterPack.Pack
             // byte-for-byte (token embeddings + BitLinear masters in
             // canonical order).
-            var transformer = new BitNetTransformer(_modelConfig.Config);
+            var transformer = new BitNetTransformer(_modelConfig.Config, NullLogger<BitNetTransformer>.Instance);
             initial = FlatParameterPack.Pack(transformer);
             if (initial.Length != expectedLength)
             {

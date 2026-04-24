@@ -470,7 +470,10 @@ public static class BitNetPaperAuditor
 
     private static BitNetPaperModel CreateClone(BitNetPaperModel model)
     {
-        var clone = BitNetPaperModelSnapshot.Capture(model).Restore(model.Options.Verbosity);
+        var clone = BitNetPaperModelSnapshot.Capture(model).Restore(
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<BitNetPaperModel>.Instance,
+            Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance,
+            model.Options.Verbosity);
         if (model.BucketTable is not null)
         {
             clone.LoadBucketTable(model.BucketTable);

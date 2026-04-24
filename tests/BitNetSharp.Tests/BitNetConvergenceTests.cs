@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Training;
+using Microsoft.Extensions.Logging.Abstractions;
 using Xunit.Abstractions;
 
 namespace BitNetSharp.Tests;
@@ -62,7 +63,7 @@ public sealed class BitNetConvergenceTests
             .ToArray();
         Assert.Equal(16, sequences.Length);
 
-        var transformer = new BitNetTransformer(config, seed: Seed);
+        var transformer = new BitNetTransformer(config, NullLogger<BitNetTransformer>.Instance, seed: Seed);
         var options = new BitNetTrainingOptions(
             epochs: 3,
             learningRate: 0.05f,
@@ -124,7 +125,7 @@ public sealed class BitNetConvergenceTests
         Assert.Equal(8, trainSequences.Length);
         Assert.Equal(4, valSequences.Length);
 
-        var transformer = new BitNetTransformer(config, seed: Seed);
+        var transformer = new BitNetTransformer(config, NullLogger<BitNetTransformer>.Instance, seed: Seed);
 
         var sw = Stopwatch.StartNew();
         var perplexityBefore = transformer.CalculatePerplexity(valSequences);

@@ -1,6 +1,7 @@
 using BitNetSharp.Core;
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Training;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Tests;
 
@@ -174,7 +175,7 @@ public sealed class BitNetFullTrainerTests
             headCount: 2,
             maxSequenceLength: 16);
 
-        var transformer = new BitNetTransformer(config, seed);
+        var transformer = new BitNetTransformer(config, NullLogger<BitNetTransformer>.Instance, seed);
 
         // Two fixed "sentences" of 8 tokens each over a vocab of 32.
         // Deterministic so the convergence test is reliable.

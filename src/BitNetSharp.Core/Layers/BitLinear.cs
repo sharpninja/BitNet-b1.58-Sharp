@@ -1,6 +1,4 @@
 using System.Buffers;
-using System.Numerics;
-using System.Runtime.CompilerServices;
 using BitNetSharp.Core.Quantization;
 
 namespace BitNetSharp.Core.Layers;
@@ -9,11 +7,12 @@ public sealed class BitLinear : Module
 {
     private const int ActivationQuantizationMaxMagnitude = 127;
     private const float WeightQuantizationEpsilon = 1e-6f;
-    private static readonly bool UseSimd = Vector.IsHardwareAccelerated && Vector<sbyte>.Count >= 16;
 
     private readonly int _totalWeights;
-    private readonly int _packedStride; // packed bytes per output row
+    private readonly int _packedStride; // packed bytes per output row (5-trit base-3)
+    private readonly int _simdPackedStride; // packed bytes per output row (4-trit 2-bit-signed)
     private byte[] _packedWeights;
+    private byte[] _simdPackedWeights;
 
     // Row permutation for cache-aware token-row layout (null = identity)
     private int[]? _rowPermutation;
@@ -30,7 +29,9 @@ public sealed class BitLinear : Module
         Config = config;
         _totalWeights = config.OutputDimension * config.InputDimension;
         _packedStride = (config.InputDimension + 4) / 5;
+        _simdPackedStride = (config.InputDimension + 3) / 4;
         _packedWeights = new byte[config.OutputDimension * _packedStride];
+        _simdPackedWeights = new byte[config.OutputDimension * _simdPackedStride];
     }
 
     public BitLinearConfig Config { get; }
@@ -44,7 +45,7 @@ public sealed class BitLinear : Module
     public int ActivationQuantizationBitWidth => 8;
 
     public long EstimateResidentParameterBytes() =>
-        (long)_packedWeights.Length + sizeof(float);
+        (long)_packedWeights.Length + (long)_simdPackedWeights.Length + sizeof(float);
 
     public override float[,] Forward(float[,] input)
     {
@@ -64,35 +65,36 @@ public sealed class BitLinear : Module
 
         var (quantizedInput, rowScales) = QuantizeActivations(input);
         var rows = input.GetLength(0);
-        var output = new float[rows, Config.OutputDimension];
+        var outDim = Config.OutputDimension;
+        var output = new float[rows, outDim];
 
-        var unpackBuffer = ArrayPool<sbyte>.Shared.Rent(inputDim);
+        // SIMD hot path: outer loop over output columns; decode each
+        // 4-trit packed row to an sbyte trit buffer ONCE, then run
+        // Vector<sbyte> dot against each input row. Amortizes the
+        // 2-bit-signed decode cost across seq_len activations (big win
+        // at prefill, modest at single-token decode).
+        var simdWeights = _simdPackedWeights.AsSpan();
+        var decodedBuffer = ArrayPool<sbyte>.Shared.Rent(inputDim);
         try
         {
-            for (var row = 0; row < rows; row++)
+            var decodedSpan = decodedBuffer.AsSpan(0, inputDim);
+            for (var outputColumn = 0; outputColumn < outDim; outputColumn++)
             {
-                var dequantScale = Gamma * rowScales[row];
-                var activationOffset = row * inputDim;
+                var physicalRow = _rowPermutation is not null ? _rowPermutation[outputColumn] : outputColumn;
+                var simdRow = simdWeights.Slice(physicalRow * _simdPackedStride, _simdPackedStride);
+                TritPacking.SimdUnpackLayer(simdRow, decodedSpan, inputDim);
 
-                for (var outputColumn = 0; outputColumn < Config.OutputDimension; outputColumn++)
+                for (var row = 0; row < rows; row++)
                 {
-                    var physicalRow = _rowPermutation is not null ? _rowPermutation[outputColumn] : outputColumn;
-                    TritPacking.UnpackRowInto(_packedWeights, physicalRow * _packedStride, _packedStride, unpackBuffer, inputDim);
-
-                    var weightSpan = unpackBuffer.AsSpan(0, inputDim);
-                    var activationSpan = quantizedInput.AsSpan(activationOffset, inputDim);
-
-                    var isum = UseSimd
-                        ? TernaryDotSimd(weightSpan, activationSpan)
-                        : TernaryDotScalar(weightSpan, activationSpan);
-
-                    output[row, outputColumn] = isum * dequantScale;
+                    var activationSpan = quantizedInput.AsSpan(row * inputDim, inputDim);
+                    var isum = TritPacking.TernaryDotSimdUnpacked(decodedSpan, activationSpan);
+                    output[row, outputColumn] = isum * Gamma * rowScales[row];
                 }
             }
         }
         finally
         {
-            ArrayPool<sbyte>.Shared.Return(unpackBuffer);
+            ArrayPool<sbyte>.Shared.Return(decodedBuffer);
         }
 
         return output;
@@ -205,6 +207,7 @@ public sealed class BitLinear : Module
         if (Gamma <= 0f)
         {
             Array.Clear(_packedWeights);
+            Array.Clear(_simdPackedWeights);
             return;
         }
 
@@ -278,6 +281,7 @@ public sealed class BitLinear : Module
         if (gamma == 0f)
         {
             Array.Clear(_packedWeights);
+            Array.Clear(_simdPackedWeights);
             return;
         }
 
@@ -295,15 +299,18 @@ public sealed class BitLinear : Module
                 nameof(permutation));
         }
 
-        // Physically reorder packed weight rows
+        // Physically reorder packed weight rows (both canonical + SIMD).
         var newPacked = new byte[_packedWeights.Length];
+        var newSimdPacked = new byte[_simdPackedWeights.Length];
         for (var logical = 0; logical < Config.OutputDimension; logical++)
         {
             var physical = permutation[logical];
             Array.Copy(_packedWeights, logical * _packedStride, newPacked, physical * _packedStride, _packedStride);
+            Array.Copy(_simdPackedWeights, logical * _simdPackedStride, newSimdPacked, physical * _simdPackedStride, _simdPackedStride);
         }
 
         _packedWeights = newPacked;
+        _simdPackedWeights = newSimdPacked;
         _rowPermutation = (int[])permutation.Clone();
     }
 
@@ -325,6 +332,7 @@ public sealed class BitLinear : Module
         if (Gamma <= 0f)
         {
             Array.Clear(_packedWeights);
+            Array.Clear(_simdPackedWeights);
             return;
         }
 
@@ -433,6 +441,7 @@ public sealed class BitLinear : Module
 
         Gamma = gamma;
         Buffer.BlockCopy(packed, 0, _packedWeights, 0, packed.Length);
+        RegenerateSimdPacked();
     }
 
     public TernaryWeightStats GetTernaryStats()
@@ -484,6 +493,47 @@ public sealed class BitLinear : Module
                 _packedWeights[dstOffset + pi] = TritPacking.PackFive(t0, t1, t2, t3, t4);
             }
         }
+
+        RegenerateSimdPacked();
+    }
+
+    /// <summary>
+    /// Rebuild the 4-trit SIMD-friendly workspace from the canonical
+    /// 5-trit base-3 packed weights. Call after any mutation of
+    /// <see cref="_packedWeights"/> so the Forward hot path reads a
+    /// layout consistent with the on-disk GGUF representation.
+    /// Logical row indexing (i.e., <see cref="_rowPermutation"/>) is
+    /// applied identically: row r in SIMD workspace = row r in packed.
+    /// </summary>
+    private void RegenerateSimdPacked()
+    {
+        var inputDim = Config.InputDimension;
+        var buffer = new sbyte[inputDim];
+        for (var row = 0; row < Config.OutputDimension; row++)
+        {
+            TritPacking.UnpackRowInto(_packedWeights, row * _packedStride, _packedStride, buffer, inputDim);
+
+            var dstOffset = row * _simdPackedStride;
+            for (var byteIdx = 0; byteIdx < _simdPackedStride; byteIdx++)
+            {
+                var baseSlot = byteIdx * 4;
+                byte b = 0;
+                for (var slot = 0; slot < 4; slot++)
+                {
+                    var wi = baseSlot + slot;
+                    if (wi >= inputDim)
+                    {
+                        break;
+                    }
+
+                    var t = buffer[wi];
+                    var code = t == 0 ? 0 : (t > 0 ? 1 : 3);
+                    b |= (byte)(code << (slot * 2));
+                }
+
+                _simdPackedWeights[dstOffset + byteIdx] = b;
+            }
+        }
     }
 
     private static float ComputeAbsMean(float[,] weights)
@@ -500,63 +550,6 @@ public sealed class BitLinear : Module
         }
 
         return sum / weights.Length;
-    }
-
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
-    private static int TernaryDotScalar(ReadOnlySpan<sbyte> weights, ReadOnlySpan<sbyte> activations)
-    {
-        var sum = 0;
-        for (var i = 0; i < weights.Length; i++)
-        {
-            var w = weights[i];
-            if (w > 0) sum += activations[i];
-            else if (w < 0) sum -= activations[i];
-        }
-
-        return sum;
-    }
-
-    private static int TernaryDotSimd(ReadOnlySpan<sbyte> weights, ReadOnlySpan<sbyte> activations)
-    {
-        var vectorSize = Vector<sbyte>.Count;
-        var positiveOne = new Vector<sbyte>(1);
-        var negativeOne = new Vector<sbyte>(-1);
-        var accumPos = Vector<short>.Zero;
-        var accumNeg = Vector<short>.Zero;
-        var i = 0;
-
-        for (; i + vectorSize <= weights.Length; i += vectorSize)
-        {
-            var wVec = new Vector<sbyte>(weights.Slice(i));
-            var aVec = new Vector<sbyte>(activations.Slice(i));
-
-            var posMask = Vector.Equals(wVec, positiveOne);
-            var negMask = Vector.Equals(wVec, negativeOne);
-
-            var posVals = Vector.ConditionalSelect(posMask, aVec, Vector<sbyte>.Zero);
-            var negVals = Vector.ConditionalSelect(negMask, aVec, Vector<sbyte>.Zero);
-
-            Vector.Widen(posVals, out var posLo, out var posHi);
-            Vector.Widen(negVals, out var negLo, out var negHi);
-
-            accumPos += posLo + posHi;
-            accumNeg += negLo + negHi;
-        }
-
-        var result = 0;
-        for (var j = 0; j < Vector<short>.Count; j++)
-        {
-            result += accumPos[j] - accumNeg[j];
-        }
-
-        for (; i < weights.Length; i++)
-        {
-            var w = weights[i];
-            if (w > 0) result += activations[i];
-            else if (w < 0) result -= activations[i];
-        }
-
-        return result;
     }
 
     private static (sbyte[] quantized, float[] rowScales) QuantizeActivations(float[,] input)

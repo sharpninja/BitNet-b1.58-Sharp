@@ -2,6 +2,7 @@ using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Text;
 using BitNetSharp.Core;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Tests;
 
@@ -119,7 +120,7 @@ public sealed class BitNetPaperGgufV2FormatTests
             // float32 and flips the metadata flags back to v1.
             RewriteAsV1(v2Path, v1Path);
 
-            var reloaded = BitNetPaperGguf.Load(v1Path, VerbosityLevel.Quiet);
+            var reloaded = BitNetPaperGguf.Load(v1Path, NullLogger<BitNetPaperModel>.Instance, NullLoggerFactory.Instance, VerbosityLevel.Quiet);
 
             // Same prompt must produce the same output tokens (ternary rounding
             // applied during QuantizeFromFullPrecision recovers the original
@@ -152,7 +153,7 @@ public sealed class BitNetPaperGgufV2FormatTests
             Directory.CreateDirectory(tempDirectory);
             var original = BitNetBootstrap.CreatePaperModel(VerbosityLevel.Quiet);
             BitNetPaperGguf.Save(original, ggufPath);
-            var reloaded = BitNetPaperGguf.Load(ggufPath, VerbosityLevel.Quiet);
+            var reloaded = BitNetPaperGguf.Load(ggufPath, NullLogger<BitNetPaperModel>.Instance, NullLoggerFactory.Instance, VerbosityLevel.Quiet);
 
             var originalLayers = GetAllBitLinearLayers(original);
             var reloadedLayers = GetAllBitLinearLayers(reloaded);
@@ -235,7 +236,7 @@ public sealed class BitNetPaperGgufV2FormatTests
         // model, then use reflection to invoke a legacy-writer helper.
         // Here we take a shortcut: Load the v2 model, then hand-serialize a
         // v1-compatible file using only public APIs + binary writer.
-        var model = BitNetPaperGguf.Load(v2Path, VerbosityLevel.Quiet);
+        var model = BitNetPaperGguf.Load(v2Path, NullLogger<BitNetPaperModel>.Instance, NullLoggerFactory.Instance, VerbosityLevel.Quiet);
         WriteLegacyV1(model, v1Path);
     }
 

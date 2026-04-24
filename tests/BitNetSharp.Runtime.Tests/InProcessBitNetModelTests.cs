@@ -3,6 +3,7 @@ using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Training;
 using BitNetSharp.Distributed.Contracts;
 using BitNetSharp.Runtime;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Runtime.Tests;
 
@@ -13,7 +14,7 @@ public sealed class InProcessBitNetModelTests
     {
         var cfg = MinimalConfig();
         var options = SmallOptions();
-        var seed = new BitNetPaperModel(options, cfg, seed: 1);
+        var seed = new BitNetPaperModel(options, NullLogger<BitNetPaperModel>.Instance, NullLoggerFactory.Instance, cfg, seed: 1);
         var flat = FlatParameterPack.Pack(seed.Transformer);
         var blob = WeightBlobCodec.Encode(version: 7L, flat);
 
@@ -59,7 +60,7 @@ public sealed class InProcessBitNetModelTests
     {
         var cfg = MinimalConfig();
         var options = SmallOptions();
-        var seed = new BitNetPaperModel(options, cfg, seed: 2);
+        var seed = new BitNetPaperModel(options, NullLogger<BitNetPaperModel>.Instance, NullLoggerFactory.Instance, cfg, seed: 2);
         var flat = FlatParameterPack.Pack(seed.Transformer);
         var blob = WeightBlobCodec.Encode(version: 42L, flat);
 

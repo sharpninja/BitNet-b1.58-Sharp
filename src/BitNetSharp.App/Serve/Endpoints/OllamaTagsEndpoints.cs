@@ -11,10 +11,19 @@ internal static class OllamaTagsEndpoints
 {
     public static void Map(IEndpointRouteBuilder app)
     {
+        app.MapGet("/", () => Results.Text("Ollama is running", "text/plain; charset=utf-8"));
+        app.MapMethods("/", new[] { "HEAD" }, () => Results.Text("Ollama is running", "text/plain; charset=utf-8"));
+
         app.MapGet("/api/version", () =>
             Results.Json(new OllamaVersionResponse(ServeVersion.Current), ServeJson.Options));
 
         app.MapGet("/api/tags", (ModelRegistry registry) =>
+        {
+            var entries = registry.Enumerate().Select(r => r.Card.ToTagEntry()).ToList();
+            return Results.Json(new OllamaTagListResponse(entries), ServeJson.Options);
+        });
+
+        app.MapGet("/api/ps", (ModelRegistry registry) =>
         {
             var entries = registry.Enumerate().Select(r => r.Card.ToTagEntry()).ToList();
             return Results.Json(new OllamaTagListResponse(entries), ServeJson.Options);

@@ -2,6 +2,7 @@ using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Training;
 using BitNetSharp.Distributed.Contracts;
 using BitNetSharp.Distributed.Worker;
+using Microsoft.Extensions.Logging.Abstractions;
 using Xunit.Abstractions;
 
 namespace BitNetSharp.Tests;
@@ -32,7 +33,7 @@ public sealed class RealTrainingGradientTests
     public void ComputeGradient_returns_delta_of_matching_length_with_finite_values()
     {
         var cfg = TinyConfig();
-        var transformer = new BitNetTransformer(cfg, seed: 42);
+        var transformer = new BitNetTransformer(cfg, NullLogger<BitNetTransformer>.Instance, seed: 42);
         var currentFlat = FlatParameterPack.Pack(transformer);
 
         // Single 32-token synthetic sequence, deterministic.
@@ -103,7 +104,7 @@ public sealed class RealTrainingGradientTests
     public void ComputeGradient_returns_zero_delta_when_shard_empty()
     {
         var cfg = TinyConfig();
-        var transformer = new BitNetTransformer(cfg, seed: 5);
+        var transformer = new BitNetTransformer(cfg, NullLogger<BitNetTransformer>.Instance, seed: 5);
         var currentFlat = FlatParameterPack.Pack(transformer);
 
         var delta = RealTrainingGradient.ComputeGradient(

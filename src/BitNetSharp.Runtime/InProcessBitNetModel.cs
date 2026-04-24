@@ -3,6 +3,7 @@ using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Quantization;
 using BitNetSharp.Core.Training;
 using BitNetSharp.Distributed.Contracts;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Runtime;
 
@@ -105,7 +106,7 @@ public sealed class InProcessBitNetModel : IDisposable
                 nameof(weights));
         }
 
-        var model = new BitNetPaperModel(options, resolvedConfig);
+        var model = new BitNetPaperModel(options, NullLogger<BitNetPaperModel>.Instance, NullLoggerFactory.Instance, resolvedConfig);
         FlatParameterPack.Unpack(model.Transformer, weights);
         return new InProcessBitNetModel(model, version);
     }

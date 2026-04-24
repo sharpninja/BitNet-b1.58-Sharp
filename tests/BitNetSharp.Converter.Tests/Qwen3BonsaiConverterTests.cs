@@ -6,6 +6,7 @@ using BitNetSharp.Core.Converters;
 using BitNetSharp.Core.Layers;
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Serialization.Gguf;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Converter.Tests;
 
@@ -155,7 +156,7 @@ public sealed class Qwen3BonsaiConverterTests
             kvHeadCount: KvHeadCount,
             ropeTheta: 10_000f);
 
-        return new BitNetPaperModel(options, config, seed: 1);
+        return new BitNetPaperModel(options, NullLogger<BitNetPaperModel>.Instance, NullLoggerFactory.Instance, config, seed: 1);
     }
 
     private static float ReadFirstEmbeddingValue(BitNetPaperModel model)

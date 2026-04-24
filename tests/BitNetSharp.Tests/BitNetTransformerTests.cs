@@ -1,5 +1,6 @@
 using BitNetSharp.Core.Layers;
 using BitNetSharp.Core.Models;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Tests;
 
@@ -46,7 +47,7 @@ public sealed class BitNetTransformerTests
     public void TransformerForward_ReturnsFiniteLogitsForEachInputToken()
     {
         var config = new BitNetConfig(vocabSize: 16, dimension: 8, hiddenDimension: 16, layerCount: 2, headCount: 2, maxSequenceLength: 8);
-        var model = new BitNetTransformer(config, seed: 7);
+        var model = new BitNetTransformer(config, NullLogger<BitNetTransformer>.Instance, seed: 7);
 
         var logits = model.Forward([1, 3, 5, 7]);
 

@@ -2,6 +2,7 @@ using System.Reflection;
 using BitNetSharp.App;
 using BitNetSharp.Core;
 using BitNetSharp.Core.Bucketing;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Tests;
 
@@ -17,7 +18,9 @@ public sealed class BitNetPaperGgufTests
                 VerbosityLevel.Quiet,
                 EnableChainBuckets: true,
                 EnableSequenceCompression: true,
-                ChainBucketAcceptanceThreshold: 0.91d));
+                ChainBucketAcceptanceThreshold: 0.91d),
+            NullLogger<BitNetPaperModel>.Instance,
+            NullLoggerFactory.Instance);
         model.LoadBucketTable(
             new ChainBucketTable(
             [
@@ -40,7 +43,7 @@ public sealed class BitNetPaperGgufTests
             BitNetPaperGguf.Save(model, ggufPath);
             Assert.True(File.Exists(bucketSidecarPath));
 
-            var reloaded = BitNetPaperGguf.Load(ggufPath, VerbosityLevel.Quiet);
+            var reloaded = BitNetPaperGguf.Load(ggufPath, NullLogger<BitNetPaperModel>.Instance, NullLoggerFactory.Instance, VerbosityLevel.Quiet);
             var originalFinalNormScale = (float[])exportFinalNormScale.Invoke(model, [])!;
             var reloadedFinalNormScale = (float[])exportFinalNormScale.Invoke(reloaded, [])!;
             var originalOutputHeadWeights = (float[,])exportOutputHeadWeights.Invoke(model, [])!;
@@ -118,7 +121,7 @@ public sealed class BitNetPaperGgufTests
             Directory.CreateDirectory(tempDirectory);
             File.WriteAllBytes(ggufPath, [1, 2, 3, 4, 5]);
 
-            Assert.Throws<InvalidDataException>(() => BitNetPaperGguf.Load(ggufPath, VerbosityLevel.Quiet));
+            Assert.Throws<InvalidDataException>(() => BitNetPaperGguf.Load(ggufPath, NullLogger<BitNetPaperModel>.Instance, NullLoggerFactory.Instance, VerbosityLevel.Quiet));
         }
         finally
         {

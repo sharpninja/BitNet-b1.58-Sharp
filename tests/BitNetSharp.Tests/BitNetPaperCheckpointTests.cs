@@ -1,5 +1,6 @@
 using BitNetSharp.Core;
 using BitNetSharp.Core.Bucketing;
+using Microsoft.Extensions.Logging.Abstractions;
 using System.Reflection;
 
 namespace BitNetSharp.Tests;
@@ -28,7 +29,7 @@ public sealed class BitNetPaperCheckpointTests
         {
             BitNetPaperCheckpoint.Save(model, checkpointPath);
             Assert.False(File.Exists(bucketSidecarPath));
-            var reloaded = BitNetPaperCheckpoint.Load(checkpointPath, VerbosityLevel.Quiet);
+            var reloaded = BitNetPaperCheckpoint.Load(checkpointPath, NullLogger<BitNetPaperModel>.Instance, NullLoggerFactory.Instance, VerbosityLevel.Quiet);
             var originalFinalNormScale = (float[])exportFinalNormScale.Invoke(model, [])!;
             var reloadedFinalNormScale = (float[])exportFinalNormScale.Invoke(reloaded, [])!;
             var originalOutputHeadWeights = (float[,])exportOutputHeadWeights.Invoke(model, [])!;
@@ -59,7 +60,9 @@ public sealed class BitNetPaperCheckpointTests
                 VerbosityLevel.Quiet,
                 EnableChainBuckets: true,
                 EnableSequenceCompression: true,
-                ChainBucketAcceptanceThreshold: 0.91d));
+                ChainBucketAcceptanceThreshold: 0.91d),
+            NullLogger<BitNetPaperModel>.Instance,
+            NullLoggerFactory.Instance);
         model.LoadBucketTable(
             new ChainBucketTable(
             [
@@ -77,7 +80,7 @@ public sealed class BitNetPaperCheckpointTests
 
             Assert.True(File.Exists(bucketSidecarPath));
 
-            var reloaded = BitNetPaperCheckpoint.Load(checkpointPath, VerbosityLevel.Quiet);
+            var reloaded = BitNetPaperCheckpoint.Load(checkpointPath, NullLogger<BitNetPaperModel>.Instance, NullLoggerFactory.Instance, VerbosityLevel.Quiet);
 
             Assert.True(reloaded.Options.EnableChainBuckets);
             Assert.True(reloaded.Options.EnableSequenceCompression);

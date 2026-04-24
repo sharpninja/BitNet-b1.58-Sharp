@@ -1,4 +1,5 @@
 using BitNetSharp.Core.Models;
+using Microsoft.Extensions.Logging;
 
 namespace BitNetSharp.Core;
 
@@ -43,8 +44,14 @@ internal sealed record BitNetPaperModelSnapshot(
             model.Options.EnableRecallHeatMap);
     }
 
-    public BitNetPaperModel Restore(VerbosityLevel verbosity = VerbosityLevel.Normal)
+    public BitNetPaperModel Restore(
+        ILogger<BitNetPaperModel> logger,
+        ILoggerFactory loggerFactory,
+        VerbosityLevel verbosity = VerbosityLevel.Normal)
     {
+        ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
+
         var model = new BitNetPaperModel(
             new BitNetOptions(
                 [.. Vocabulary],
@@ -55,6 +62,8 @@ internal sealed record BitNetPaperModelSnapshot(
                 EnableSequenceCompression,
                 ChainBucketAcceptanceThreshold,
                 EnableRecallHeatMap),
+            logger,
+            loggerFactory,
             Config,
             BootstrapSeed);
 

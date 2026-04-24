@@ -1,18 +1,23 @@
+using System.Diagnostics;
 using BitNetSharp.Core.Layers;
 using BitNetSharp.Core.Quantization;
 using BitNetSharp.Core.Utils;
+using Microsoft.Extensions.Logging;
 
 namespace BitNetSharp.Core.Models;
 
 public sealed partial class BitNetTransformer
 {
     private readonly float[,] _tokenEmbeddings;
+    private readonly ILogger<BitNetTransformer> _logger;
 
-    public BitNetTransformer(BitNetConfig config, int seed = 42)
+    public BitNetTransformer(BitNetConfig config, ILogger<BitNetTransformer> logger, int seed = 42)
     {
         ArgumentNullException.ThrowIfNull(config);
+        ArgumentNullException.ThrowIfNull(logger);
 
         Config = config;
+        _logger = logger;
 
         var random = new Random(seed);
         _tokenEmbeddings = ParameterInitializer.CreateMatrix(config.VocabSize, config.Dimension, random);
@@ -70,8 +75,21 @@ public sealed partial class BitNetTransformer
 
     public long EstimateTokenEmbeddingBytes() => (long)_tokenEmbeddings.Length * sizeof(float);
 
-    public float[,] Forward(IReadOnlyList<int> tokenIds) =>
-        OutputHead.Forward(ForwardHiddenStates(tokenIds));
+    public float[,] Forward(IReadOnlyList<int> tokenIds)
+    {
+        var sw = Stopwatch.StartNew();
+        var preHead = ForwardHiddenStates(tokenIds);
+        var preHeadMs = sw.Elapsed.TotalMilliseconds;
+        sw.Restart();
+        var logits = OutputHead.Forward(preHead);
+        sw.Stop();
+        _logger.LogDebug(
+            "Transformer.Forward seq_len={SeqLen} pre_head_ms={PreHeadMs:F1} output_head_ms={OutputHeadMs:F1}",
+            tokenIds.Count,
+            preHeadMs,
+            sw.Elapsed.TotalMilliseconds);
+        return logits;
+    }
 
     public float[,] ForwardHiddenStates(IReadOnlyList<int> tokenIds)
     {
@@ -96,10 +114,21 @@ public sealed partial class BitNetTransformer
         var hidden = Embed(tokenIds);
         CacheTokenIds(tokenIds);
 
-        foreach (var layer in Layers)
+        var sw = Stopwatch.StartNew();
+        for (var i = 0; i < Layers.Length; i++)
         {
-            hidden = layer.Forward(hidden);
+            var layerStart = sw.Elapsed.TotalMilliseconds;
+            hidden = Layers[i].Forward(hidden);
+            if (_logger.IsEnabled(LogLevel.Trace))
+            {
+                _logger.LogTrace(
+                    "Layer[{Layer}].Forward seq_len={SeqLen} ms={LayerMs:F2}",
+                    i,
+                    tokenIds.Count,
+                    sw.Elapsed.TotalMilliseconds - layerStart);
+            }
         }
+        sw.Stop();
 
         return hidden;
     }

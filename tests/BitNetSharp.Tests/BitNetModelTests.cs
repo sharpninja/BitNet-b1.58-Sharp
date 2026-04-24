@@ -3,6 +3,7 @@ using BitNetSharp.Core;
 using BitNetSharp.Core.Training;
 using BitNetSharp.Core.Models;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Logging.Abstractions;
 using System.Reflection;
 using System.Text.Json;
 
@@ -28,6 +29,8 @@ public sealed class BitNetPaperModelTests
     {
         var model = new BitNetPaperModel(
             new BitNetOptions(["a"], VerbosityLevel.Quiet),
+            NullLogger<BitNetPaperModel>.Instance,
+            NullLoggerFactory.Instance,
             new BitNetConfig(vocabSize: 4, dimension: 8, hiddenDimension: 16, layerCount: 1, headCount: 2, maxSequenceLength: 4),
             seed: 1);
 
@@ -190,6 +193,8 @@ public sealed class BitNetPaperModelTests
     {
         var model = new BitNetPaperModel(
             new BitNetOptions(["alpha", "beta", "gamma", "delta"], VerbosityLevel.Quiet, MaxResponseTokens: 2),
+            NullLogger<BitNetPaperModel>.Instance,
+            NullLoggerFactory.Instance,
             new BitNetConfig(vocabSize: 7, dimension: 16, hiddenDimension: 32, layerCount: 2, headCount: 4, maxSequenceLength: 16),
             seed: 17);
         var exportScale = typeof(BitNetPaperModel)
@@ -225,6 +230,8 @@ public sealed class BitNetPaperModelTests
     {
         var model = new BitNetPaperModel(
             new BitNetOptions(["alpha", "beta", "gamma", "delta"], VerbosityLevel.Quiet, MaxResponseTokens: 2),
+            NullLogger<BitNetPaperModel>.Instance,
+            NullLoggerFactory.Instance,
             new BitNetConfig(vocabSize: 7, dimension: 16, hiddenDimension: 32, layerCount: 2, headCount: 4, maxSequenceLength: 16),
             seed: 23);
         var exportNormScales = typeof(BitNetPaperModel).GetMethod("ExportNormScales", BindingFlags.Instance | BindingFlags.NonPublic);

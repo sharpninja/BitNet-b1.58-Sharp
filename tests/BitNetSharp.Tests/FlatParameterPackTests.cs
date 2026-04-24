@@ -1,6 +1,7 @@
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Training;
 using BitNetSharp.Distributed.Contracts;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Tests;
 
@@ -44,7 +45,7 @@ public sealed class FlatParameterPackTests
     public void Pack_returns_vector_of_computed_length_for_fresh_model()
     {
         var cfg = TinyConfig();
-        var transformer = new BitNetTransformer(cfg, seed: 7);
+        var transformer = new BitNetTransformer(cfg, NullLogger<BitNetTransformer>.Instance, seed: 7);
 
         var flat = FlatParameterPack.Pack(transformer);
 
@@ -55,7 +56,7 @@ public sealed class FlatParameterPackTests
     public void Pack_Unpack_round_trip_preserves_flat_vector()
     {
         var cfg = TinyConfig();
-        var transformer = new BitNetTransformer(cfg, seed: 13);
+        var transformer = new BitNetTransformer(cfg, NullLogger<BitNetTransformer>.Instance, seed: 13);
 
         var original = FlatParameterPack.Pack(transformer);
 
@@ -80,7 +81,7 @@ public sealed class FlatParameterPackTests
     public void Unpack_rejects_flat_vector_of_wrong_length()
     {
         var cfg = TinyConfig();
-        var transformer = new BitNetTransformer(cfg, seed: 3);
+        var transformer = new BitNetTransformer(cfg, NullLogger<BitNetTransformer>.Instance, seed: 3);
         var wrong = new float[FlatParameterPack.ComputeLength(cfg) + 5];
 
         var ex = Assert.Throws<ArgumentException>(() => FlatParameterPack.Unpack(transformer, wrong));
@@ -116,7 +117,7 @@ public sealed class FlatParameterPackTests
     public void Packed_vector_contains_no_nan_or_inf()
     {
         var cfg = TinyConfig();
-        var transformer = new BitNetTransformer(cfg, seed: 21);
+        var transformer = new BitNetTransformer(cfg, NullLogger<BitNetTransformer>.Instance, seed: 21);
 
         var flat = FlatParameterPack.Pack(transformer);
 

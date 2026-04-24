@@ -1,5 +1,6 @@
 using BitNetSharp.Core.Layers;
 using BitNetSharp.Core.Models;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Tests;
 
@@ -15,7 +16,7 @@ public sealed class BitNetTransformerBackwardTests
             headCount: 2,
             maxSequenceLength: 16);
 
-        return new BitNetTransformer(config, seed);
+        return new BitNetTransformer(config, NullLogger<BitNetTransformer>.Instance, seed);
     }
 
     [Fact]

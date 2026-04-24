@@ -1,5 +1,6 @@
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Training;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Tests;
 
@@ -55,7 +56,7 @@ public sealed class PerplexityTests
             layerCount: 1,
             headCount: 2,
             maxSequenceLength: 16);
-        var model = new BitNetTransformer(config, seed: 7);
+        var model = new BitNetTransformer(config, NullLogger<BitNetTransformer>.Instance, seed: 7);
 
         var rng = new Random(123);
         var sequences = Enumerable.Range(0, 3)
@@ -80,7 +81,7 @@ public sealed class PerplexityTests
             layerCount: 1,
             headCount: 2,
             maxSequenceLength: 8);
-        var model = new BitNetTransformer(config, seed: 1);
+        var model = new BitNetTransformer(config, NullLogger<BitNetTransformer>.Instance, seed: 1);
 
         // All sequences too short -> no tokens contribute -> returns 0 by convention.
         var perplexity = model.CalculatePerplexity(new[] { new[] { 1 }, Array.Empty<int>() });
@@ -115,7 +116,7 @@ public sealed class PerplexityTests
             layerCount: 1,
             headCount: 2,
             maxSequenceLength: 32);
-        var model = new BitNetTransformer(config, seed: 3);
+        var model = new BitNetTransformer(config, NullLogger<BitNetTransformer>.Instance, seed: 3);
 
         // Only take a handful of short chunks to keep the test fast.
         var sample = tokens.Take(128).Where(id => id >= 0 && id < config.VocabSize).ToArray();

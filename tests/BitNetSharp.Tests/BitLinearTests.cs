@@ -247,15 +247,18 @@ public sealed class BitLinearTests
     }
 
     [Fact]
-    public void EstimateResidentParameterBytes_CountsOnlyTernaryWeightsAndGamma()
+    public void EstimateResidentParameterBytes_CountsBothPackedWorkspacesAndGamma()
     {
         const int inputDim = 4;
         const int outputDim = 3;
         var layer = new BitLinear(new BitLinearConfig(inputDimension: inputDim, outputDimension: outputDim));
 
-        // Per-row packed: outputDim * ceil(inputDim / 5) bytes + sizeof(float) for Gamma
+        // Canonical 5-trit packed: outputDim * ceil(inputDim / 5) bytes
+        // SIMD 4-trit packed: outputDim * ceil(inputDim / 4) bytes (Forward hot path)
+        // + sizeof(float) for Gamma
         var packedStride = (inputDim + 4) / 5;
-        var expected = (long)(outputDim * packedStride) + sizeof(float);
+        var simdPackedStride = (inputDim + 3) / 4;
+        var expected = (long)(outputDim * packedStride) + (long)(outputDim * simdPackedStride) + sizeof(float);
 
         Assert.Equal(expected, layer.EstimateResidentParameterBytes());
     }

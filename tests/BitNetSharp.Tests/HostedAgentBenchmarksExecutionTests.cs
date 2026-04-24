@@ -1,6 +1,7 @@
 using BitNetSharp.App;
 using BitNetSharp.Core;
 using BitNetSharp.Core.Bucketing;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Tests;
 
@@ -255,7 +256,9 @@ public sealed class HostedAgentBenchmarksExecutionTests
                 BitNetTrainingCorpus.CreateBenchmarkVocabulary(),
                 VerbosityLevel.Quiet,
                 EnableChainBuckets: true,
-                EnableRecallHeatMap: false));
+                EnableRecallHeatMap: false),
+            NullLogger<BitNetPaperModel>.Instance,
+            NullLoggerFactory.Instance);
         model.MineAndLoadBuckets(examples);
 
         Assert.Null(model.RecallHeatMap);

@@ -1,6 +1,8 @@
 using System.Text.Json;
 using BitNetSharp.Core.Bucketing;
 using BitNetSharp.Core.Models;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Core;
 
@@ -68,9 +70,15 @@ public static class BitNetPaperCheckpoint
         SaveHeatMapSidecar(model.RecallHeatMap, GetHeatMapSidecarPath(path));
     }
 
-    public static BitNetPaperModel Load(string path, VerbosityLevel verbosity = VerbosityLevel.Normal)
+    public static BitNetPaperModel Load(
+        string path,
+        ILogger<BitNetPaperModel> logger,
+        ILoggerFactory loggerFactory,
+        VerbosityLevel verbosity = VerbosityLevel.Normal)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
 
         var document = JsonSerializer.Deserialize<BitNetPaperCheckpointDocument>(File.ReadAllText(path))
             ?? throw new InvalidOperationException("Could not deserialize the BitNet paper checkpoint document.");
@@ -92,6 +100,8 @@ public static class BitNetPaperCheckpoint
                 document.EnableSequenceCompression,
                 acceptanceThreshold,
                 document.EnableRecallHeatMap),
+            logger,
+            loggerFactory,
             document.Config,
             document.BootstrapSeed);
         var baselineSnapshot = BitNetPaperModelSnapshot.Capture(baselineModel);
@@ -116,7 +126,7 @@ public static class BitNetPaperCheckpoint
             OutputHeadWeights = ToMatrix(document.OutputHeadWeights),
             MemorizedResponses = document.MemorizedResponses ?? new Dictionary<string, int[]>(StringComparer.Ordinal)
         };
-        var model = snapshot.Restore(verbosity);
+        var model = snapshot.Restore(logger, loggerFactory, verbosity);
 
         var bucketSidecarPath = GetBucketSidecarPath(path);
         if ((document.EnableChainBuckets || document.EnableSequenceCompression) && File.Exists(bucketSidecarPath))
@@ -143,7 +153,7 @@ public static class BitNetPaperCheckpoint
         try
         {
             Save(model, checkpointPath);
-            var reloaded = Load(checkpointPath, model.Options.Verbosity);
+            var reloaded = Load(checkpointPath, NullLogger<BitNetPaperModel>.Instance, NullLoggerFactory.Instance, model.Options.Verbosity);
             var original = model.GenerateResponse(prompt, maxTokens: 4);
             var roundTripped = reloaded.GenerateResponse(prompt, maxTokens: 4);
             return new BitNetPaperCheckpointValidationResult(

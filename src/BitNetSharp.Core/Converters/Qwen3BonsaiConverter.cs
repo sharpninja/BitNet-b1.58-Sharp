@@ -4,6 +4,8 @@ using System.IO;
 using BitNetSharp.Core.Layers;
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Serialization.Gguf;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Core.Converters;
 
@@ -40,9 +42,9 @@ public static class Qwen3BonsaiConverter
         VerifyArchitecture(source);
 
         // Build a probe model just to read the caller-effective vocab size.
-        var probe = new BitNetPaperModel(targetOptions, config: null, seed: seed);
+        var probe = new BitNetPaperModel(targetOptions, NullLogger<BitNetPaperModel>.Instance, NullLoggerFactory.Instance, config: null, seed: seed);
         var qwenConfig = DeriveConfigFromMetadata(source, probe.Config.VocabSize);
-        var model = new BitNetPaperModel(targetOptions, qwenConfig, seed: seed);
+        var model = new BitNetPaperModel(targetOptions, NullLogger<BitNetPaperModel>.Instance, NullLoggerFactory.Instance, qwenConfig, seed: seed);
         Import(source, model);
         return model;
     }

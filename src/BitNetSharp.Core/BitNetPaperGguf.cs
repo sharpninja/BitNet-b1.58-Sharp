@@ -3,6 +3,7 @@ using System.Text.Json;
 using BitNetSharp.Core.Bucketing;
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Serialization.Gguf;
+using Microsoft.Extensions.Logging;
 
 namespace BitNetSharp.Core;
 
@@ -33,9 +34,15 @@ public static class BitNetPaperGguf
         SaveHeatMapSidecar(model.RecallHeatMap, GetHeatMapSidecarPath(path));
     }
 
-    public static BitNetPaperModel Load(string path, VerbosityLevel verbosity = VerbosityLevel.Normal)
+    public static BitNetPaperModel Load(
+        string path,
+        ILogger<BitNetPaperModel> logger,
+        ILoggerFactory loggerFactory,
+        VerbosityLevel verbosity = VerbosityLevel.Normal)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
 
         using var reader = GgufStreamingReader.Open(path);
         ValidateMetadata(reader.Metadata);
@@ -65,7 +72,7 @@ public static class BitNetPaperGguf
             ReadOptionalBool(reader.Metadata, "bitnetsharp.enable_recall_heat_map", defaultValue: true));
 
         var bootstrapSeed = GetRequiredInt32(reader.Metadata, "bitnetsharp.bootstrap_seed");
-        var model = new BitNetPaperModel(options, config, bootstrapSeed);
+        var model = new BitNetPaperModel(options, logger, loggerFactory, config, bootstrapSeed);
 
         var formatVersion = DetectFormatVersion(reader.Metadata);
 

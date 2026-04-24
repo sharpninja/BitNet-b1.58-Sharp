@@ -2,6 +2,8 @@ using BitNetSharp.Core.Bucketing;
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Quantization;
 using BitNetSharp.Core.Training;
+using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Core;
 
@@ -27,11 +29,21 @@ public sealed class BitNetPaperModel
     private readonly string[] _idToToken;
     private readonly BitNetTokenizer _tokenizer;
     private readonly object _gate = new();
+    private readonly ILogger<BitNetPaperModel> _logger;
+    private readonly ILoggerFactory _loggerFactory;
     private BucketRecallHeatMap? _recallHeatMap;
 
-    public BitNetPaperModel(IEnumerable<TrainingExample> trainingExamples, VerbosityLevel verbosity = VerbosityLevel.Normal, BitNetConfig? config = null, int seed = 42)
+    public BitNetPaperModel(
+        IEnumerable<TrainingExample> trainingExamples,
+        ILogger<BitNetPaperModel> logger,
+        ILoggerFactory loggerFactory,
+        VerbosityLevel verbosity = VerbosityLevel.Normal,
+        BitNetConfig? config = null,
+        int seed = 42)
         : this(
             new BitNetOptions(BitNetTrainingCorpus.CreateVocabulary(trainingExamples), verbosity),
+            logger,
+            loggerFactory,
             config,
             seed)
     {
@@ -39,6 +51,8 @@ public sealed class BitNetPaperModel
 
     public BitNetPaperModel(
         IEnumerable<TrainingExample> trainingExamples,
+        ILogger<BitNetPaperModel> logger,
+        ILoggerFactory loggerFactory,
         VerbosityLevel verbosity,
         bool enableChainBuckets,
         bool enableSequenceCompression,
@@ -50,15 +64,26 @@ public sealed class BitNetPaperModel
                 verbosity,
                 EnableChainBuckets: enableChainBuckets,
                 EnableSequenceCompression: enableSequenceCompression),
+            logger,
+            loggerFactory,
             config,
             seed)
     {
     }
 
-    public BitNetPaperModel(BitNetOptions options, BitNetConfig? config = null, int seed = 42)
+    public BitNetPaperModel(
+        BitNetOptions options,
+        ILogger<BitNetPaperModel> logger,
+        ILoggerFactory loggerFactory,
+        BitNetConfig? config = null,
+        int seed = 42)
     {
         ArgumentNullException.ThrowIfNull(options);
+        ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
 
+        _logger = logger;
+        _loggerFactory = loggerFactory;
         Options = options;
         _idToToken =
         [
@@ -91,7 +116,7 @@ public sealed class BitNetPaperModel
         }
 
         // Use a deterministic default so the seeded paper model stays stable in tests and CLI inspection.
-        Transformer = new BitNetTransformer(Config, seed);
+        Transformer = new BitNetTransformer(Config, _loggerFactory.CreateLogger<BitNetTransformer>(), seed);
     }
 
     public BitNetOptions Options { get; }
@@ -164,19 +189,36 @@ public sealed class BitNetPaperModel
     public static BitNetPaperModel CreateDefault(
         VerbosityLevel verbosity = VerbosityLevel.Normal,
         bool enableChainBuckets = false,
-        bool enableSequenceCompression = false) =>
-        PrimeDefaultExamples(new(new BitNetOptions(
-            BitNetTrainingCorpus.CreateDefaultVocabulary(),
-            verbosity,
-            EnableChainBuckets: enableChainBuckets,
-            EnableSequenceCompression: enableSequenceCompression)));
+        bool enableSequenceCompression = false,
+        ILoggerFactory? loggerFactory = null)
+    {
+        var lf = loggerFactory ?? NullLoggerFactory.Instance;
+        return PrimeDefaultExamples(new(
+            new BitNetOptions(
+                BitNetTrainingCorpus.CreateDefaultVocabulary(),
+                verbosity,
+                EnableChainBuckets: enableChainBuckets,
+                EnableSequenceCompression: enableSequenceCompression),
+            lf.CreateLogger<BitNetPaperModel>(),
+            lf));
+    }
 
     public static BitNetPaperModel CreateForTrainingCorpus(
         IEnumerable<TrainingExample> trainingExamples,
         VerbosityLevel verbosity = VerbosityLevel.Normal,
         bool enableChainBuckets = false,
-        bool enableSequenceCompression = false) =>
-        new(trainingExamples, verbosity, enableChainBuckets, enableSequenceCompression);
+        bool enableSequenceCompression = false,
+        ILoggerFactory? loggerFactory = null)
+    {
+        var lf = loggerFactory ?? NullLoggerFactory.Instance;
+        return new(
+            trainingExamples,
+            lf.CreateLogger<BitNetPaperModel>(),
+            lf,
+            verbosity,
+            enableChainBuckets,
+            enableSequenceCompression);
+    }
 
     public TrainingReport Train(IEnumerable<TrainingExample> examples, int epochs = 3, float learningRate = 0.05f)
     {
@@ -210,12 +252,27 @@ public sealed class BitNetPaperModel
 
     public BitNetGenerationResult GenerateResponse(string prompt, int? maxTokens = null)
     {
+        ArgumentNullException.ThrowIfNull(prompt);
+        var totalSw = System.Diagnostics.Stopwatch.StartNew();
         lock (_gate)
         {
+            _logger.LogInformation(
+                "GenerateResponse start prompt_chars={PromptChars} max_tokens={MaxTokens} default_max={DefaultMax}",
+                prompt.Length,
+                maxTokens,
+                Options.MaxResponseTokens);
+
             _recallHeatMap?.ResetGenerationState();
 
             var diagnostics = new List<string>();
+            var tokenizeSw = System.Diagnostics.Stopwatch.StartNew();
             var contextTokenIds = TokenizeToIds(prompt).ToList();
+            tokenizeSw.Stop();
+            _logger.LogDebug(
+                "Tokenize prompt_tokens={PromptTokens} tokenize_ms={TokenizeMs:F1}",
+                contextTokenIds.Count,
+                tokenizeSw.Elapsed.TotalMilliseconds);
+
             var generatedTokenIds = new List<int>();
             var attemptedChains = 0;
             var acceptedChains = 0;
@@ -244,6 +301,7 @@ public sealed class BitNetPaperModel
 
             if (_memorizedResponses.TryGetValue(promptKey, out var memorizedResponse))
             {
+                _logger.LogInformation("Memorized response hit prompt_key_hash={PromptKeyHash}", promptKey.GetHashCode());
                 generatedTokenIds.AddRange(
                     memorizedResponse
                         .Take(Math.Max(1, maxTokens.GetValueOrDefault(Options.MaxResponseTokens)))
@@ -257,11 +315,28 @@ public sealed class BitNetPaperModel
             else
             {
                 var maxGeneratedTokens = Math.Max(1, maxTokens.GetValueOrDefault(Options.MaxResponseTokens));
+                _logger.LogInformation("Autoregressive loop start max_generated_tokens={MaxGeneratedTokens}", maxGeneratedTokens);
+                var exitReason = "cap";
                 for (var step = 0; step < maxGeneratedTokens; step++)
                 {
-                    var nextToken = SelectNextToken(Transformer.Forward(contextTokenIds));
+                    var stepSw = System.Diagnostics.Stopwatch.StartNew();
+                    var logits = Transformer.Forward(contextTokenIds);
+                    var forwardMs = stepSw.Elapsed.TotalMilliseconds;
+                    stepSw.Restart();
+                    var nextToken = SelectNextToken(logits);
+                    var selectMs = stepSw.Elapsed.TotalMilliseconds;
+                    _logger.LogInformation(
+                        "Step[{Step}] seq_len={SeqLen} forward_ms={ForwardMs:F1} select_ms={SelectMs:F1} token_id={TokenId} logit={Logit:F3}",
+                        step,
+                        contextTokenIds.Count,
+                        forwardMs,
+                        selectMs,
+                        nextToken.TokenId,
+                        nextToken.Logit);
                     if (nextToken.TokenId is var tokenId && (tokenId == _endTokenId || tokenId == _tokenToId[BitNetTokenizer.UnknownToken]))
                     {
+                        exitReason = tokenId == _endTokenId ? "eos" : "unk";
+                        _logger.LogInformation("Autoregressive loop exit reason={ExitReason} at step={Step}", exitReason, step);
                         break;
                     }
 
@@ -360,6 +435,12 @@ public sealed class BitNetPaperModel
                         }
                     }
                 }
+                _logger.LogInformation(
+                    "Autoregressive loop end exit_reason={ExitReason} generated_tokens={Generated} chain_attempts={ChainAttempts} chain_accepts={ChainAccepts}",
+                    exitReason,
+                    generatedTokenIds.Count,
+                    attemptedChainTokens,
+                    acceptedChainTokens);
             }
 
             if (Options.EnableChainBuckets && BucketTable is not null)
@@ -402,6 +483,12 @@ public sealed class BitNetPaperModel
                     Options.ChainBucketAcceptanceThreshold);
             }
 
+            totalSw.Stop();
+            _logger.LogInformation(
+                "GenerateResponse end total_ms={TotalMs:F0} generated_tokens={GeneratedTokens} response_chars={ResponseChars}",
+                totalSw.Elapsed.TotalMilliseconds,
+                generatedTokens.Length,
+                responseText.Length);
             return new BitNetGenerationResult(responseText, generatedTokens, diagnostics, chainBucketMetrics);
         }
     }

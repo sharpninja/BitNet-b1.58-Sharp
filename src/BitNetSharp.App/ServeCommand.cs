@@ -10,6 +10,7 @@ using System.Threading.Tasks;
 using BitNetSharp.App.Serve;
 using BitNetSharp.App.Serve.Dto;
 using BitNetSharp.Core;
+using Microsoft.Extensions.Logging;
 
 namespace BitNetSharp.App;
 
@@ -30,7 +31,25 @@ public static class ServeCommand
         string modelSpecifier = ParseOption(args, "--model=") ?? HostedAgentModelFactory.DefaultModelId;
         var trainingExamples = BitNetTrainingCorpus.CreateDefaultExamples();
 
-        using var hostedModel = HostedAgentModelFactory.Create(modelSpecifier, verbosity, trainingExamples);
+        using var loggerFactory = LoggerFactory.Create(builder =>
+        {
+            builder.AddSimpleConsole(o =>
+            {
+                o.SingleLine = true;
+                o.TimestampFormat = "HH:mm:ss.fff ";
+            });
+            var level = verbosity switch
+            {
+                VerbosityLevel.Quiet => LogLevel.Warning,
+                VerbosityLevel.Verbose => LogLevel.Trace,
+                _ => LogLevel.Information,
+            };
+            builder.SetMinimumLevel(level);
+            builder.AddFilter("Microsoft", LogLevel.Warning);
+            builder.AddFilter("BitNetSharp", level);
+        });
+
+        using var hostedModel = HostedAgentModelFactory.Create(modelSpecifier, verbosity, trainingExamples, loggerFactory: loggerFactory);
 
         var registry = BuildRegistry(hostedModel);
         var card = registry.Enumerate()[0].Card;

@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using BitNetSharp.App;
 using BitNetSharp.Core;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Converter.Tests;
 
@@ -68,7 +69,7 @@ public sealed class ImportGgufCommandTests : IDisposable
         Assert.Equal(0, rc);
         Assert.True(File.Exists(output), $"Output GGUF {output} not written.");
 
-        var reloaded = BitNetPaperGguf.Load(output, VerbosityLevel.Quiet);
+        var reloaded = BitNetPaperGguf.Load(output, NullLogger<BitNetPaperModel>.Instance, NullLoggerFactory.Instance, VerbosityLevel.Quiet);
         Assert.Equal(MiniQwen3GgufFactory.LayerCount, reloaded.Config.LayerCount);
         Assert.Equal(MiniQwen3GgufFactory.Dim, reloaded.Config.Dimension);
         Assert.Equal(MiniQwen3GgufFactory.Hidden, reloaded.Config.HiddenDimension);

@@ -3,6 +3,7 @@ using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Training;
 using BitNetSharp.Distributed.Contracts;
 using BitNetSharp.Runtime;
+using Microsoft.Extensions.Logging.Abstractions;
 
 // Phase 1d AOT publish smoke:
 // 1. Build a tiny BitNetConfig.
@@ -33,7 +34,7 @@ try
         Verbosity: VerbosityLevel.Normal,
         MaxResponseTokens: 4);
 
-    var seed = new BitNetPaperModel(options, config, seed: 7);
+    var seed = new BitNetPaperModel(options, NullLogger<BitNetPaperModel>.Instance, NullLoggerFactory.Instance, config, seed: 7);
     var flat = FlatParameterPack.Pack(seed.Transformer);
     var blob = WeightBlobCodec.Encode(version: 1L, flat);
 

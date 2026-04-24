@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Training;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Distributed.Worker;
 
@@ -84,7 +85,7 @@ internal static class RealTrainingGradient
             return new float[currentFlat.Length];
         }
 
-        var transformer = new BitNetTransformer(config, seed);
+        var transformer = new BitNetTransformer(config, NullLogger<BitNetTransformer>.Instance, seed);
         FlatParameterPack.Unpack(transformer, currentFlat);
 
         // Build training options. Using the transformer-constructor
