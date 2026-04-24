@@ -1,4 +1,5 @@
 using System.Buffers;
+using BitNetSharp.Core.Inference;
 using BitNetSharp.Core.Quantization;
 using BitNetSharp.Core.Training;
 
@@ -147,6 +148,58 @@ public sealed class BitLinear : Module
         }
 
         return output;
+    }
+
+    /// <summary>
+    /// Zero-float forward path: emits an Int32ActivationBlock where values are
+    /// the raw int ternary-dot accumulators and RowScales combine Gamma with
+    /// the activation row scale. Downstream integer kernels consume Values
+    /// directly; ToFloat() materialises the equivalent float[,] on demand.
+    /// </summary>
+    public Int32ActivationBlock ForwardInt32(QuantizedActivationBlock input)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+
+        var inputDim = Config.InputDimension;
+        if (input.Cols != inputDim)
+        {
+            throw new ArgumentException($"Expected input dimension {inputDim}, but received {input.Cols}.", nameof(input));
+        }
+
+        var rows = input.Rows;
+        var outDim = Config.OutputDimension;
+        var values = new int[rows, outDim];
+        var rowScales = new float[rows];
+        for (var row = 0; row < rows; row++)
+        {
+            rowScales[row] = Gamma * input.RowScales[row];
+        }
+
+        var simdWeights = _simdPackedWeights.AsSpan();
+        var quantizedSpan = input.Quantized.AsSpan();
+        var decodedBuffer = ArrayPool<sbyte>.Shared.Rent(inputDim);
+        try
+        {
+            var decodedSpan = decodedBuffer.AsSpan(0, inputDim);
+            for (var outputColumn = 0; outputColumn < outDim; outputColumn++)
+            {
+                var physicalRow = _rowPermutation is not null ? _rowPermutation[outputColumn] : outputColumn;
+                var simdRow = simdWeights.Slice(physicalRow * _simdPackedStride, _simdPackedStride);
+                TritPacking.SimdUnpackLayer(simdRow, decodedSpan, inputDim);
+
+                for (var row = 0; row < rows; row++)
+                {
+                    var activationSpan = quantizedSpan.Slice(row * inputDim, inputDim);
+                    values[row, outputColumn] = TritPacking.TernaryDotSimdUnpacked(decodedSpan, activationSpan);
+                }
+            }
+        }
+        finally
+        {
+            ArrayPool<sbyte>.Shared.Return(decodedBuffer);
+        }
+
+        return new Int32ActivationBlock(values, rowScales);
     }
 
     public override float[,] BackwardSTE(float[,] gradientOutput)
