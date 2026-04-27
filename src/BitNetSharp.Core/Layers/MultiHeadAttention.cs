@@ -11,10 +11,9 @@ public sealed class MultiHeadAttention : AttentionModule
     private readonly RotaryPositionEmbedding _rotaryPositionEmbedding;
     private readonly float _attentionScale;
 
-    public MultiHeadAttention(BitNetConfig config, Random random)
+    public MultiHeadAttention(BitNetConfig config, Random? random)
     {
         ArgumentNullException.ThrowIfNull(config);
-        ArgumentNullException.ThrowIfNull(random);
 
         Config = config;
         QueryProjection = ParameterInitializer.CreateBitLinear(new BitLinearConfig(config.Dimension, config.Dimension), random);

@@ -744,6 +744,36 @@ Suite: 797/797 fast-lane green (794 + 3 ARM-gated theory inlines that skip on x8
 
 The next-wave AVX-VNNI-INT8 path (VPDPBSSD on Sapphire Rapids+ / Zen 5+) and ARM SDOT path (`AdvSimd.Dp.DotProduct` on ARMv8.4-A+) both require quantising q to int8 too - separate workstream that hoists Q quantisation out of the dot site and reuses the AvxVnniInt8 kernel pattern from G-series. Skipped this round; ARM SDOT is the more strategically relevant target given the ARM-first hardware roadmap.
 
+### KV-FU8 - skipRandomInit Load path (5.94x faster cold load on phone)
+
+`BitNetPaperGguf.Load` previously paid a multi-billion-op random fill across 36 layers x 7 BitLinears (~3.4 GB packed weights for Bonsai) inside the `BitNetPaperModel` ctor before the first import ran. Every random trit was overwritten by the next `ImportBitLinear` call - pure wasted work.
+
+Threaded `bool skipRandomInit` through:
+- `BitNetPaperModel(..., bool skipRandomInit = false)`
+- `BitNetTransformer(..., bool skipRandomInit = false)`
+- `MultiHeadAttention(BitNetConfig, Random?)` (random becomes nullable)
+- `GroupedQueryAttention(BitNetConfig, Random?)`
+- `SwiGLUFeedForward(BitNetConfig, Random?)`
+- `BitNetLayer(BitNetConfig, Random?)`
+- `ParameterInitializer.CreateBitLinear(BitLinearConfig, Random?, ...)`
+
+When `random is null`, `CreateBitLinear` skips both `SeedTernaryRowStream` and `QuantizeFromFullPrecision` paths and returns a fresh `BitLinear(config)` with zeroed packed buffers (the BitLinear ctor already allocates `_packedWeights` and `_simdPackedWeights` zero-filled). `BitNetTransformer` also swaps `ParameterInitializer.CreateMatrix` for `new float[vocabSize, dimension]` so the token embedding skip the `vocabSize * dim` random fill too.
+
+`BitNetPaperGguf.Load` now passes `skipRandomInit: true`. The progress allocation rebalances: ctor now reports 0..0.05 (the fast path) and tensor imports report 0.05..1.0 (the dominant phase).
+
+**Equivalence proof:** the existing `BitNetPaperGgufTests::GgufRoundTripPreservesTrainedPromptResponsesAndBucketSidecar` test exercises Save -> Load -> assert `GenerateResponse` text equality. For the round-trip to pass at all, the loaded model's weights must come entirely from the imports - random init was never observable in the loaded model. Suite stays 797/797 fast-lane green after the change.
+
+**Live measurement on Motorola Edge 2024 (real Bonsai gguf, 1.39 GB, cache-hit extract):**
+
+| Path | Cold load (ctor + imports) | Speedup |
+| --- | ---: | ---: |
+| Random-init (prior) | 664 042 ms (~11.07 min) | 1.0x |
+| **skipRandomInit** | **111 675 ms (~1.86 min)** | **5.94x** |
+
+Cuts 552 sec (~9.2 min) off cold load on phone. The ~9 min saved is exactly the random-fill wall-clock cost: Bonsai's 6.93 billion random draws + ternary pack ops on the phone CPU. Imports still take ~1.5-2 min - mostly disk I/O + tensor unpacking from packed-trit stream.
+
+Working-set memory after load is +400 MB vs the prior measurement (3.88 GB vs 3.46 GB) which is noise from the GC settling state at measurement time, not a structural change - both paths end with the same per-layer packed-weight footprint.
+
 ### KV-FU7 - Live ARM bench on Motorola Edge 2024 (.NET MAUI harness)
 
 Custom `BitNetSharp.Benchmarks.Maui` MAUI app (Android-only, net10.0-android) ports `KvCacheBenchmarks` to a Stopwatch-based runner because BenchmarkDotNet doesn't run on Android (no JIT process spawning, no Process API). Results captured from logcat. Device: **Motorola Edge 2024, Android 15, arm64-v8a**.

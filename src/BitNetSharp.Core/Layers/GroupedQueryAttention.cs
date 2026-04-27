@@ -21,10 +21,9 @@ public sealed class GroupedQueryAttention : AttentionModule
     private readonly int _headDim;
     private readonly int _groupSize;
 
-    public GroupedQueryAttention(BitNetConfig config, Random random)
+    public GroupedQueryAttention(BitNetConfig config, Random? random)
     {
         ArgumentNullException.ThrowIfNull(config);
-        ArgumentNullException.ThrowIfNull(random);
 
         Config = config;
         _headCount = config.HeadCount;

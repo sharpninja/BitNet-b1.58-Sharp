@@ -6,10 +6,9 @@ namespace BitNetSharp.Core.Layers;
 
 public sealed class SwiGLUFeedForward : Module
 {
-    public SwiGLUFeedForward(BitNetConfig config, Random random)
+    public SwiGLUFeedForward(BitNetConfig config, Random? random)
     {
         ArgumentNullException.ThrowIfNull(config);
-        ArgumentNullException.ThrowIfNull(random);
 
         Config = config;
         GateProjection = ParameterInitializer.CreateBitLinear(new BitLinearConfig(config.Dimension, config.HiddenDimension), random);

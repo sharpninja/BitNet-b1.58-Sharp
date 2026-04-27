@@ -83,7 +83,8 @@ public sealed class BitNetPaperModel
         ILoggerFactory loggerFactory,
         BitNetConfig? config = null,
         int seed = 42,
-        IProgress<double>? constructionProgress = null)
+        IProgress<double>? constructionProgress = null,
+        bool skipRandomInit = false)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(logger);
@@ -123,7 +124,7 @@ public sealed class BitNetPaperModel
         }
 
         // Use a deterministic default so the seeded paper model stays stable in tests and CLI inspection.
-        Transformer = new BitNetTransformer(Config, _loggerFactory.CreateLogger<BitNetTransformer>(), seed, constructionProgress);
+        Transformer = new BitNetTransformer(Config, _loggerFactory.CreateLogger<BitNetTransformer>(), seed, constructionProgress, skipRandomInit);
     }
 
     public BitNetOptions Options { get; }

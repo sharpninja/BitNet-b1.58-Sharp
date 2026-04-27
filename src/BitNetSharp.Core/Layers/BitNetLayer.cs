@@ -6,10 +6,9 @@ namespace BitNetSharp.Core.Layers;
 
 public sealed class BitNetLayer : Module
 {
-    public BitNetLayer(BitNetConfig config, Random random)
+    public BitNetLayer(BitNetConfig config, Random? random)
     {
         ArgumentNullException.ThrowIfNull(config);
-        ArgumentNullException.ThrowIfNull(random);
 
         Config = config;
         PreAttentionNorm = new RmsNorm(config.Dimension, config.RmsNormEpsilon);

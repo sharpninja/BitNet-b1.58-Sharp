@@ -153,14 +153,23 @@ public static class BitNetPaperGguf
             UseIntegerForward: BitNetOptions.IntegerForwardEnvDefault);
 
         var bootstrapSeed = GetRequiredInt32(reader.Metadata, "bitnetsharp.bootstrap_seed");
-        // Construction is the dominant load phase (random-init 36 layers x 7
-        // BitLinears = ~3.4 GB on Bonsai). Map ctor reports to 0..0.5 of
-        // overall progress; the tensor-import pass below maps to 0.5..1.0.
+        // skipRandomInit=true: the GGUF imports below overwrite every weight
+        // anyway, so the multi-billion-op random fill is wasted work. On
+        // Bonsai (36 layers x 7 BitLinears, ~3.4 GB packed weights) this
+        // collapses ctor cost from minutes (phone CPU) to seconds (just the
+        // zeroed-buffer allocations the BitLinear ctor already does).
+        // BitLinear ctor still allocates _packedWeights/_simdPackedWeights
+        // zero-filled, so the model is structurally identical to the
+        // random-init path; only the seed values differ - and those get
+        // overwritten by ImportBitLinear / ImportScale below.
         var ctorProgress = progress is null
             ? null
-            : new Progress<double>(p => progress.Report(p * 0.5));
-        var model = new BitNetPaperModel(options, logger, loggerFactory, config, bootstrapSeed, ctorProgress);
-        progress?.Report(0.5);
+            : new Progress<double>(p => progress.Report(p * 0.05));
+        var model = new BitNetPaperModel(
+            options, logger, loggerFactory, config, bootstrapSeed,
+            constructionProgress: ctorProgress,
+            skipRandomInit: true);
+        progress?.Report(0.05);
 
         var formatVersion = DetectFormatVersion(reader.Metadata);
 
@@ -173,13 +182,14 @@ public static class BitNetPaperGguf
         // the largest single projection.
         // Total tensor count for progress reporting:
         // 1 token_embd + 1 output_norm + 1 output + per-layer (2 norms + 7 BitLinears).
-        // Reports map 0..1 across imports, then linearly to 0.5..1.0 of overall.
+        // Reports map 0..1 across imports, then linearly to 0.05..1.0 of overall.
+        // (Empty-init ctor only takes ~5% of total now; imports are the bulk.)
         var totalTensors = 3 + config.LayerCount * 9;
         var tensorIndex = 0;
         void Tick()
         {
             tensorIndex++;
-            progress?.Report(0.5 + 0.5 * tensorIndex / totalTensors);
+            progress?.Report(0.05 + 0.95 * tensorIndex / totalTensors);
         }
 
         model.ImportTokenEmbeddings(reader.ReadMatrix(tensorByName[TokenEmbeddingsTensorName], config.VocabSize, config.Dimension));

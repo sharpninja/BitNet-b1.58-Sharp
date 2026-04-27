@@ -18,9 +18,17 @@ internal static class ParameterInitializer
     // O(row) peak memory.
     private const long StreamingThreshold = 8_000_000L;
 
-    public static BitLinear CreateBitLinear(BitLinearConfig config, Random random, float scale = 0.02f)
+    public static BitLinear CreateBitLinear(BitLinearConfig config, Random? random, float scale = 0.02f)
     {
         var layer = new BitLinear(config);
+        // No-random-init path: skips the multi-billion-op random fill that
+        // dominates load time when the caller is about to overwrite every
+        // weight via a checkpoint or GGUF import. The BitLinear ctor itself
+        // already allocates zeroed packed buffers; nothing more to do.
+        if (random is null)
+        {
+            return layer;
+        }
         long elementCount = (long)config.OutputDimension * config.InputDimension;
         if (elementCount > StreamingThreshold)
         {

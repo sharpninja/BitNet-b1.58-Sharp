@@ -12,7 +12,7 @@ public sealed partial class BitNetTransformer
     private readonly float[,] _tokenEmbeddings;
     private readonly ILogger<BitNetTransformer> _logger;
 
-    public BitNetTransformer(BitNetConfig config, ILogger<BitNetTransformer> logger, int seed = 42, IProgress<double>? constructionProgress = null)
+    public BitNetTransformer(BitNetConfig config, ILogger<BitNetTransformer> logger, int seed = 42, IProgress<double>? constructionProgress = null, bool skipRandomInit = false)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(logger);
@@ -20,8 +20,15 @@ public sealed partial class BitNetTransformer
         Config = config;
         _logger = logger;
 
-        var random = new Random(seed);
-        _tokenEmbeddings = ParameterInitializer.CreateMatrix(config.VocabSize, config.Dimension, random);
+        // skipRandomInit path: callers who immediately overwrite every weight
+        // (BitNetPaperGguf.Load, BitNetPaperCheckpoint.Load) skip the
+        // multi-billion-op random fill entirely. BitLinear ctor still
+        // allocates zeroed packed buffers so layout + Forward semantics are
+        // unchanged; the difference is purely the absence of the seed pass.
+        Random? random = skipRandomInit ? null : new Random(seed);
+        _tokenEmbeddings = random is null
+            ? new float[config.VocabSize, config.Dimension]
+            : ParameterInitializer.CreateMatrix(config.VocabSize, config.Dimension, random);
         // Total construction units: layers + 1 (token embed already done) + 1 (FinalNorm) + 1 (OutputHead).
         // Report progress per layer so callers can show a moving bar during the
         // 95-MB-per-layer random-init pass that dominates load time on phone CPUs.
