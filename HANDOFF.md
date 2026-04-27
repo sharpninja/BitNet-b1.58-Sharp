@@ -1,7 +1,7 @@
 # BitNet-b1.58-Sharp - Session Handoff
 
 **Date:** 2026-04-27
-**HEAD on `main`:** `67c289a perf(inference): Section B follow-ons (KV-FU1 Avx2 + KV-FU2 integer composer int8 + KV-FU3 long-ctx Bonsai)` (KV-FU4 short-ctx re-measurement landing on top)
+**HEAD on `main`:** `b49b547 docs(research): KV-FU4 short-ctx Bonsai re-measurement post-Avx2` (KV-FU5 default-flip landing on top)
 **Branches:** `main` only.
 **Tests:** 794/794 fast-lane green (1 host-load-flaky `IntegerPipelineLatencyTests` excluded; passes in isolation)
 
@@ -81,13 +81,13 @@ All three deferred items from the prior round landed on `feat/kv-deferred-follow
 - **KV-FU2** Integer-forward composer int8 KV path: `IntegerForwardComposer.ForwardWithCache(BitNetLayer, float[,], QuantizedKvLayerCache, int)` overload + `BitNetTransformer.Integer.cs` dispatch on cache type. `BITNETSHARP_USE_INTEGER_FORWARD=1 BITNETSHARP_KV_CACHE_QUANTIZATION=Int8` now works end-to-end.
 - **KV-FU3** Long-context Bonsai A/B (171 prefill / 50 decode): int8 1.45x total / 1.63x TTFT / 1.09x decode (was 14% slower at short ctx).
 - **KV-FU4** Short-ctx re-measurement post-Avx2 (33 prefill / 8 decode): int8 **2.6x total / 3.1x TTFT / 3% decode win**. Decode regression flipped from 14% slower to 3% faster.
+- **KV-FU5** Promoted `BITNETSHARP_KV_CACHE_QUANTIZATION=Int8` to **serve default** in `BitNetPaperGguf.Load`. `BitNetConfig()` ctor default stays `Fp32` (backwards-compat for direct callers + tests); env var still overrides either way. Startup banner: `KvCacheQuantization=Int8 (serve default; set BITNETSHARP_KV_CACHE_QUANTIZATION=Fp32 to opt out)` or `(override applied via ...)` when explicit.
 
-**Net result: int8 KV is strictly better than fp32 KV across every measured Bonsai workload.** Recommended default for all serve deployments: `BITNETSHARP_KV_CACHE_QUANTIZATION=Int8`.
+**Net result: int8 KV is the default for every Bonsai serve deployment.** Section B fully landed.
 
 Remaining open:
 
 1. **Quantize Q + use VPDPBSSD via AvxVnniInt8**: AVX-VNNI-INT8 hardware path. Eliminates the dequant entirely by quantising the query too. Requires AttentionMath signature change (q becomes sbyte) and per-layer Q quantisation hoisting. Unmeasurable on dev box (Zen 3 5900HX has no AVX-VNNI-INT8); wins on Sapphire Rapids+, Granite Rapids, Zen 5+. Multi-day refactor.
-2. **Promote `BITNETSHARP_KV_CACHE_QUANTIZATION=Int8` to default**: data supports it; gated only by backwards-compat. Could ship as a default flip in BitNetConfig + a serve-startup banner noting the change.
 
 ## How to resume
 
@@ -98,9 +98,10 @@ git pull origin main
 dotnet build BitNet-b1.58-Sharp.slnx -c Release
 dotnet test tests/BitNetSharp.Tests -c Release -f net10.0 --filter "Category!=SlowLane"
 
-# Serve with int8 KV (use --port=11435 if port 11434 is taken):
-$env:BITNETSHARP_KV_CACHE_QUANTIZATION = "Int8"
+# Serve (int8 KV is the default since KV-FU5; use --port=11435 if 11434 is taken):
 dotnet run --project src/BitNetSharp.App -c Release -- serve --port=11435
+# To opt out and run fp32 KV instead:
+# $env:BITNETSHARP_KV_CACHE_QUANTIZATION = "Fp32"
 # In a second shell:
 curl -sS -X POST http://127.0.0.1:11435/api/chat -H "Content-Type: application/json" --data @cache/h5_chat_payload.json
 ```

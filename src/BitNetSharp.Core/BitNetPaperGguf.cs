@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using BitNetSharp.Core.Bucketing;
+using BitNetSharp.Core.Inference;
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Serialization.Gguf;
 using Microsoft.Extensions.Logging;
@@ -48,12 +49,16 @@ public static class BitNetPaperGguf
         ValidateMetadata(reader.Metadata);
 
         var config = ReadConfig(reader.Metadata);
-        // KV5b: env-var override for KvCacheQuantization. GGUF metadata does
-        // not declare cache quantisation (it's a runtime knob, not a model
-        // property); BITNETSHARP_KV_CACHE_QUANTIZATION=Int8 flips the loaded
-        // config's flag so cache-aware decode runs through QuantizedKvLayerCache.
+        // KV-FU5: serve loads default to Int8 KV after the Section B
+        // measurements showed strict win across every Bonsai workload
+        // (short-ctx 2.6x total + 3.1x TTFT + 3% decode; long-ctx 1.45x
+        // total + 1.63x TTFT + 9% decode). BitNetConfig() default stays Fp32
+        // for backwards compat with direct callers. Env var
+        // BITNETSHARP_KV_CACHE_QUANTIZATION can still force either side
+        // (e.g. set to Fp32 to opt out of the new default).
         var kvOverride = BitNetOptions.KvCacheQuantizationEnvOverride;
-        if (kvOverride.HasValue && kvOverride.Value != config.KvCacheQuantization)
+        var kvResolved = kvOverride ?? KvCacheQuantization.Int8;
+        if (kvResolved != config.KvCacheQuantization)
         {
             config = new BitNetConfig(
                 vocabSize: config.VocabSize,
@@ -65,12 +70,14 @@ public static class BitNetPaperGguf
                 rmsNormEpsilon: config.RmsNormEpsilon,
                 kvHeadCount: config.KvHeadCount,
                 ropeTheta: config.RopeTheta,
-                kvCacheQuantization: kvOverride.Value);
-            logger.LogInformation(
-                "KvCacheQuantization override applied via {Var}: {Value}",
-                BitNetOptions.KvCacheQuantizationEnvVar,
-                kvOverride.Value);
+                kvCacheQuantization: kvResolved);
         }
+        logger.LogInformation(
+            kvOverride.HasValue
+                ? "KvCacheQuantization={Value} (override applied via {Var})"
+                : "KvCacheQuantization={Value} (serve default; set {Var}=Fp32 to opt out)",
+            kvResolved,
+            BitNetOptions.KvCacheQuantizationEnvVar);
         var vocabulary = DeserializeVocabulary(GetRequiredString(reader.Metadata, VocabularyMetadataKey));
         var memorizedResponses = DeserializeMemorizedResponses(GetRequiredString(reader.Metadata, MemorizedResponsesMetadataKey));
 

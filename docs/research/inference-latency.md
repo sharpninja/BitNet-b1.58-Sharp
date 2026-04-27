@@ -682,3 +682,30 @@ Section B's bandwidth-vs-compute tradeoff narrative collapses with the Avx2 path
 
 **Int8 KV is now strictly better than fp32 KV across every measured Bonsai workload.** The architectural decision in KV5b to make int8 opt-in via env var (default fp32) is preserved for backwards compatibility, but the data supports promoting `BITNETSHARP_KV_CACHE_QUANTIZATION=Int8` to a recommended-default for all Bonsai serve deployments.
 
+### KV-FU5 - Promote int8 to serve default
+
+`BitNetPaperGguf.Load` now defaults to `KvCacheQuantization.Int8` whenever `BITNETSHARP_KV_CACHE_QUANTIZATION` is unset. `BitNetConfig()` ctor default stays `Fp32` so direct callers (tests, training code, embed scenarios) get backwards-compatible identity behaviour; the new default applies only at the production GGUF-load entry point.
+
+Resolution logic:
+
+```csharp
+var kvOverride = BitNetOptions.KvCacheQuantizationEnvOverride;
+var kvResolved = kvOverride ?? KvCacheQuantization.Int8;
+```
+
+Startup banner emitted at `BitNetPaperModel` logger:
+
+```
+KvCacheQuantization=Int8 (serve default; set BITNETSHARP_KV_CACHE_QUANTIZATION=Fp32 to opt out)
+```
+
+or when explicit:
+
+```
+KvCacheQuantization=Int8 (override applied via BITNETSHARP_KV_CACHE_QUANTIZATION)
+```
+
+Sanity: live `/api/chat` with no env var produced `total_duration=4279 ms` on the first run (consistent with the int8 short-ctx 5-run avg of 3437 ms; first run includes JIT warmup) and the expected `"stays use examples ..."` deterministic output. Suite stays 794/794 fast-lane green - no test asserted the GGUF-load default, so the flip is invisible to direct `BitNetConfig()` callers.
+
+Section B is now landed end-to-end. The architectural pieces (KV1-KV6 + KV5b building blocks; KV-FU1 Avx2 hand-roll; KV-FU2 integer-composer int8; KV-FU3/FU4 Bonsai A/B at both context lengths; KV-FU5 default flip) form a coherent stack: int8 K/V cache is the default in production, the integer-forward composer supports it natively, and bench numbers confirm the win at every working-set size.
+
