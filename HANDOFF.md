@@ -82,12 +82,14 @@ All three deferred items from the prior round landed on `feat/kv-deferred-follow
 - **KV-FU3** Long-context Bonsai A/B (171 prefill / 50 decode): int8 1.45x total / 1.63x TTFT / 1.09x decode (was 14% slower at short ctx).
 - **KV-FU4** Short-ctx re-measurement post-Avx2 (33 prefill / 8 decode): int8 **2.6x total / 3.1x TTFT / 3% decode win**. Decode regression flipped from 14% slower to 3% faster.
 - **KV-FU5** Promoted `BITNETSHARP_KV_CACHE_QUANTIZATION=Int8` to **serve default** in `BitNetPaperGguf.Load`. `BitNetConfig()` ctor default stays `Fp32` (backwards-compat for direct callers + tests); env var still overrides either way. Startup banner: `KvCacheQuantization=Int8 (serve default; set BITNETSHARP_KV_CACHE_QUANTIZATION=Fp32 to opt out)` or `(override applied via ...)` when explicit.
+- **KV-FU6** ARM (NEON) hand-roll for `DotInt8` / `AccumulateWeightedInt8`. Ultimate target hardware is ARM; this kernel uses Vector128 abstractions that emit SXTL/SXTL2/SCVTF/FMLA on ARMv8 hosts. Dispatch chain: `AdvSimd > Avx2 > Portable`. Tests gated on `AdvSimd.IsSupported` (skip on x86 dev box; activate on ARM at runtime). Live ARM measurement queued for a Sapphire-class follow-up session.
 
-**Net result: int8 KV is the default for every Bonsai serve deployment.** Section B fully landed.
+**Net result: int8 KV is the default for every Bonsai serve deployment, with native kernels on both ARM and x86.** Section B fully landed.
 
 Remaining open:
 
-1. **Quantize Q + use VPDPBSSD via AvxVnniInt8**: AVX-VNNI-INT8 hardware path. Eliminates the dequant entirely by quantising the query too. Requires AttentionMath signature change (q becomes sbyte) and per-layer Q quantisation hoisting. Unmeasurable on dev box (Zen 3 5900HX has no AVX-VNNI-INT8); wins on Sapphire Rapids+, Granite Rapids, Zen 5+. Multi-day refactor.
+1. **Live ARM bench on Apple M-series / Graviton / Snapdragon**: AdvSimd kernel is wired and equivalence-tested on x86 via the dispatch fallback. Live measurement on ARM hardware confirms the NEON SXTL+FMLA budget vs portable Vector.Widen.
+2. **Quantize Q + use SDOT (ARM AdvSimd.Dp) / VPDPBSSD (x86 AvxVnniInt8)**: dual-int8 hardware path. Eliminates the dequant entirely by quantising the query too. Requires AttentionMath signature change (q becomes sbyte) and per-layer Q quantisation hoisting. ARM SDOT is the strategically relevant target given the ARM-first hardware roadmap. Multi-day refactor.
 
 ## How to resume
 

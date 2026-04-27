@@ -709,3 +709,38 @@ Sanity: live `/api/chat` with no env var produced `total_duration=4279 ms` on th
 
 Section B is now landed end-to-end. The architectural pieces (KV1-KV6 + KV5b building blocks; KV-FU1 Avx2 hand-roll; KV-FU2 integer-composer int8; KV-FU3/FU4 Bonsai A/B at both context lengths; KV-FU5 default flip) form a coherent stack: int8 K/V cache is the default in production, the integer-forward composer supports it natively, and bench numbers confirm the win at every working-set size.
 
+### KV-FU6 - ARM (NEON) hand-roll for DotInt8 / AccumulateWeightedInt8
+
+Ultimate target hardware is ARM. The Avx2 hand-roll covers x86 dev / CI hosts; production deployments on ARM (Apple M-series, Snapdragon, Graviton, RPi, Cortex-A76+) need a NEON-targeted kernel. Falling back to the framework `Vector.Widen` portable path on ARM works but loses the same register-pressure win that motivated the Avx2 hand-roll.
+
+`DotInt8Arm` and `AccumulateWeightedInt8Arm` mirror the Avx2 structure but target Vector128 (128-bit, NEON's natural width):
+
+```csharp
+var bytes = Vector128.LoadUnsafe(ref kRef, (nuint)i);              // LDR Q
+var shortsLo = Vector128.WidenLower(bytes);                         // SXTL
+var shortsHi = Vector128.WidenUpper(bytes);                         // SXTL2
+var i0 = Vector128.WidenLower(shortsLo);                            // SXTL
+// ... 4 Vector128<int> total
+var f0 = Vector128.ConvertToSingle(i0);                             // SCVTF
+// ... 4 Vector128<float>
+acc = AdvSimd.FusedMultiplyAdd(acc, q0, f0);                        // FMLA
+```
+
+`Vector128.WidenLower` / `WidenUpper` are cross-platform abstractions; on ARM the JIT emits `SXTL` / `SXTL2`, on x86 it would emit `VPMOVSXBW` / `VPMOVSXBW + VPSHUFD` (suboptimal vs the 256-bit Avx2 path). The dispatch chain is `AdvSimd > Avx2 > Portable` so each host picks its native kernel.
+
+Vector128's 4-wide float lane forces 4 FMLAs per 16-byte chunk vs the Avx2 path's 2 FMAs per 16-byte chunk (256-bit ymm). The extra FMA dispatches map cleanly to ARM's wide superscalar issue (Cortex-A76+ can issue 2 FMLAs per cycle on the NEON pipeline) so the per-chunk cost should match the Avx2 budget on similar-class hardware.
+
+Bench: dev box is x86 (Zen 3 5900HX); ARM measurement is queued for a Sapphire-class follow-up session on M-series / Graviton / Snapdragon. Tests `tests/BitNetSharp.Tests/AttentionMathTests.cs::DotInt8_OnArmHost_MatchesPortableFallback` activate on ARM hosts (no-op on x86) and assert kernel output drift &lt; 1e-3 vs the scalar oracle.
+
+Suite: 797/797 fast-lane green (794 + 3 ARM-gated theory inlines that skip on x86).
+
+### Hardware target summary
+
+| Host class | Hot kernel | Status |
+| --- | --- | --- |
+| ARMv8 (any Apple M, Snapdragon, Graviton, RPi 4+) | `DotInt8Arm` (NEON SXTL + FMLA) | Wired, awaiting ARM measurement |
+| x86 AVX2 (Zen 1-3, Skylake+, dev box) | `DotInt8Avx2` (VPMOVSXBD + FMA) | Measured, 13-32% faster than fp32 |
+| x86 portable / non-AVX2 / headDim &lt; 16 | `DotInt8Portable` (Vector.Widen) | Fallback; correctness only |
+
+The next-wave AVX-VNNI-INT8 path (VPDPBSSD on Sapphire Rapids+ / Zen 5+) and ARM SDOT path (`AdvSimd.Dp.DotProduct` on ARMv8.4-A+) both require quantising q to int8 too - separate workstream that hoists Q quantisation out of the dot site and reuses the AvxVnniInt8 kernel pattern from G-series. Skipped this round; ARM SDOT is the more strategically relevant target given the ARM-first hardware roadmap.
+

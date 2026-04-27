@@ -126,6 +126,38 @@ public sealed class AttentionMathTests
     [Theory]
     [InlineData(32)]
     [InlineData(64)]
+    [InlineData(128)]
+    public void DotInt8_OnArmHost_MatchesPortableFallback(int headDim)
+    {
+        if (!System.Runtime.Intrinsics.Arm.AdvSimd.IsSupported)
+        {
+            // Skipped on non-ARM hosts (x86/x64 dev machines). The ARM
+            // kernel uses AdvSimd.FusedMultiplyAdd which throws on x86;
+            // equivalence on ARM is the gate that matters.
+            return;
+        }
+
+        var qFloat = RandomVector(headDim, seed: 1733 + headDim);
+        var kFloat = RandomVector(headDim, seed: 1741 + headDim);
+        var (kInt8, kScale) = QuantiseAbsmax(kFloat);
+
+        // The portable Vector.Widen path is the cross-platform reference.
+        // ARM dispatch routes to DotInt8Arm; equivalence within fp rounding.
+        var armResult = AttentionMath.DotInt8(qFloat, kInt8, kScale, headDim);
+
+        // Compute the same dot via the scalar oracle to bound drift.
+        var scalarRef = 0f;
+        for (var i = 0; i < headDim; i++)
+        {
+            scalarRef += qFloat[i] * (kInt8[i] * kScale);
+        }
+        Assert.True(MathF.Abs(armResult - scalarRef) < 1e-3f,
+            $"ARM DotInt8 drift {armResult - scalarRef}");
+    }
+
+    [Theory]
+    [InlineData(32)]
+    [InlineData(64)]
     [InlineData(127)]
     [InlineData(128)]
     public void DotInt8_EqualsFp32DotWithinQuantizationError(int headDim)

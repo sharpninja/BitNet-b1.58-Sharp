@@ -2,6 +2,7 @@ using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.Arm;
 using System.Runtime.Intrinsics.X86;
 
 namespace BitNetSharp.Core.Layers;
@@ -103,11 +104,74 @@ internal static class AttentionMath
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static float DotInt8(ReadOnlySpan<float> q, ReadOnlySpan<sbyte> k, float kScale, int headDim)
     {
+        if (AdvSimd.IsSupported && headDim >= 16)
+        {
+            return DotInt8Arm(q, k, kScale, headDim);
+        }
         if (Avx2.IsSupported && headDim >= 16)
         {
             return DotInt8Avx2(q, k, kScale, headDim);
         }
         return DotInt8Portable(q, k, kScale, headDim);
+    }
+
+    /// <summary>
+    /// ARM NEON fast-path: process 16 sbytes per chunk via two-stage
+    /// Vector128 sign-extend (SXTL/SXTL2 + SXTL/SXTL2) + SCVTF + FMLA.
+    /// Vector128 abstractions emit native NEON ops on ARM hosts; on x86 they
+    /// would emit 128-bit SSE which is suboptimal, so this path is gated on
+    /// AdvSimd.IsSupported and only fires on ARM. The Avx2 path stays for
+    /// x86 hosts (uses 256-bit ymm registers via Avx2.ConvertToVector256Int32).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float DotInt8Arm(ReadOnlySpan<float> q, ReadOnlySpan<sbyte> k, float kScale, int headDim)
+    {
+        const int chunk = 16; // 4 x Vector128<float>.Count
+        var vectorEnd = headDim - (headDim % chunk);
+
+        var acc = Vector128<float>.Zero;
+        ref var qRef = ref MemoryMarshal.GetReference(q);
+        ref var kRef = ref MemoryMarshal.GetReference(k);
+
+        var i = 0;
+        while (i < vectorEnd)
+        {
+            // Load 16 sbytes; sign-extend to 16 shorts (two Vector128<short>),
+            // then to 16 ints (four Vector128<int>), then to 16 floats. NEON
+            // emits SXTL / SXTL2 / SCVTF / FMLA via the Vector128 abstractions.
+            var bytes = Vector128.LoadUnsafe(ref kRef, (nuint)i);
+            var shortsLo = Vector128.WidenLower(bytes);    // SXTL
+            var shortsHi = Vector128.WidenUpper(bytes);    // SXTL2
+            var i0 = Vector128.WidenLower(shortsLo);
+            var i1 = Vector128.WidenUpper(shortsLo);
+            var i2 = Vector128.WidenLower(shortsHi);
+            var i3 = Vector128.WidenUpper(shortsHi);
+            var f0 = Vector128.ConvertToSingle(i0);
+            var f1 = Vector128.ConvertToSingle(i1);
+            var f2 = Vector128.ConvertToSingle(i2);
+            var f3 = Vector128.ConvertToSingle(i3);
+
+            var q0 = Vector128.LoadUnsafe(ref qRef, (nuint)i);
+            var q1 = Vector128.LoadUnsafe(ref qRef, (nuint)(i + 4));
+            var q2 = Vector128.LoadUnsafe(ref qRef, (nuint)(i + 8));
+            var q3 = Vector128.LoadUnsafe(ref qRef, (nuint)(i + 12));
+
+            // AdvSimd.FusedMultiplyAdd(addend, left, right) emits FMLA on ARM.
+            acc = AdvSimd.FusedMultiplyAdd(acc, q0, f0);
+            acc = AdvSimd.FusedMultiplyAdd(acc, q1, f1);
+            acc = AdvSimd.FusedMultiplyAdd(acc, q2, f2);
+            acc = AdvSimd.FusedMultiplyAdd(acc, q3, f3);
+
+            i += chunk;
+        }
+
+        var sum = Vector128.Sum(acc);
+        for (; i < headDim; i++)
+        {
+            sum += q[i] * (float)k[i];
+        }
+
+        return sum * kScale;
     }
 
     /// <summary>
@@ -216,12 +280,69 @@ internal static class AttentionMath
         float weight,
         int headDim)
     {
+        if (AdvSimd.IsSupported && headDim >= 16)
+        {
+            AccumulateWeightedInt8Arm(target, source, vScale, weight, headDim);
+            return;
+        }
         if (Avx2.IsSupported && headDim >= 16)
         {
             AccumulateWeightedInt8Avx2(target, source, vScale, weight, headDim);
             return;
         }
         AccumulateWeightedInt8Portable(target, source, vScale, weight, headDim);
+    }
+
+    /// <summary>
+    /// ARM NEON path: <c>target += folded * dequant(source)</c> in 16-byte
+    /// chunks producing 4 Vector128&lt;float&gt; FMLAs per chunk. Mirrors
+    /// <see cref="DotInt8Arm"/>'s widen ladder. Activates whenever
+    /// <see cref="AdvSimd.IsSupported"/> is true (any ARMv8 host).
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AccumulateWeightedInt8Arm(
+        Span<float> target,
+        ReadOnlySpan<sbyte> source,
+        float vScale,
+        float weight,
+        int headDim)
+    {
+        var folded = weight * vScale;
+        var foldedVec = Vector128.Create(folded);
+        const int chunk = 16;
+        var vectorEnd = headDim - (headDim % chunk);
+
+        ref var sRef = ref MemoryMarshal.GetReference(source);
+        ref var tRef = ref MemoryMarshal.GetReference(target);
+
+        var i = 0;
+        while (i < vectorEnd)
+        {
+            var bytes = Vector128.LoadUnsafe(ref sRef, (nuint)i);
+            var shortsLo = Vector128.WidenLower(bytes);
+            var shortsHi = Vector128.WidenUpper(bytes);
+            var f0 = Vector128.ConvertToSingle(Vector128.WidenLower(shortsLo));
+            var f1 = Vector128.ConvertToSingle(Vector128.WidenUpper(shortsLo));
+            var f2 = Vector128.ConvertToSingle(Vector128.WidenLower(shortsHi));
+            var f3 = Vector128.ConvertToSingle(Vector128.WidenUpper(shortsHi));
+
+            var t0 = Vector128.LoadUnsafe(ref tRef, (nuint)i);
+            var t1 = Vector128.LoadUnsafe(ref tRef, (nuint)(i + 4));
+            var t2 = Vector128.LoadUnsafe(ref tRef, (nuint)(i + 8));
+            var t3 = Vector128.LoadUnsafe(ref tRef, (nuint)(i + 12));
+
+            AdvSimd.FusedMultiplyAdd(t0, f0, foldedVec).StoreUnsafe(ref tRef, (nuint)i);
+            AdvSimd.FusedMultiplyAdd(t1, f1, foldedVec).StoreUnsafe(ref tRef, (nuint)(i + 4));
+            AdvSimd.FusedMultiplyAdd(t2, f2, foldedVec).StoreUnsafe(ref tRef, (nuint)(i + 8));
+            AdvSimd.FusedMultiplyAdd(t3, f3, foldedVec).StoreUnsafe(ref tRef, (nuint)(i + 12));
+
+            i += chunk;
+        }
+
+        for (; i < headDim; i++)
+        {
+            target[i] += folded * source[i];
+        }
     }
 
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
