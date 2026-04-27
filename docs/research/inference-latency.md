@@ -540,7 +540,33 @@ This is the strict gate from the original plan KV5 test 7. On a small model the 
 
 Test count: 793/793 fast-lane green (788 + 4 KV5b end-to-end + 2 env-override - 1 host-load-flaky perf gate excluded; gate passes in isolation).
 
-#### Bonsai end-to-end gate (deferred to follow-on)
+#### Bonsai end-to-end gate (live)
 
-Live `/api/chat` against `data/models/bonsai.bitnetsharp.gguf` with `BITNETSHARP_KV_CACHE_QUANTIZATION=Int8` is a follow-on measurement: the serve restart + 5-run warm loop + 12-min model load is its own session. The wire-up is verified by the KV5b unit tests (argmax stream parity at small model). The expected outcome on Bonsai: per-decode-token unchanged at short context (KV cache fits in L2 either way), measurable bandwidth win at long context (multi-turn AnythingLLM session, capacity ~512+ tokens) where the 4x cache footprint cut keeps more layers L3-resident.
+Live `/api/chat` against `data/models/bonsai.bitnetsharp.gguf` (782.3 M params, 36 layers, dim 4096, 32 Q / 8 KV heads). AMD Ryzen 9 5900HX (AVX2), .NET 10, Release, port 11435 (port 11434 was held by the system Ollama). Same prompt `"Say hello."` and `num_predict=8` as the H5 measurement; one warm `curl` before the timed loop, then five timed chats back-to-back. The fp32 baseline was measured on the same host immediately after the int8 run with no concurrent BDN or test workload, so the two columns share noise floor.
+
+| Run | Int8 total_ms | Int8 TTFT_ms | Int8 decode_dur_ms | Fp32 total_ms | Fp32 TTFT_ms | Fp32 decode_dur_ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 3 183 | 2 222 | 961 | 6 235 | 5 363 | 872 |
+| 2 | 4 528 | 3 450 | 1 078 | 10 417 | 9 422 | 995 |
+| 3 | 5 158 | 4 051 | 1 108 | 12 567 | 11 702 | 865 |
+| 4 | 3 482 | 2 418 | 1 064 | 9 993 | 9 113 | 880 |
+| 5 | 3 888 | 2 889 | 999 | 8 893 | 7 943 | 950 |
+| **avg** | **4 048** | **3 006** | **1 042** | **9 621** | **8 708** | **912** |
+
+Per-decode-token (= decode_dur / (eval - 1) = decode_dur / 8 because the first decoded token is folded into TTFT): Int8 = **130 ms**, Fp32 = **114 ms**.
+
+| Metric | Fp32 KV | Int8 KV | Int8 ratio |
+| --- | ---: | ---: | ---: |
+| total_ms (avg) | 9 621 | 4 048 | **0.42** |
+| TTFT_ms (prefill) | 8 708 | 3 006 | **0.35** |
+| decode_dur_ms | 912 | 1 042 | 1.14 |
+| per_decode_token_ms | 114 | 130 | 1.14 |
+
+**The TTFT win dominates total wall.** The 33-token Bonsai prefill builds a per-layer attention scan over a 32-head x 33-target x 33-source x 128-headDim K matrix. Per layer the working K set is 33 x 128 x 4 = 16.5 KiB fp32 across 8 KV heads = 132 KiB; across 36 layers that's a ~4.7 MiB working footprint. Int8 collapses this to ~1.2 MiB. On Zen 3 with 4 MiB L2 + 16 MiB L3 per CCX the fp32 prefill spills out of L2 into L3/DRAM; int8 keeps the working set L2-resident. Result: **Int8 KV 2.9x faster TTFT, 2.4x faster total wall** for the 8-token decode workload.
+
+**Decode-token cost regresses 14%** (130 ms vs 114 ms). At decode positions 33-41 the per-layer K cache fits L1 (5 KiB int8 or 21 KiB fp32) so the bandwidth win evaporates and the `Vector.Widen` dequant overhead in `AttentionMath.DotInt8` shows up as a small constant cost per attention scan. This matches the KV6 micro-benchmark (int8 ~13% slower at SeqLen=128).
+
+The shape of the trade-off matches expectations: int8 KV is a bandwidth optimization, not a compute optimization. It pays for itself wherever the K cache spills out of L2 (long prefill, multi-turn context, large head count), and it costs ~14% wherever the K cache fits L1 (single-token decode at short past_length). For multi-turn AnythingLLM sessions where prefill cost dominates each turn after the first, int8 KV is a clear net win.
+
+The KV6 single-layer KvCacheBenchmarks crossover sat between SeqLen 128 and 512; the Bonsai end-to-end measurement compresses the crossover into one workload because prefill scans 33 sources across 36 layers x 8 KV heads, which is exactly the multi-layer compounding the KV6 narrative predicted.
 
