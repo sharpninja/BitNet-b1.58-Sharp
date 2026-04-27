@@ -638,3 +638,47 @@ The bandwidth thesis from KV1 holds end-to-end:
 
 Bonsai short-ctx with the Avx2 hand-roll has not been re-measured this round; the Avx2 path's KvCacheBenchmarks numbers predict the short-ctx 14% decode regression should also flip to roughly parity-or-better, but live `/api/chat` confirmation of the short-ctx case is queued as the next follow-on after this PR lands.
 
+### KV-FU4 - Bonsai short-ctx re-measurement post-Avx2
+
+Live `/api/chat` against `data/models/bonsai.bitnetsharp.gguf` with the original H5 short-context payload (33-token prompt + `num_predict=8`). Same Zen 3 / AVX2 host as KV-FU3, fp32 measured first then int8 immediately after.
+
+| Run | Fp32 total_ms | Fp32 TTFT_ms | Fp32 decode_dur_ms | Int8 total_ms | Int8 TTFT_ms | Int8 decode_dur_ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 5 419 | 4 582 | 837 | 3 173 | 2 177 | 996 |
+| 2 | 10 766 | 9 890 | 875 | 3 754 | 2 843 | 911 |
+| 3 | 11 192 | 10 290 | 902 | 3 770 | 2 909 | 861 |
+| 4 | 11 661 | 10 723 | 938 | 3 245 | 2 383 | 862 |
+| 5 | 5 178 | 4 107 | 1 070 | 3 245 | 2 403 | 842 |
+| **avg** | **8 843** | **7 918** | **924** | **3 437** | **2 543** | **894** |
+
+Per-decode-token (= decode_dur / (eval - 1) = decode_dur / 8): Fp32 = **115.6 ms**, Int8 = **111.8 ms**.
+
+| Metric | Fp32 KV | Int8 KV (Avx2) | Int8 ratio |
+| --- | ---: | ---: | ---: |
+| total_ms (avg) | 8 843 | 3 437 | **0.39** (2.6x faster) |
+| TTFT_ms (33 prefill) | 7 918 | 2 543 | **0.32** (3.1x faster) |
+| decode_dur_ms | 924 | 894 | **0.97** (1.04x faster) |
+| per_decode_token_ms | 115.6 | 111.8 | **0.97** (1.03x faster) |
+
+**The 14% decode regression flipped to a 3% win.** Comparison vs the pre-Avx2 int8 measurement on the same workload:
+
+| Path | Per-decode-token | vs fp32 |
+| --- | ---: | ---: |
+| Fp32 KV | 115.6 ms | baseline |
+| Int8 KV (Vector.Widen, prior) | 130 ms | 14% slower |
+| Int8 KV (Avx2 hand-roll, now) | 111.8 ms | 3% **faster** |
+
+Total wall went from 2.4x faster (pre-Avx2 int8 vs fp32) to 2.6x faster (post-Avx2). TTFT from 2.9x to 3.1x. The Avx2 hand-roll closed the L1-resident decode gap entirely while preserving the bandwidth-bound prefill win.
+
+Section B's bandwidth-vs-compute tradeoff narrative collapses with the Avx2 path:
+
+| Workload | Prior (Vector.Widen) | Now (Avx2 hand-roll) |
+| --- | --- | --- |
+| Short-ctx total | 2.4x faster | **2.6x faster** |
+| Short-ctx TTFT | 2.9x faster | **3.1x faster** |
+| Short-ctx decode | 14% slower | **3% faster** |
+| Long-ctx total | n/a | 1.45x faster |
+| Long-ctx decode | n/a | 9% faster |
+
+**Int8 KV is now strictly better than fp32 KV across every measured Bonsai workload.** The architectural decision in KV5b to make int8 opt-in via env var (default fp32) is preserved for backwards compatibility, but the data supports promoting `BITNETSHARP_KV_CACHE_QUANTIZATION=Int8` to a recommended-default for all Bonsai serve deployments.
+

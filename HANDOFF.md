@@ -1,8 +1,8 @@
 # BitNet-b1.58-Sharp - Session Handoff
 
 **Date:** 2026-04-27
-**HEAD on `main`:** `e7818bf docs(research): live Bonsai int8 KV measurement (2.4x total wall)`
-**Branch:** `feat/kv-deferred-followons` (open PR pending; KV-FU1 + KV-FU2 + KV-FU3)
+**HEAD on `main`:** `67c289a perf(inference): Section B follow-ons (KV-FU1 Avx2 + KV-FU2 integer composer int8 + KV-FU3 long-ctx Bonsai)` (KV-FU4 short-ctx re-measurement landing on top)
+**Branches:** `main` only.
 **Tests:** 794/794 fast-lane green (1 host-load-flaky `IntegerPipelineLatencyTests` excluded; passes in isolation)
 
 ## What just shipped (PR 21, squashed into `662c8c0`)
@@ -80,11 +80,14 @@ All three deferred items from the prior round landed on `feat/kv-deferred-follow
 - **KV-FU1** Avx2 VPMOVSXBD hand-roll for `AttentionMath.DotInt8` / `AccumulateWeightedInt8`. Int8 now 13-32% faster than fp32 at every KvCacheBenchmarks SeqLen (was 14% slower with Vector.Widen path).
 - **KV-FU2** Integer-forward composer int8 KV path: `IntegerForwardComposer.ForwardWithCache(BitNetLayer, float[,], QuantizedKvLayerCache, int)` overload + `BitNetTransformer.Integer.cs` dispatch on cache type. `BITNETSHARP_USE_INTEGER_FORWARD=1 BITNETSHARP_KV_CACHE_QUANTIZATION=Int8` now works end-to-end.
 - **KV-FU3** Long-context Bonsai A/B (171 prefill / 50 decode): int8 1.45x total / 1.63x TTFT / 1.09x decode (was 14% slower at short ctx).
+- **KV-FU4** Short-ctx re-measurement post-Avx2 (33 prefill / 8 decode): int8 **2.6x total / 3.1x TTFT / 3% decode win**. Decode regression flipped from 14% slower to 3% faster.
+
+**Net result: int8 KV is strictly better than fp32 KV across every measured Bonsai workload.** Recommended default for all serve deployments: `BITNETSHARP_KV_CACHE_QUANTIZATION=Int8`.
 
 Remaining open:
 
-1. **Bonsai short-ctx re-measurement with Avx2 hand-roll**: KvCacheBenchmarks predicts the prior 14% decode regression should also flip to parity-or-better. Live `/api/chat` confirmation queued.
-2. **Quantize Q + use VPDPBSSD**: AVX-VNNI-INT8 hardware path. Eliminates the dequant entirely by quantising the query too. Requires AttentionMath signature change (q becomes sbyte). Multi-day refactor.
+1. **Quantize Q + use VPDPBSSD via AvxVnniInt8**: AVX-VNNI-INT8 hardware path. Eliminates the dequant entirely by quantising the query too. Requires AttentionMath signature change (q becomes sbyte) and per-layer Q quantisation hoisting. Unmeasurable on dev box (Zen 3 5900HX has no AVX-VNNI-INT8); wins on Sapphire Rapids+, Granite Rapids, Zen 5+. Multi-day refactor.
+2. **Promote `BITNETSHARP_KV_CACHE_QUANTIZATION=Int8` to default**: data supports it; gated only by backwards-compat. Could ship as a default flip in BitNetConfig + a serve-startup banner noting the change.
 
 ## How to resume
 
