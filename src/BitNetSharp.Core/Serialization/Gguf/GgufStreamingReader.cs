@@ -34,11 +34,11 @@ internal sealed class GgufStreamingReader : IDisposable
     private const uint SupportedVersion = 3;
     private const uint DefaultAlignment = 32;
 
-    private readonly FileStream _stream;
+    private readonly Stream _stream;
     private readonly BinaryReader _reader;
     private bool _disposed;
 
-    private GgufStreamingReader(FileStream stream, IReadOnlyDictionary<string, object> metadata, IReadOnlyList<GgufTensorInfo> tensors)
+    private GgufStreamingReader(Stream stream, IReadOnlyDictionary<string, object> metadata, IReadOnlyList<GgufTensorInfo> tensors)
     {
         _stream = stream;
         _reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);
@@ -52,8 +52,23 @@ internal sealed class GgufStreamingReader : IDisposable
     public static GgufStreamingReader Open(string path)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
+        return Open(File.OpenRead(path));
+    }
 
-        var stream = File.OpenRead(path);
+    /// <summary>
+    /// Opens a GGUF reader over a caller-supplied seekable stream. Used by
+    /// callers that load the GGUF from an embedded assembly resource
+    /// (<see cref="System.Reflection.Assembly.GetManifestResourceStream(string)"/>)
+    /// or any other stream source. The reader takes ownership of
+    /// <paramref name="stream"/> and disposes it. Stream must be seekable.
+    /// </summary>
+    public static GgufStreamingReader Open(Stream stream)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        if (!stream.CanSeek)
+        {
+            throw new ArgumentException("GGUF stream must be seekable.", nameof(stream));
+        }
         try
         {
             using var reader = new BinaryReader(stream, Encoding.UTF8, leaveOpen: true);

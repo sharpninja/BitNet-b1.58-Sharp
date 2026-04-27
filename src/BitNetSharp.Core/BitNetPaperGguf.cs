@@ -39,13 +39,63 @@ public static class BitNetPaperGguf
         string path,
         ILogger<BitNetPaperModel> logger,
         ILoggerFactory loggerFactory,
-        VerbosityLevel verbosity = VerbosityLevel.Normal)
+        VerbosityLevel verbosity = VerbosityLevel.Normal,
+        IProgress<double>? progress = null)
     {
         ArgumentException.ThrowIfNullOrWhiteSpace(path);
         ArgumentNullException.ThrowIfNull(logger);
         ArgumentNullException.ThrowIfNull(loggerFactory);
 
         using var reader = GgufStreamingReader.Open(path);
+        var model = Load(reader, logger, loggerFactory, verbosity, progress);
+        LoadSidecars(model, path);
+        return model;
+    }
+
+    private static void LoadSidecars(BitNetPaperModel model, string path)
+    {
+        var bucketSidecarPath = GetBucketSidecarPath(path);
+        if ((model.Options.EnableChainBuckets || model.Options.EnableSequenceCompression) && File.Exists(bucketSidecarPath))
+        {
+            model.LoadBucketTable(ChainBucketTableBinarySerializer.Load(bucketSidecarPath));
+        }
+
+        var heatMapSidecarPath = GetHeatMapSidecarPath(path);
+        if (model.RecallHeatMap is not null && File.Exists(heatMapSidecarPath))
+        {
+            model.RecallHeatMap.MergeFrom(BucketRecallHeatMapSerializer.Load(heatMapSidecarPath));
+        }
+    }
+
+    /// <summary>
+    /// KV-FU8: load a Bonsai-compatible GGUF model from a caller-supplied
+    /// seekable stream (e.g. <see cref="System.Reflection.Assembly.GetManifestResourceStream(string)"/>
+    /// for an embedded-resource gguf in a packaged app). Skips the on-disk
+    /// extract step entirely; gguf bytes are read directly from the resource
+    /// section of the loaded assembly image. Stream must be seekable.
+    /// </summary>
+    public static BitNetPaperModel Load(
+        Stream stream,
+        ILogger<BitNetPaperModel> logger,
+        ILoggerFactory loggerFactory,
+        VerbosityLevel verbosity = VerbosityLevel.Normal,
+        IProgress<double>? progress = null)
+    {
+        ArgumentNullException.ThrowIfNull(stream);
+        ArgumentNullException.ThrowIfNull(logger);
+        ArgumentNullException.ThrowIfNull(loggerFactory);
+
+        using var reader = GgufStreamingReader.Open(stream);
+        return Load(reader, logger, loggerFactory, verbosity, progress);
+    }
+
+    private static BitNetPaperModel Load(
+        GgufStreamingReader reader,
+        ILogger<BitNetPaperModel> logger,
+        ILoggerFactory loggerFactory,
+        VerbosityLevel verbosity,
+        IProgress<double>? progress = null)
+    {
         ValidateMetadata(reader.Metadata);
 
         var config = ReadConfig(reader.Metadata);
@@ -103,7 +153,14 @@ public static class BitNetPaperGguf
             UseIntegerForward: BitNetOptions.IntegerForwardEnvDefault);
 
         var bootstrapSeed = GetRequiredInt32(reader.Metadata, "bitnetsharp.bootstrap_seed");
-        var model = new BitNetPaperModel(options, logger, loggerFactory, config, bootstrapSeed);
+        // Construction is the dominant load phase (random-init 36 layers x 7
+        // BitLinears = ~3.4 GB on Bonsai). Map ctor reports to 0..0.5 of
+        // overall progress; the tensor-import pass below maps to 0.5..1.0.
+        var ctorProgress = progress is null
+            ? null
+            : new Progress<double>(p => progress.Report(p * 0.5));
+        var model = new BitNetPaperModel(options, logger, loggerFactory, config, bootstrapSeed, ctorProgress);
+        progress?.Report(0.5);
 
         var formatVersion = DetectFormatVersion(reader.Metadata);
 
@@ -114,7 +171,19 @@ public static class BitNetPaperGguf
         // into trits, and the float[,] becomes GC-eligible before the next
         // tensor is read. In either case peak additional RAM is bounded by
         // the largest single projection.
+        // Total tensor count for progress reporting:
+        // 1 token_embd + 1 output_norm + 1 output + per-layer (2 norms + 7 BitLinears).
+        // Reports map 0..1 across imports, then linearly to 0.5..1.0 of overall.
+        var totalTensors = 3 + config.LayerCount * 9;
+        var tensorIndex = 0;
+        void Tick()
+        {
+            tensorIndex++;
+            progress?.Report(0.5 + 0.5 * tensorIndex / totalTensors);
+        }
+
         model.ImportTokenEmbeddings(reader.ReadMatrix(tensorByName[TokenEmbeddingsTensorName], config.VocabSize, config.Dimension));
+        Tick();
 
         var linearLayers = model.GetTransformerBitLinearLayers().ToArray();
         var normLayers = model.GetNormLayers().ToArray();
@@ -123,34 +192,22 @@ public static class BitNetPaperGguf
         var normIndex = 0;
         for (var layer = 0; layer < config.LayerCount; layer++)
         {
-            normLayers[normIndex++].ImportScale(reader.ReadVector(tensorByName[GetAttentionNormTensorName(layer)], config.Dimension));
-            ImportBitLinear(reader, tensorByName[GetAttentionProjectionTensorName(layer, "q")], linearLayers[linearIndex++], config.Dimension, config.Dimension, formatVersion);
-            ImportBitLinear(reader, tensorByName[GetAttentionProjectionTensorName(layer, "k")], linearLayers[linearIndex++], kvDim, config.Dimension, formatVersion);
-            ImportBitLinear(reader, tensorByName[GetAttentionProjectionTensorName(layer, "v")], linearLayers[linearIndex++], kvDim, config.Dimension, formatVersion);
-            ImportBitLinear(reader, tensorByName[GetAttentionProjectionTensorName(layer, "out")], linearLayers[linearIndex++], config.Dimension, config.Dimension, formatVersion);
-            normLayers[normIndex++].ImportScale(reader.ReadVector(tensorByName[GetFeedForwardNormTensorName(layer)], config.Dimension));
-            ImportBitLinear(reader, tensorByName[GetFeedForwardProjectionTensorName(layer, "gate")], linearLayers[linearIndex++], config.HiddenDimension, config.Dimension, formatVersion);
-            ImportBitLinear(reader, tensorByName[GetFeedForwardProjectionTensorName(layer, "up")], linearLayers[linearIndex++], config.HiddenDimension, config.Dimension, formatVersion);
-            ImportBitLinear(reader, tensorByName[GetFeedForwardProjectionTensorName(layer, "down")], linearLayers[linearIndex++], config.Dimension, config.HiddenDimension, formatVersion);
+            normLayers[normIndex++].ImportScale(reader.ReadVector(tensorByName[GetAttentionNormTensorName(layer)], config.Dimension)); Tick();
+            ImportBitLinear(reader, tensorByName[GetAttentionProjectionTensorName(layer, "q")], linearLayers[linearIndex++], config.Dimension, config.Dimension, formatVersion); Tick();
+            ImportBitLinear(reader, tensorByName[GetAttentionProjectionTensorName(layer, "k")], linearLayers[linearIndex++], kvDim, config.Dimension, formatVersion); Tick();
+            ImportBitLinear(reader, tensorByName[GetAttentionProjectionTensorName(layer, "v")], linearLayers[linearIndex++], kvDim, config.Dimension, formatVersion); Tick();
+            ImportBitLinear(reader, tensorByName[GetAttentionProjectionTensorName(layer, "out")], linearLayers[linearIndex++], config.Dimension, config.Dimension, formatVersion); Tick();
+            normLayers[normIndex++].ImportScale(reader.ReadVector(tensorByName[GetFeedForwardNormTensorName(layer)], config.Dimension)); Tick();
+            ImportBitLinear(reader, tensorByName[GetFeedForwardProjectionTensorName(layer, "gate")], linearLayers[linearIndex++], config.HiddenDimension, config.Dimension, formatVersion); Tick();
+            ImportBitLinear(reader, tensorByName[GetFeedForwardProjectionTensorName(layer, "up")], linearLayers[linearIndex++], config.HiddenDimension, config.Dimension, formatVersion); Tick();
+            ImportBitLinear(reader, tensorByName[GetFeedForwardProjectionTensorName(layer, "down")], linearLayers[linearIndex++], config.Dimension, config.HiddenDimension, formatVersion); Tick();
         }
 
-        normLayers[normIndex].ImportScale(reader.ReadVector(tensorByName[OutputNormTensorName], config.Dimension));
-        ImportBitLinear(reader, tensorByName[OutputTensorName], model.GetOutputHead(), config.VocabSize, config.Dimension, formatVersion);
+        normLayers[normIndex].ImportScale(reader.ReadVector(tensorByName[OutputNormTensorName], config.Dimension)); Tick();
+        ImportBitLinear(reader, tensorByName[OutputTensorName], model.GetOutputHead(), config.VocabSize, config.Dimension, formatVersion); Tick();
 
         model.ImportMemorizedResponses(memorizedResponses);
-
-        var bucketSidecarPath = GetBucketSidecarPath(path);
-        if ((model.Options.EnableChainBuckets || model.Options.EnableSequenceCompression) && File.Exists(bucketSidecarPath))
-        {
-            model.LoadBucketTable(ChainBucketTableBinarySerializer.Load(bucketSidecarPath));
-        }
-
-        var heatMapSidecarPath = GetHeatMapSidecarPath(path);
-        if (model.RecallHeatMap is not null && File.Exists(heatMapSidecarPath))
-        {
-            model.RecallHeatMap.MergeFrom(BucketRecallHeatMapSerializer.Load(heatMapSidecarPath));
-        }
-
+        progress?.Report(1.0);
         return model;
     }
 

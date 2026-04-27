@@ -82,7 +82,8 @@ public sealed class BitNetPaperModel
         ILogger<BitNetPaperModel> logger,
         ILoggerFactory loggerFactory,
         BitNetConfig? config = null,
-        int seed = 42)
+        int seed = 42,
+        IProgress<double>? constructionProgress = null)
     {
         ArgumentNullException.ThrowIfNull(options);
         ArgumentNullException.ThrowIfNull(logger);
@@ -122,7 +123,7 @@ public sealed class BitNetPaperModel
         }
 
         // Use a deterministic default so the seeded paper model stays stable in tests and CLI inspection.
-        Transformer = new BitNetTransformer(Config, _loggerFactory.CreateLogger<BitNetTransformer>(), seed);
+        Transformer = new BitNetTransformer(Config, _loggerFactory.CreateLogger<BitNetTransformer>(), seed, constructionProgress);
     }
 
     public BitNetOptions Options { get; }
@@ -334,6 +335,7 @@ public sealed class BitNetPaperModel
             {
                 _logger.LogInformation("Memorized response hit prompt_key_hash={PromptKeyHash}", promptKey.GetHashCode());
                 var memorizedLimit = Math.Max(1, maxTokens.GetValueOrDefault(Options.MaxResponseTokens));
+                var memorizedStep = 0;
                 foreach (var tokenId in memorizedResponse)
                 {
                     if (generatedTokenIds.Count >= memorizedLimit)
@@ -347,6 +349,19 @@ public sealed class BitNetPaperModel
                     cancellationToken.ThrowIfCancellationRequested();
                     generatedTokenIds.Add(tokenId);
                     emitToken?.Invoke(tokenId);
+                    // KV-FU8: also fire the rich callback so StreamGenerateAsync
+                    // produces events for memorized prompts. Memorized responses
+                    // skip prefill/decode entirely; surface zero timings so
+                    // streaming clients can distinguish memorized from
+                    // autoregressive paths but still see the token stream.
+                    onTokenEmitted?.Invoke(new GeneratedToken(
+                        TokenId: tokenId,
+                        TokenText: string.Empty,
+                        Step: memorizedStep,
+                        ForwardMs: 0d,
+                        SelectMs: 0d,
+                        DecodeMs: 0d));
+                    memorizedStep++;
                 }
 
                 if (Options.Verbosity == VerbosityLevel.Verbose)

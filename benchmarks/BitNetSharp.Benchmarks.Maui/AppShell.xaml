@@ -6,9 +6,15 @@
     xmlns:local="clr-namespace:BitNetSharp.Benchmarks.Maui"
     Title="BitNetSharp.Benchmarks.Maui">
 
-    <ShellContent
-        Title="Home"
-        ContentTemplate="{DataTemplate local:MainPage}"
-        Route="MainPage" />
+    <TabBar>
+        <ShellContent
+            Title="KV Bench"
+            ContentTemplate="{DataTemplate local:MainPage}"
+            Route="MainPage" />
+        <ShellContent
+            Title="Chat"
+            ContentTemplate="{DataTemplate local:ChatPage}"
+            Route="ChatPage" />
+    </TabBar>
 
 </Shell>

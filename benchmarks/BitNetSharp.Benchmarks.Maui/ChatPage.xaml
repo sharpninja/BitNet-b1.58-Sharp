@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="BitNetSharp.Benchmarks.Maui.ChatPage"
+             Title="Chat smoke test">
+
+    <ScrollView>
+        <VerticalStackLayout Padding="20" Spacing="14">
+            <Label Text="BitNetSharp chat smoke test"
+                   Style="{StaticResource Headline}" />
+
+            <Label Text="Loads bonsai.bitnetsharp.gguf embedded in the APK (MauiAsset). First launch copies the gguf to AppDataDirectory (~30-60 s); subsequent launches reuse the cached file. Streams responses with per-token forward_ms / select_ms / decode_ms."
+                   Style="{StaticResource SubHeadline}" />
+
+            <HorizontalStackLayout Spacing="12">
+                <Label Text="KV:" VerticalOptions="Center" />
+                <Picker x:Name="KvPicker" WidthRequest="160" SelectedIndex="0">
+                    <Picker.Items>
+                        <x:String>Fp32</x:String>
+                        <x:String>Int8</x:String>
+                    </Picker.Items>
+                </Picker>
+                <Label Text="Max tokens:" VerticalOptions="Center" />
+                <Entry x:Name="MaxTokensEntry"
+                       Text="16"
+                       Keyboard="Numeric"
+                       WidthRequest="80" />
+            </HorizontalStackLayout>
+
+            <Button x:Name="LoadBtn"
+                    Text="Load model"
+                    Clicked="OnLoadClicked" />
+
+            <Entry x:Name="PromptEntry"
+                   Placeholder="Enter prompt..."
+                   Text="how are you hosted" />
+
+            <Label Text="Try memorized prompts: 'how are you hosted', 'where do I deploy', 'what makes BitNet fast'. The bootstrap model has a 68-word vocabulary; ad-hoc prompts may produce empty output. Push Bonsai gguf to /sdcard for full chat (separate session)."
+                   FontSize="10"
+                   FontAttributes="Italic" />
+
+            <Button x:Name="SendBtn"
+                    Text="Send"
+                    Clicked="OnSendClicked"
+                    IsEnabled="False" />
+
+            <Label x:Name="StatusLabel"
+                   Text="Idle."
+                   FontAttributes="Italic" />
+
+            <ProgressBar x:Name="LoadProgress"
+                         Progress="0"
+                         IsVisible="False"
+                         HeightRequest="6" />
+
+            <Label x:Name="ProgressLabel"
+                   Text=""
+                   FontSize="11"
+                   FontAttributes="Italic" />
+
+            <Editor x:Name="OutputEditor"
+                    HeightRequest="540"
+                    IsReadOnly="True"
+                    FontFamily="Monospace"
+                    FontSize="11"
+                    AutoSize="Disabled"
+                    Text="" />
+
+            <Button x:Name="CopyBtn"
+                    Text="Copy results to clipboard"
+                    Clicked="OnCopyClicked" />
+        </VerticalStackLayout>
+    </ScrollView>
+
+</ContentPage>

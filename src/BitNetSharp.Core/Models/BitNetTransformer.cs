@@ -12,7 +12,7 @@ public sealed partial class BitNetTransformer
     private readonly float[,] _tokenEmbeddings;
     private readonly ILogger<BitNetTransformer> _logger;
 
-    public BitNetTransformer(BitNetConfig config, ILogger<BitNetTransformer> logger, int seed = 42)
+    public BitNetTransformer(BitNetConfig config, ILogger<BitNetTransformer> logger, int seed = 42, IProgress<double>? constructionProgress = null)
     {
         ArgumentNullException.ThrowIfNull(config);
         ArgumentNullException.ThrowIfNull(logger);
@@ -22,11 +22,21 @@ public sealed partial class BitNetTransformer
 
         var random = new Random(seed);
         _tokenEmbeddings = ParameterInitializer.CreateMatrix(config.VocabSize, config.Dimension, random);
-        Layers = Enumerable.Range(0, config.LayerCount)
-            .Select(_ => new BitNetLayer(config, random))
-            .ToArray();
+        // Total construction units: layers + 1 (token embed already done) + 1 (FinalNorm) + 1 (OutputHead).
+        // Report progress per layer so callers can show a moving bar during the
+        // 95-MB-per-layer random-init pass that dominates load time on phone CPUs.
+        var layers = new BitNetLayer[config.LayerCount];
+        var totalUnits = config.LayerCount + 2;
+        for (var i = 0; i < config.LayerCount; i++)
+        {
+            layers[i] = new BitNetLayer(config, random);
+            constructionProgress?.Report((double)(i + 1) / totalUnits);
+        }
+        Layers = layers;
         FinalNorm = new RmsNorm(config.Dimension, config.RmsNormEpsilon);
+        constructionProgress?.Report((double)(config.LayerCount + 1) / totalUnits);
         OutputHead = ParameterInitializer.CreateBitLinear(new BitLinearConfig(config.Dimension, config.VocabSize), random);
+        constructionProgress?.Report(1.0);
     }
 
     public BitNetConfig Config { get; }

@@ -43,6 +43,19 @@
 		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">21.0</SupportedOSPlatformVersion>
 		<SupportedOSPlatformVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.17763.0</SupportedOSPlatformVersion>
 		<TargetPlatformMinVersion Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'windows'">10.0.17763.0</TargetPlatformMinVersion>
+
+		<!-- GGUF is already quantized; ZIP compression in the APK has near-zero
+		     payoff and adds first-launch decompression cost. Store uncompressed
+		     so Android's AssetManager can mmap the file directly. -->
+		<AndroidStoreUncompressedFileExtensions>.gguf</AndroidStoreUncompressedFileExtensions>
+
+		<!-- Restrict to ARM64 only. Default MAUI Android publishes both
+		     arm64-v8a and x86_64 (for emulator support); each ABI gets its
+		     own libassembly-store.so containing the EmbeddedResource gguf,
+		     doubling the APK to 2.8 GB which exceeds Android's APK Signature
+		     Scheme v3 2 GB integer-overflow ceiling. The ultimate target is
+		     ARM phones, so emulator support is not needed. -->
+		<RuntimeIdentifiers Condition="$([MSBuild]::GetTargetPlatformIdentifier('$(TargetFramework)')) == 'android'">android-arm64</RuntimeIdentifiers>
 	</PropertyGroup>
 
 	<ItemGroup>
@@ -61,6 +74,22 @@
 
 		<!-- Raw Assets (also remove the "Resources\Raw" prefix) -->
 		<MauiAsset Include="Resources\Raw\**" LogicalName="%(RecursiveDir)%(Filename)%(Extension)" />
+		<!-- KV-FU8: Bonsai gguf travels in the APK as a MauiAsset (mmap'd
+		     from APK assets directory at runtime). EmbeddedResource was tried
+		     but Mono's GetManifestResourceStream materialised the full
+		     1.39 GB blob into managed heap on access -> OOM-suicide on phone.
+		     MauiAsset path: copy from APK to app-private files dir on first
+		     launch (UFS sequential write ~600 MB/s = ~3 s), cache thereafter.
+		     File never goes through managed heap. -->
+		<!-- Source the gguf from the repo's data/models/ tree so builds work
+		     on a fresh clone without manually staging the 1.3 GB file. The
+		     APK package treats Link as the embedded asset path. Build fails
+		     if the file is missing (same contract as data/models/ everywhere
+		     else in the repo). -->
+		<MauiAsset Include="..\..\data\models\bonsai.bitnetsharp.gguf"
+		           Link="bonsai.bitnetsharp.gguf"
+		           LogicalName="bonsai.bitnetsharp.gguf"
+		           Condition="Exists('..\..\data\models\bonsai.bitnetsharp.gguf')" />
 	</ItemGroup>
 
 	<ItemGroup>
