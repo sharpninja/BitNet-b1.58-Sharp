@@ -570,3 +570,71 @@ The shape of the trade-off matches expectations: int8 KV is a bandwidth optimiza
 
 The KV6 single-layer KvCacheBenchmarks crossover sat between SeqLen 128 and 512; the Bonsai end-to-end measurement compresses the crossover into one workload because prefill scans 33 sources across 36 layers x 8 KV heads, which is exactly the multi-layer compounding the KV6 narrative predicted.
 
+## Section B follow-ons
+
+Three deferred items from the KV5b close-out landed together on `feat/kv-deferred-followons`.
+
+### KV-FU1 - VPMOVSXBD hand-roll for DotInt8 / AccumulateWeightedInt8
+
+The portable `Vector.Widen` path went sbyte -> short -> int -> float in three stages, producing 4 `Vector<float>` accumulators per 32-lane chunk. JIT inspection showed the framework path needed ~14 ymm registers in flight (4 widen-shorts + 4 widen-ints + 4 cvts + 4 q + 1 acc); on Zen 3 with 16 architectural ymm registers that produces stack spills.
+
+Direct Avx2 intrinsic kernel (`AttentionMath.DotInt8Avx2` + `AccumulateWeightedInt8Avx2`) processes 16 sbytes per chunk via two `Avx2.ConvertToVector256Int32` (VPMOVSXBD ymm) plus two `Avx.ConvertToVector256Single` (VCVTDQ2PS ymm), keeping just 5 ymm registers in flight (2 floatLo/Hi + 2 qLo/Hi + 1 acc). FMA paired against the q halves via `Fma.MultiplyAdd` when supported.
+
+`DotInt8` / `AccumulateWeightedInt8` dispatch on `Avx2.IsSupported && headDim >= 16`; the portable Vector.Widen path stays as the fallback for non-AVX2 hosts and the headDim < 16 tail.
+
+KvCacheBenchmarks re-run on the same Zen 3 / AVX2 host:
+
+| SeqLen | DotScan_Fp32 | DotScan_Int8 (Avx2 hand-roll) | Int8 ratio |
+| -----: | -----------: | ----------------------------: | ---------: |
+|     32 |       461 ns |                        401 ns |       0.87 |
+|    128 |     2 126 ns |                      1 749 ns |       0.82 |
+|    512 |    11 482 ns |                      7 767 ns |       0.68 |
+|   2048 |    48 485 ns |                     33 832 ns |       0.70 |
+
+**Int8 KV is now 13-32% faster than fp32 at every SeqLen** (was 14% slower at small SeqLen with the Vector.Widen path). The reduced register pressure plus direct VPMOVSXBD emission flipped the small-SeqLen regression into a parity-or-better result.
+
+### KV-FU2 - Integer-forward composer int8 KV path
+
+`IntegerForwardComposer.ForwardWithCache(BitNetLayer, float[,], QuantizedKvLayerCache, int)` overload added. Same shape as the fp32 composer path but writes per-row absmax-quantised K/V into the int8 cache via `IKvCache.WriteKRow` / `WriteVRow`, then scores attention via `AttentionMath.DotInt8` and accumulates weighted V via `AccumulateWeightedInt8`.
+
+`BitNetTransformer.Integer.cs::ForwardWithCacheInteger` switches from a hard rejection (KV5b) to a `cache.Layers[i] switch` that dispatches on concrete cache type. Users with `BITNETSHARP_USE_INTEGER_FORWARD=1 BITNETSHARP_KV_CACHE_QUANTIZATION=Int8` now get the int8 path through the integer hot loop instead of an exception.
+
+Test `tests/BitNetSharp.Tests/BitNetTransformerInt8KvCacheTests.cs::ForwardWithCacheInteger_Int8KvCache_MatchesFloatArgmax` runs both fp32 and int8 caches against the same prefill, then takes one float decode step against the fp32 cache and one int-composer decode step against the int8 cache. Argmax must agree even though int8 K/V introduces small softmax-input perturbation. Test green.
+
+### KV-FU3 - Long-context Bonsai A/B (171-token prompt + 50 decode)
+
+Live `/api/chat` against `data/models/bonsai.bitnetsharp.gguf` with a long-form prompt (171 prefill tokens) and `num_predict=32` (model emitted 50 new tokens before context-full exit). Same Zen 3 / AVX2 host, same warm-up methodology, fp32 measured first then int8 immediately after to share noise floor.
+
+| Run | Fp32 total_ms | Fp32 TTFT_ms | Fp32 decode_dur_ms | Int8 total_ms | Int8 TTFT_ms | Int8 decode_dur_ms |
+| ---: | ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 15 182 | 10 935 | 4 247 | 12 251 | 8 324 | 3 927 |
+| 2 | 26 061 | 21 552 | 4 509 | 12 458 | 8 514 | 3 944 |
+| 3 | 13 371 | 9 341 | 4 030 | 12 911 | 8 812 | 4 098 |
+| **avg** | **18 205** | **13 943** | **4 262** | **12 540** | **8 550** | **3 990** |
+
+Per-decode-token (= decode_dur / (eval - 1) = decode_dur / 49): Fp32 = **87.0 ms**, Int8 = **79.8 ms**.
+
+| Metric | Fp32 KV | Int8 KV (Avx2 hand-roll) | Int8 ratio |
+| --- | ---: | ---: | ---: |
+| total_ms (avg) | 18 205 | 12 540 | **0.69** (1.45x faster) |
+| TTFT_ms (prefill 171 tokens) | 13 943 | 8 550 | **0.61** (1.63x faster) |
+| decode_dur_ms | 4 262 | 3 990 | **0.94** (1.07x faster) |
+| per_decode_token_ms | 87.0 | 79.8 | **0.92** (1.09x faster) |
+
+**Decode regression flipped to a win.** The short-context (33 prefill / 8 decode) measurement showed int8 14% slower per decode token. At long context (171 prefill / 50 decode), int8 is 9% faster per decode token. Two effects compound:
+
+1. The Avx2 hand-roll closed the L1-resident decode gap (no longer 14% slower at short SeqLen; now 13% faster).
+2. At past_length 50-220 the per-layer K cache (~5-22 KiB int8 vs 20-90 KiB fp32) is approaching L1 line-fill bandwidth limits in fp32 but stays L1-resident in int8.
+
+Run 2 of fp32 (26 s) is an outlier vs runs 1+3 (~14 s); int8 has tighter run-to-run variance (12.3-12.9 s) which is itself a benefit from the smaller working set. Even excluding the fp32 outlier the int8 win on TTFT (1.19x faster) and total (1.14x faster) holds.
+
+The bandwidth thesis from KV1 holds end-to-end:
+
+| Workload | Int8 TTFT win | Int8 decode win |
+| --- | ---: | ---: |
+| Short-ctx (33 prefill / 8 decode) | 2.9x faster | 14% slower (pre-Avx2) / TBD post-Avx2 |
+| Long-ctx (171 prefill / 50 decode) | 1.6x faster | 1.09x faster |
+| KvCacheBenchmarks SeqLen=2048 | n/a | 1.43x faster (Avx2 path) |
+
+Bonsai short-ctx with the Avx2 hand-roll has not been re-measured this round; the Avx2 path's KvCacheBenchmarks numbers predict the short-ctx 14% decode regression should also flip to roughly parity-or-better, but live `/api/chat` confirmation of the short-ctx case is queued as the next follow-on after this PR lands.
+

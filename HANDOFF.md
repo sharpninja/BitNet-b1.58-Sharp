@@ -1,9 +1,9 @@
 # BitNet-b1.58-Sharp - Session Handoff
 
 **Date:** 2026-04-27
-**HEAD on `main`:** `662c8c0 perf(inference): Section B - quantized int8 KV cache (KV1-KV6 + KV5b end-to-end)`
-**Tests:** 793/793 fast-lane green (1 host-load-flaky `IntegerPipelineLatencyTests` excluded; passes in isolation)
-**Open PRs:** none
+**HEAD on `main`:** `e7818bf docs(research): live Bonsai int8 KV measurement (2.4x total wall)`
+**Branch:** `feat/kv-deferred-followons` (open PR pending; KV-FU1 + KV-FU2 + KV-FU3)
+**Tests:** 794/794 fast-lane green (1 host-load-flaky `IntegerPipelineLatencyTests` excluded; passes in isolation)
 
 ## What just shipped (PR 21, squashed into `662c8c0`)
 
@@ -75,9 +75,16 @@ Live Bonsai 5-run measurement with `BITNETSHARP_KV_CACHE_QUANTIZATION=Int8` (pos
 
 ## Open follow-ons
 
-1. **Integer-forward composer int8 KV path**: the `IntegerForwardComposer.ForwardWithCache` rejection is intentional. Wiring int8 KV through the integer hot path would add `IntegerKvSlot` accessors and an int8 attention dispatch inside the composer; multi-day refactor.
-2. **VPMOVSXBD hand-roll for AttentionMath.DotInt8**: the framework `Vector.Widen` path is correct but ~14% slower than fp32 at L1-resident decode. A direct AVX2 intrinsic kernel could close that gap, recovering the small decode regression while keeping the 2.4x prefill win.
-3. **Long-context multi-turn Bonsai measurement**: the 8-token decode workload measured above already shows the int8 prefill win. A 256-512 token multi-turn AnythingLLM session would likely show an even larger int8 advantage as the cache footprint grows past L3 in fp32 but stays L2/L3-resident in int8.
+All three deferred items from the prior round landed on `feat/kv-deferred-followons` (separate PR; details in `docs/research/inference-latency.md` "Section B follow-ons"):
+
+- **KV-FU1** Avx2 VPMOVSXBD hand-roll for `AttentionMath.DotInt8` / `AccumulateWeightedInt8`. Int8 now 13-32% faster than fp32 at every KvCacheBenchmarks SeqLen (was 14% slower with Vector.Widen path).
+- **KV-FU2** Integer-forward composer int8 KV path: `IntegerForwardComposer.ForwardWithCache(BitNetLayer, float[,], QuantizedKvLayerCache, int)` overload + `BitNetTransformer.Integer.cs` dispatch on cache type. `BITNETSHARP_USE_INTEGER_FORWARD=1 BITNETSHARP_KV_CACHE_QUANTIZATION=Int8` now works end-to-end.
+- **KV-FU3** Long-context Bonsai A/B (171 prefill / 50 decode): int8 1.45x total / 1.63x TTFT / 1.09x decode (was 14% slower at short ctx).
+
+Remaining open:
+
+1. **Bonsai short-ctx re-measurement with Avx2 hand-roll**: KvCacheBenchmarks predicts the prior 14% decode regression should also flip to parity-or-better. Live `/api/chat` confirmation queued.
+2. **Quantize Q + use VPDPBSSD**: AVX-VNNI-INT8 hardware path. Eliminates the dequant entirely by quantising the query too. Requires AttentionMath signature change (q becomes sbyte). Multi-day refactor.
 
 ## How to resume
 

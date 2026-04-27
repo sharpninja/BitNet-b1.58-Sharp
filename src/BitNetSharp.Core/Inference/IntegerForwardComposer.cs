@@ -253,4 +253,131 @@ public static class IntegerForwardComposer
 
         return TensorMath.Add(residual, down);
     }
+
+    /// <summary>
+    /// Section B follow-on: integer-forward composer with int8 K/V cache.
+    /// Same shape as <see cref="ForwardWithCache(BitNetLayer, float[,], LayerKvCache, int)"/>
+    /// but writes per-row absmax-quantised K/V into <paramref name="cache"/>
+    /// and scores attention via <see cref="AttentionMath.DotInt8"/> +
+    /// <see cref="AttentionMath.AccumulateWeightedInt8"/>.
+    /// </summary>
+    public static float[,] ForwardWithCache(
+        BitNetLayer layer,
+        float[,] input,
+        QuantizedKvLayerCache cache,
+        int positionOffset)
+    {
+        ArgumentNullException.ThrowIfNull(layer);
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(cache);
+        ArgumentOutOfRangeException.ThrowIfNegative(positionOffset);
+
+        var config = layer.Config;
+        int dim = config.Dimension;
+        int headDim = config.HeadDimension;
+        int headCount = config.HeadCount;
+        int kvHeadCount = config.KvHeadCount;
+        int kvDim = kvHeadCount * headDim;
+        int newRows = input.GetLength(0);
+        float attentionScale = 1f / MathF.Sqrt(headDim);
+
+        if (input.GetLength(1) != dim)
+        {
+            throw new ArgumentException(
+                $"Expected input dimension {dim}, received {input.GetLength(1)}.",
+                nameof(input));
+        }
+        if (cache.KvDimension != kvDim)
+        {
+            throw new ArgumentException(
+                $"Cache kv dimension {cache.KvDimension} does not match expected {kvDim}.",
+                nameof(cache));
+        }
+
+        int totalLength = positionOffset + newRows;
+        if (totalLength > cache.Capacity)
+        {
+            throw new ArgumentException(
+                $"Cache capacity {cache.Capacity} too small for total length {totalLength}.",
+                nameof(cache));
+        }
+
+        int ropeMaxSeq = Math.Max(totalLength, 128);
+        var (intAttnRms, intFfnRms, intRope) = IntegerLayerPrimitiveCache.Get(layer, ropeMaxSeq);
+        var intSoftmax = IntegerLayerPrimitiveCache.Softmax;
+        var intSwiGLU = IntegerLayerPrimitiveCache.SwiGLU;
+
+        float[,] normed = intAttnRms.Forward(input);
+        var quantAttn = QuantizedActivationBlock.FromFloat(normed);
+
+        float[,] queries = layer.Attention.QueryProjection.ForwardInt32(quantAttn).ToFloat();
+        float[,] newKeys = layer.Attention.KeyProjection.ForwardInt32(quantAttn).ToFloat();
+        float[,] newValues = layer.Attention.ValueProjection.ForwardInt32(quantAttn).ToFloat();
+
+        intRope.ApplyInPlace(queries, headCount, positionOffset);
+        intRope.ApplyInPlace(newKeys, kvHeadCount, positionOffset);
+
+        // Quantise new K/V rows into the int8 cache via the IKvCache contract.
+        var newKeysFlat = AttentionMath.AsFlatSpan(newKeys);
+        var newValuesFlat = AttentionMath.AsFlatSpan(newValues);
+        for (int row = 0; row < newRows; row++)
+        {
+            cache.WriteKRow(positionOffset + row, newKeysFlat.Slice(row * kvDim, kvDim));
+            cache.WriteVRow(positionOffset + row, newValuesFlat.Slice(row * kvDim, kvDim));
+        }
+
+        ref var kFirst = ref System.Runtime.CompilerServices.Unsafe.As<byte, sbyte>(
+            ref System.Runtime.InteropServices.MemoryMarshal.GetArrayDataReference(cache.K));
+        ref var vFirst = ref System.Runtime.CompilerServices.Unsafe.As<byte, sbyte>(
+            ref System.Runtime.InteropServices.MemoryMarshal.GetArrayDataReference(cache.V));
+        var cacheKFlat = System.Runtime.InteropServices.MemoryMarshal.CreateSpan(ref kFirst, cache.K.Length);
+        var cacheVFlat = System.Runtime.InteropServices.MemoryMarshal.CreateSpan(ref vFirst, cache.V.Length);
+        var queriesFlat = AttentionMath.AsFlatSpan(queries);
+
+        int headGroupSize = headCount / kvHeadCount;
+        var attended = new float[newRows, dim];
+        var attendedFlat = AttentionMath.AsFlatSpan(attended);
+        var logitsBuf = new float[totalLength];
+        for (int queryHead = 0; queryHead < headCount; queryHead++)
+        {
+            int kvHead = queryHead / headGroupSize;
+            int queryOffset = queryHead * headDim;
+            int cacheOffset = kvHead * headDim;
+
+            for (int targetRow = 0; targetRow < newRows; targetRow++)
+            {
+                int causalLen = positionOffset + targetRow + 1;
+                var logitsSpan = logitsBuf.AsSpan(0, causalLen);
+                var qSlice = queriesFlat.Slice(targetRow * dim + queryOffset, headDim);
+
+                for (int source = 0; source < causalLen; source++)
+                {
+                    var kSlice = cacheKFlat.Slice(source * kvDim + cacheOffset, headDim);
+                    logitsSpan[source] = AttentionMath.DotInt8(qSlice, kSlice, cache.KScale[source], headDim) * attentionScale;
+                }
+
+                intSoftmax.ApplyRowInPlace(logitsSpan, logitsSpan);
+                var attendedSlice = attendedFlat.Slice(targetRow * dim + queryOffset, headDim);
+                for (int source = 0; source < causalLen; source++)
+                {
+                    var vSlice = cacheVFlat.Slice(source * kvDim + cacheOffset, headDim);
+                    AttentionMath.AccumulateWeightedInt8(attendedSlice, vSlice, cache.VScale[source], logitsSpan[source], headDim);
+                }
+            }
+        }
+
+        var quantAttended = QuantizedActivationBlock.FromFloat(attended);
+        float[,] attnProjected = layer.Attention.OutputProjection.ForwardInt32(quantAttended).ToFloat();
+        float[,] residual = TensorMath.Add(input, attnProjected);
+
+        float[,] normedFfn = intFfnRms.Forward(residual);
+        var quantFfn = QuantizedActivationBlock.FromFloat(normedFfn);
+        float[,] gate = layer.FeedForward.GateProjection.ForwardInt32(quantFfn).ToFloat();
+        float[,] up = layer.FeedForward.UpProjection.ForwardInt32(quantFfn).ToFloat();
+        float[,] swish = intSwiGLU.ApplyToFloat(gate, up);
+        var quantDown = QuantizedActivationBlock.FromFloat(swish);
+        float[,] down = layer.FeedForward.DownProjection.ForwardInt32(quantDown).ToFloat();
+
+        return TensorMath.Add(residual, down);
+    }
 }

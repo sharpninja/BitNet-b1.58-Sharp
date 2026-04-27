@@ -121,19 +121,18 @@ public static partial class BitNetTransformerIntegerExtensions
         float[,] hidden = EmbedTokens(transformer, newTokenIds);
         for (int i = 0; i < transformer.Layers.Length; i++)
         {
-            // KV5b: integer-forward composer requires fp32 LayerKvCache;
-            // int8 KV is not yet wired through the integer hot path.
-            if (cache.Layers[i] is not LayerKvCache fp32Layer)
+            // Section B follow-on: integer-forward composer now supports both
+            // fp32 (LayerKvCache) and int8 (QuantizedKvLayerCache) KV slabs.
+            // Dispatch on concrete cache type.
+            hidden = cache.Layers[i] switch
             {
-                throw new NotSupportedException(
-                    "ForwardWithCacheInteger requires a fp32 LayerKvCache; int8 quantized KV is not supported by the integer-forward path. " +
-                    "Set BitNetConfig.KvCacheQuantization = Fp32 when UseIntegerForward is enabled.");
-            }
-            hidden = IntegerForwardComposer.ForwardWithCache(
-                transformer.Layers[i],
-                hidden,
-                fp32Layer,
-                positionOffset);
+                LayerKvCache fp32Layer => IntegerForwardComposer.ForwardWithCache(
+                    transformer.Layers[i], hidden, fp32Layer, positionOffset),
+                QuantizedKvLayerCache int8Layer => IntegerForwardComposer.ForwardWithCache(
+                    transformer.Layers[i], hidden, int8Layer, positionOffset),
+                _ => throw new NotSupportedException(
+                    $"ForwardWithCacheInteger does not support {cache.Layers[i].GetType().Name}; expected LayerKvCache or QuantizedKvLayerCache."),
+            };
         }
 
         cache.PastLength = totalLength;

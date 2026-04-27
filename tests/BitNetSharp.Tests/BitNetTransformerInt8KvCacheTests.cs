@@ -129,6 +129,32 @@ public sealed class BitNetTransformerInt8KvCacheTests
         }
     }
 
+    [Fact]
+    public void ForwardWithCacheInteger_Int8KvCache_MatchesFloatArgmax()
+    {
+        // Section B follow-on: integer-forward composer now supports int8 KV.
+        // Seed both caches via the fp32 prefill path (deterministic, bit-equal),
+        // then run one float decode step against the fp32 cache and one
+        // int-composer decode step against the int8 cache. Argmax must agree
+        // even though int8 K/V introduces small softmax-input perturbation.
+        var configFp32 = Fp32Config(KvCacheQuantization.Fp32);
+        var configInt8 = Fp32Config(KvCacheQuantization.Int8);
+        var fp32 = new BitNetTransformer(configFp32, NullLogger<BitNetTransformer>.Instance, seed: 991);
+        var int8 = new BitNetTransformer(configInt8, NullLogger<BitNetTransformer>.Instance, seed: 991);
+
+        var prefill = new[] { 3, 7, 11, 14 };
+        var fp32Cache = fp32.CreateCache(16);
+        var int8Cache = int8.CreateCache(16);
+        _ = fp32.Forward(prefill, fp32Cache);
+        _ = int8.Forward(prefill, int8Cache);
+
+        var decode = new[] { 5 };
+        var floatLogits = fp32.Forward(decode, fp32Cache);
+        var intLogits = int8.ForwardWithCacheInteger(decode, int8Cache);
+
+        Assert.Equal(ArgmaxLastRow(floatLogits), ArgmaxLastRow(intLogits));
+    }
+
     private static int ArgmaxLastRow(float[,] logits)
     {
         var lastRow = logits.GetLength(0) - 1;

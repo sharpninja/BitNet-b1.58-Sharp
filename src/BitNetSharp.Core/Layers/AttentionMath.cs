@@ -1,6 +1,8 @@
 using System.Numerics;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace BitNetSharp.Core.Layers;
 
@@ -101,17 +103,77 @@ internal static class AttentionMath
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static float DotInt8(ReadOnlySpan<float> q, ReadOnlySpan<sbyte> k, float kScale, int headDim)
     {
+        if (Avx2.IsSupported && headDim >= 16)
+        {
+            return DotInt8Avx2(q, k, kScale, headDim);
+        }
+        return DotInt8Portable(q, k, kScale, headDim);
+    }
+
+    /// <summary>
+    /// AVX2 fast-path: process 16 sbytes per chunk via two VPMOVSXBD ymm
+    /// (sbyte -> int) + two VCVTDQ2PS ymm (int -> float) sequences. Skips
+    /// the framework's three-stage Vector.Widen detour. Bench-confirmed to
+    /// recover the L1-resident-decode regression vs the portable path.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float DotInt8Avx2(ReadOnlySpan<float> q, ReadOnlySpan<sbyte> k, float kScale, int headDim)
+    {
+        const int chunk = 16; // 2 x Vector256<float>.Count
+        var vectorEnd = headDim - (headDim % chunk);
+
+        var acc = Vector256<float>.Zero;
+        ref var qRef = ref MemoryMarshal.GetReference(q);
+        ref var kRef = ref MemoryMarshal.GetReference(k);
+
+        var i = 0;
+        while (i < vectorEnd)
+        {
+            // Load 16 sbytes; sign-extend lower 8 -> 8 ints (VPMOVSXBD ymm),
+            // shift right 8 bytes for upper half, repeat. Then VCVTDQ2PS each
+            // and FMA against q.
+            var bytes = Vector128.LoadUnsafe(ref kRef, (nuint)i);
+            var bytesUpper = Sse2.ShiftRightLogical128BitLane(bytes.AsByte(), 8).AsSByte();
+
+            var intsLo = Avx2.ConvertToVector256Int32(bytes);       // VPMOVSXBD ymm
+            var intsHi = Avx2.ConvertToVector256Int32(bytesUpper);  // VPMOVSXBD ymm
+            var floatsLo = Avx.ConvertToVector256Single(intsLo);    // VCVTDQ2PS
+            var floatsHi = Avx.ConvertToVector256Single(intsHi);
+
+            var qLo = Vector256.LoadUnsafe(ref qRef, (nuint)i);
+            var qHi = Vector256.LoadUnsafe(ref qRef, (nuint)(i + 8));
+
+            acc = Fma.IsSupported
+                ? Fma.MultiplyAdd(qHi, floatsHi, Fma.MultiplyAdd(qLo, floatsLo, acc))
+                : acc + qLo * floatsLo + qHi * floatsHi;
+
+            i += chunk;
+        }
+
+        var sum = Vector256.Sum(acc);
+        for (; i < headDim; i++)
+        {
+            sum += q[i] * (float)k[i];
+        }
+
+        return sum * kScale;
+    }
+
+    /// <summary>
+    /// Portable path: framework Vector.Widen (sbyte -> short -> int -> float)
+    /// for non-AVX2 hosts and headDim &lt; 16 tails.
+    /// </summary>
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static float DotInt8Portable(ReadOnlySpan<float> q, ReadOnlySpan<sbyte> k, float kScale, int headDim)
+    {
         var floatWidth = Vector<float>.Count;
         var byteWidth = Vector<sbyte>.Count;
-        // headDim must be a multiple of byteWidth for the wide path; if not,
-        // fall through to the scalar tail.
         var vectorEnd = headDim - (headDim % byteWidth);
 
         var acc = Vector<float>.Zero;
         var i = 0;
         while (i < vectorEnd)
         {
-            // Load sbyte chunk and widen sbyte -> 2x short -> 4x int -> 4x float.
             var bytes = new Vector<sbyte>(k.Slice(i, byteWidth));
             Vector.Widen(bytes, out var s0, out var s1);
             Vector.Widen(s0, out var i0, out var i1);
@@ -148,6 +210,71 @@ internal static class AttentionMath
     /// </summary>
     [MethodImpl(MethodImplOptions.AggressiveInlining)]
     public static void AccumulateWeightedInt8(
+        Span<float> target,
+        ReadOnlySpan<sbyte> source,
+        float vScale,
+        float weight,
+        int headDim)
+    {
+        if (Avx2.IsSupported && headDim >= 16)
+        {
+            AccumulateWeightedInt8Avx2(target, source, vScale, weight, headDim);
+            return;
+        }
+        AccumulateWeightedInt8Portable(target, source, vScale, weight, headDim);
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AccumulateWeightedInt8Avx2(
+        Span<float> target,
+        ReadOnlySpan<sbyte> source,
+        float vScale,
+        float weight,
+        int headDim)
+    {
+        var folded = weight * vScale;
+        var foldedVec = Vector256.Create(folded);
+        const int chunk = 16;
+        var vectorEnd = headDim - (headDim % chunk);
+
+        ref var sRef = ref MemoryMarshal.GetReference(source);
+        ref var tRef = ref MemoryMarshal.GetReference(target);
+
+        var i = 0;
+        while (i < vectorEnd)
+        {
+            var bytes = Vector128.LoadUnsafe(ref sRef, (nuint)i);
+            var bytesUpper = Sse2.ShiftRightLogical128BitLane(bytes.AsByte(), 8).AsSByte();
+
+            var intsLo = Avx2.ConvertToVector256Int32(bytes);
+            var intsHi = Avx2.ConvertToVector256Int32(bytesUpper);
+            var floatsLo = Avx.ConvertToVector256Single(intsLo);
+            var floatsHi = Avx.ConvertToVector256Single(intsHi);
+
+            var tLo = Vector256.LoadUnsafe(ref tRef, (nuint)i);
+            var tHi = Vector256.LoadUnsafe(ref tRef, (nuint)(i + 8));
+
+            if (Fma.IsSupported)
+            {
+                Fma.MultiplyAdd(floatsLo, foldedVec, tLo).StoreUnsafe(ref tRef, (nuint)i);
+                Fma.MultiplyAdd(floatsHi, foldedVec, tHi).StoreUnsafe(ref tRef, (nuint)(i + 8));
+            }
+            else
+            {
+                (tLo + floatsLo * foldedVec).StoreUnsafe(ref tRef, (nuint)i);
+                (tHi + floatsHi * foldedVec).StoreUnsafe(ref tRef, (nuint)(i + 8));
+            }
+            i += chunk;
+        }
+
+        for (; i < headDim; i++)
+        {
+            target[i] += folded * source[i];
+        }
+    }
+
+    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    private static void AccumulateWeightedInt8Portable(
         Span<float> target,
         ReadOnlySpan<sbyte> source,
         float vScale,
