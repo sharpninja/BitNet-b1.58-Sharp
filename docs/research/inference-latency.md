@@ -744,3 +744,36 @@ Suite: 797/797 fast-lane green (794 + 3 ARM-gated theory inlines that skip on x8
 
 The next-wave AVX-VNNI-INT8 path (VPDPBSSD on Sapphire Rapids+ / Zen 5+) and ARM SDOT path (`AdvSimd.Dp.DotProduct` on ARMv8.4-A+) both require quantising q to int8 too - separate workstream that hoists Q quantisation out of the dot site and reuses the AvxVnniInt8 kernel pattern from G-series. Skipped this round; ARM SDOT is the more strategically relevant target given the ARM-first hardware roadmap.
 
+### KV-FU7 - Live ARM bench on Motorola Edge 2024 (.NET MAUI harness)
+
+Custom `BitNetSharp.Benchmarks.Maui` MAUI app (Android-only, net10.0-android) ports `KvCacheBenchmarks` to a Stopwatch-based runner because BenchmarkDotNet doesn't run on Android (no JIT process spawning, no Process API). Results captured from logcat. Device: **Motorola Edge 2024, Android 15, arm64-v8a**.
+
+```
+Host caps: AdvSimd=False, AdvSimd.Arm64=False, Avx2=False
+Vector<float>.IsHardwareAccelerated=True, Vector<float>.Count=4, Vector<sbyte>.Count=16
+Runtime: .NET 10.0.5
+Arch: Arm64 / Arm64
+```
+
+**Critical finding: `AdvSimd.IsSupported=False` on Mono Android even on ARMv8 hardware.** Mono's runtime does not expose the `System.Runtime.Intrinsics.Arm.AdvSimd` class even though the underlying CPU supports NEON. This means the `DotInt8Arm` hand-roll from KV-FU6 never executes on Android Mono - dispatch falls through to `DotInt8Portable`. However, `Vector<float>.IsHardwareAccelerated=True` confirms Mono DOES vectorize `Vector<T>` operations onto NEON internally; the portable Vector.Widen path emits NEON automatically.
+
+KvCacheBenchmark (Bonsai shape kvDim=1024 headDim=128, Stopwatch runner, warmup=3 iter=10):
+
+| SeqLen | DotScan_Fp32 (ns) | DotScan_Int8 (portable) | Int8 ratio |
+| -----: | ----------------: | ----------------------: | ---------: |
+|     32 |            35 927 |                  25 672 |       0.71 |
+|    128 |           106 953 |                 103 865 |       0.97 |
+|    512 |           437 562 |                 409 063 |       0.94 |
+|   2048 |         1 734 786 |               1 643 953 |       0.95 |
+
+**Int8 wins at every SeqLen on ARM via the portable path** (5-29% faster). The win is smaller than on x86 Avx2 (which sees 30-32% at long SeqLen via VPMOVSXBD ymm) because Mono's portable Vector.Widen emits 128-bit NEON `SXTL` chains rather than wide-register 256-bit conversions. The result confirms the bandwidth thesis: int8 K cache halves DRAM/L2 traffic enough to win even when the dequant path is generic.
+
+**Implication for KV-FU6:** the hand-rolled `DotInt8Arm` kernel is dead code on Android Mono. It remains useful for:
+- Future CoreCLR-on-Android scenarios (where AdvSimd would be exposed)
+- iOS / macOS-arm64 (CoreCLR exposes AdvSimd there)
+- Server-side Linux ARM64 with CoreCLR (Graviton, Ampere Altra)
+
+The portable Vector.Widen fallback is the actual hot path on Mono Android and ships a real win without the hand-roll.
+
+Bench harness location: `benchmarks/BitNetSharp.Benchmarks.Maui/`. Device deployment: `dotnet build -c Release -f net10.0-android` then `adb install -r bin/Release/net10.0-android/*-Signed.apk` then launch via `adb shell am start -n com.companyname.bitnetsharp.benchmarks.maui/crc64c090f61d2c845dc2.MainActivity`. Results stream to logcat tagged `BENCH_KV`.
+

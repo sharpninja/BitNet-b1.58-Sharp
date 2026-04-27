@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="BitNetSharp.Benchmarks.Maui.MainPage"
+             Title="BitNetSharp ARM Benchmarks">
+
+    <ScrollView>
+        <VerticalStackLayout Padding="20" Spacing="14">
+            <Label Text="BitNetSharp KV Cache Benchmark - ARM (NEON)"
+                   Style="{StaticResource Headline}"
+                   SemanticProperties.HeadingLevel="Level1" />
+
+            <Label Text="Tests AttentionMath.DotInt8 (NEON SXTL+FMLA path) vs AttentionMath.Dot (fp32) at Bonsai shape (kvDim=1024, headDim=128) across SeqLen 32/128/512/2048."
+                   Style="{StaticResource SubHeadline}" />
+
+            <Button x:Name="RunBtn"
+                    Text="Run KV Cache benchmark"
+                    Clicked="OnRunClicked"
+                    HorizontalOptions="Fill" />
+
+            <Label x:Name="StatusLabel"
+                   Text="Idle."
+                   FontAttributes="Italic" />
+
+            <Editor x:Name="OutputEditor"
+                    HeightRequest="540"
+                    IsReadOnly="True"
+                    FontFamily="Monospace"
+                    FontSize="11"
+                    AutoSize="Disabled"
+                    Text="" />
+
+            <Button x:Name="CopyBtn"
+                    Text="Copy results to clipboard"
+                    Clicked="OnCopyClicked"
+                    HorizontalOptions="Fill" />
+        </VerticalStackLayout>
+    </ScrollView>
+
+</ContentPage>

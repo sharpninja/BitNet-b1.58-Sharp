@@ -30,6 +30,7 @@
     <InternalsVisibleTo Include="BitNetSharp.Converter.Tests" />
     <InternalsVisibleTo Include="BitNetSharp.Tests" />
     <InternalsVisibleTo Include="BitNetSharp.Benchmarks" />
+    <InternalsVisibleTo Include="BitNetSharp.Benchmarks.Maui" />
   </ItemGroup>
 
   <ItemGroup Condition="Exists('Data/Models/bitnet-b1.58-default.gguf')">
