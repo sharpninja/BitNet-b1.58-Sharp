@@ -48,12 +48,24 @@ public sealed class BitNetHostedAgentModel(BitNetPaperModel model) : IHostedAgen
         [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(prompt);
-        await foreach (var token in Model.StreamGenerateAsync(prompt, maxOutputTokens, cancellationToken).ConfigureAwait(false))
+        await foreach (var token in StreamTokensAsync(prompt, maxOutputTokens, cancellationToken).ConfigureAwait(false))
         {
             if (!string.IsNullOrEmpty(token.TokenText))
             {
                 yield return token.TokenText;
             }
+        }
+    }
+
+    public async IAsyncEnumerable<GeneratedToken> StreamTokensAsync(
+        string prompt,
+        int? maxOutputTokens = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(prompt);
+        await foreach (var token in Model.StreamGenerateAsync(prompt, maxOutputTokens, cancellationToken).ConfigureAwait(false))
+        {
+            yield return token;
         }
     }
 

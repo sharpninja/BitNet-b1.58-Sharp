@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Threading.Tasks;
 using BitNetSharp.Core.Inference;
 using BitNetSharp.Core.Quantization;
 using BitNetSharp.Core.Training;
@@ -9,6 +10,15 @@ public sealed class BitLinear : Module
 {
     private const int ActivationQuantizationMaxMagnitude = 127;
     private const float WeightQuantizationEpsilon = 1e-6f;
+
+    /// <summary>
+    /// Minimum output dimension that triggers Parallel.For column-stripe
+    /// dispatch in <see cref="ForwardQuantized"/> and
+    /// <see cref="ForwardInt32"/>. Below this the partitioner overhead
+    /// outweighs the per-column work; above it (Q/K/V at 4096, FFN gate/up at
+    /// 11008/14336) parallelism wins on multi-core hosts.
+    /// </summary>
+    private const int MinParallelOutDim = 1024;
 
     private readonly int _totalWeights;
     private readonly int _packedStride; // packed bytes per output row (5-trit base-3)
@@ -122,29 +132,62 @@ public sealed class BitLinear : Module
         var outDim = Config.OutputDimension;
         var output = new float[rows, outDim];
 
-        var simdWeights = _simdPackedWeights.AsSpan();
-        var quantizedSpan = input.Quantized.AsSpan();
-        var decodedBuffer = ArrayPool<sbyte>.Shared.Rent(inputDim);
-        try
-        {
-            var decodedSpan = decodedBuffer.AsSpan(0, inputDim);
-            for (var outputColumn = 0; outputColumn < outDim; outputColumn++)
-            {
-                var physicalRow = _rowPermutation is not null ? _rowPermutation[outputColumn] : outputColumn;
-                var simdRow = simdWeights.Slice(physicalRow * _simdPackedStride, _simdPackedStride);
-                TritPacking.SimdUnpackLayer(simdRow, decodedSpan, inputDim);
+        var simdPackedStride = _simdPackedStride;
+        var simdPackedWeights = _simdPackedWeights;
+        var quantArr = input.Quantized;
+        var rowScales = input.RowScales;
+        var rowPerm = _rowPermutation;
+        var gamma = Gamma;
+        var inputDimLocal = inputDim;
 
-                for (var row = 0; row < rows; row++)
+        if (outDim >= MinParallelOutDim && TritDotDispatch.UseParallelColumnStripes)
+        {
+            // Output columns are independent (each writes a distinct cell of
+            // output[r, outputColumn]); per-worker decoded buffer rented via
+            // Parallel.For's localInit/localFinally so the rent cost amortises
+            // across all columns the worker handles.
+            Parallel.For(0, outDim,
+                () => ArrayPool<sbyte>.Shared.Rent(inputDimLocal),
+                (outputColumn, _, decodedBuffer) =>
                 {
-                    var activationSpan = quantizedSpan.Slice(row * inputDim, inputDim);
-                    var isum = TritPacking.TernaryDotSimdUnpacked(decodedSpan, activationSpan);
-                    output[row, outputColumn] = isum * Gamma * input.RowScales[row];
+                    var decodedSpan = decodedBuffer.AsSpan(0, inputDimLocal);
+                    var physicalRow = rowPerm is not null ? rowPerm[outputColumn] : outputColumn;
+                    var simdRow = simdPackedWeights.AsSpan(physicalRow * simdPackedStride, simdPackedStride);
+                    TritPacking.SimdUnpackLayer(simdRow, decodedSpan, inputDimLocal);
+                    for (var row = 0; row < rows; row++)
+                    {
+                        var activationSpan = quantArr.AsSpan(row * inputDimLocal, inputDimLocal);
+                        var isum = TritPacking.TernaryDotSimdUnpacked(decodedSpan, activationSpan);
+                        output[row, outputColumn] = isum * gamma * rowScales[row];
+                    }
+                    return decodedBuffer;
+                },
+                decodedBuffer => ArrayPool<sbyte>.Shared.Return(decodedBuffer));
+        }
+        else
+        {
+            var decodedBuffer = ArrayPool<sbyte>.Shared.Rent(inputDimLocal);
+            try
+            {
+                var decodedSpan = decodedBuffer.AsSpan(0, inputDimLocal);
+                for (var outputColumn = 0; outputColumn < outDim; outputColumn++)
+                {
+                    var physicalRow = rowPerm is not null ? rowPerm[outputColumn] : outputColumn;
+                    var simdRow = simdPackedWeights.AsSpan(physicalRow * simdPackedStride, simdPackedStride);
+                    TritPacking.SimdUnpackLayer(simdRow, decodedSpan, inputDimLocal);
+
+                    for (var row = 0; row < rows; row++)
+                    {
+                        var activationSpan = quantArr.AsSpan(row * inputDimLocal, inputDimLocal);
+                        var isum = TritPacking.TernaryDotSimdUnpacked(decodedSpan, activationSpan);
+                        output[row, outputColumn] = isum * gamma * rowScales[row];
+                    }
                 }
             }
-        }
-        finally
-        {
-            ArrayPool<sbyte>.Shared.Return(decodedBuffer);
+            finally
+            {
+                ArrayPool<sbyte>.Shared.Return(decodedBuffer);
+            }
         }
 
         return output;
@@ -175,28 +218,54 @@ public sealed class BitLinear : Module
             rowScales[row] = Gamma * input.RowScales[row];
         }
 
-        var simdWeights = _simdPackedWeights.AsSpan();
-        var quantizedSpan = input.Quantized.AsSpan();
-        var decodedBuffer = ArrayPool<sbyte>.Shared.Rent(inputDim);
-        try
-        {
-            var decodedSpan = decodedBuffer.AsSpan(0, inputDim);
-            for (var outputColumn = 0; outputColumn < outDim; outputColumn++)
-            {
-                var physicalRow = _rowPermutation is not null ? _rowPermutation[outputColumn] : outputColumn;
-                var simdRow = simdWeights.Slice(physicalRow * _simdPackedStride, _simdPackedStride);
-                TritPacking.SimdUnpackLayer(simdRow, decodedSpan, inputDim);
+        var simdPackedStride = _simdPackedStride;
+        var simdPackedWeights = _simdPackedWeights;
+        var quantArr = input.Quantized;
+        var rowPerm = _rowPermutation;
+        var inputDimLocal = inputDim;
 
-                for (var row = 0; row < rows; row++)
+        if (outDim >= MinParallelOutDim && TritDotDispatch.UseParallelColumnStripes)
+        {
+            Parallel.For(0, outDim,
+                () => ArrayPool<sbyte>.Shared.Rent(inputDimLocal),
+                (outputColumn, _, decodedBuffer) =>
                 {
-                    var activationSpan = quantizedSpan.Slice(row * inputDim, inputDim);
-                    values[row, outputColumn] = TritPacking.TernaryDotSimdUnpacked(decodedSpan, activationSpan);
+                    var decodedSpan = decodedBuffer.AsSpan(0, inputDimLocal);
+                    var physicalRow = rowPerm is not null ? rowPerm[outputColumn] : outputColumn;
+                    var simdRow = simdPackedWeights.AsSpan(physicalRow * simdPackedStride, simdPackedStride);
+                    TritPacking.SimdUnpackLayer(simdRow, decodedSpan, inputDimLocal);
+                    for (var row = 0; row < rows; row++)
+                    {
+                        var activationSpan = quantArr.AsSpan(row * inputDimLocal, inputDimLocal);
+                        values[row, outputColumn] = TritPacking.TernaryDotSimdUnpacked(decodedSpan, activationSpan);
+                    }
+                    return decodedBuffer;
+                },
+                decodedBuffer => ArrayPool<sbyte>.Shared.Return(decodedBuffer));
+        }
+        else
+        {
+            var decodedBuffer = ArrayPool<sbyte>.Shared.Rent(inputDimLocal);
+            try
+            {
+                var decodedSpan = decodedBuffer.AsSpan(0, inputDimLocal);
+                for (var outputColumn = 0; outputColumn < outDim; outputColumn++)
+                {
+                    var physicalRow = rowPerm is not null ? rowPerm[outputColumn] : outputColumn;
+                    var simdRow = simdPackedWeights.AsSpan(physicalRow * simdPackedStride, simdPackedStride);
+                    TritPacking.SimdUnpackLayer(simdRow, decodedSpan, inputDimLocal);
+
+                    for (var row = 0; row < rows; row++)
+                    {
+                        var activationSpan = quantArr.AsSpan(row * inputDimLocal, inputDimLocal);
+                        values[row, outputColumn] = TritPacking.TernaryDotSimdUnpacked(decodedSpan, activationSpan);
+                    }
                 }
             }
-        }
-        finally
-        {
-            ArrayPool<sbyte>.Shared.Return(decodedBuffer);
+            finally
+            {
+                ArrayPool<sbyte>.Shared.Return(decodedBuffer);
+            }
         }
 
         return new Int32ActivationBlock(values, rowScales);

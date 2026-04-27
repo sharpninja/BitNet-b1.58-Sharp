@@ -1,4 +1,6 @@
 using System.Numerics;
+using System.Runtime.Intrinsics;
+using System.Runtime.Intrinsics.X86;
 
 namespace BitNetSharp.Core.Quantization;
 
@@ -7,7 +9,7 @@ namespace BitNetSharp.Core.Quantization;
 /// 3^5 = 243 ≤ 256, achieving ~1.6 bits/weight (within 0.5% of the
 /// information-theoretic minimum of log₂(3) ≈ 1.585 bits/weight).
 /// </summary>
-public static class TritPacking
+public static partial class TritPacking
 {
     /// <summary>
     /// LUT for decoding a packed byte into 5 ternary values {-1, 0, +1}.
@@ -189,10 +191,39 @@ public static class TritPacking
         return packed;
     }
 
+    /// <summary>
+    /// Decode a 2-bit-packed ternary weight row to one sbyte per trit.
+    ///
+    /// Dispatches to a SSSE3 fast path (mask+shift+VPSHUFB+interleave, 64
+    /// trits per chunk) when the host supports SSSE3 and the test override
+    /// <c>TritDotDispatch.ForceScalarUnpack</c> is false. Falls back to the
+    /// scalar oracle otherwise.
+    ///
+    /// The scalar oracle and the SSSE3 path produce bit-identical output
+    /// across every packed byte value (0..255), including the legacy
+    /// 0b10 sign-extension to -2 that <see cref="SimdPackLayer"/> never
+    /// emits but the historical contract preserved.
+    /// </summary>
     public static void SimdUnpackLayer(ReadOnlySpan<byte> packed, Span<sbyte> trits, int totalTrits)
     {
         ArgumentOutOfRangeException.ThrowIfNegative(totalTrits);
 
+        if (TritDotDispatch.UseSsse3Unpack && totalTrits >= 64)
+        {
+            SimdUnpackLayerSsse3(packed, trits, totalTrits);
+            return;
+        }
+
+        SimdUnpackLayerScalar(packed, trits, totalTrits);
+    }
+
+    /// <summary>
+    /// Scalar oracle for <see cref="SimdUnpackLayer"/>. Per-byte arith-shift
+    /// decode; preserved verbatim from the pre-H2 implementation so SSSE3
+    /// equivalence tests have a known-good reference.
+    /// </summary>
+    internal static void SimdUnpackLayerScalar(ReadOnlySpan<byte> packed, Span<sbyte> trits, int totalTrits)
+    {
         for (var i = 0; i < packed.Length; i++)
         {
             var b = packed[i];
@@ -213,6 +244,87 @@ public static class TritPacking
     }
 
     /// <summary>
+    /// SSSE3 fast unpack. Processes 16 packed bytes (= 64 trits) per chunk
+    /// via mask+shift slot extraction, VPSHUFB sign-extend lookup, and
+    /// VPUNPCKL/H byte+i16 interleave to restore positional order. Tail trits
+    /// (anything past the last full 64-block) decoded scalar-style.
+    ///
+    /// Bit-identical to <see cref="SimdUnpackLayerScalar"/> across every
+    /// possible packed byte value 0..255, including the unused 0b10 code which
+    /// the historical scalar contract decoded to -2 via sign-extension.
+    /// <see cref="SimdPackLayer"/> never emits 0b10 in production but the LUT
+    /// preserves the legacy mapping so equivalence is total.
+    /// </summary>
+    internal static void SimdUnpackLayerSsse3(ReadOnlySpan<byte> packed, Span<sbyte> trits, int totalTrits)
+    {
+        // LUT: 2-bit code → sign-extended sbyte trit. PSHUFB indices are masked
+        // to 0..3 so entries 4..15 are unreachable but kept zero for safety
+        // (PSHUFB clears any lane whose index has bit 7 set; ours never do).
+        // 0xFE = -2 (legacy 0b10), 0xFF = -1 (0b11).
+        var lut = Vector128.Create(
+            (byte)0, 1, 0xFE, 0xFF,
+            0, 0, 0, 0,
+            0, 0, 0, 0,
+            0, 0, 0, 0);
+        var maskLow2 = Vector128.Create((byte)0x03);
+
+        var fullChunks = totalTrits / 64;
+        var processedTrits = fullChunks * 64;
+
+        for (var c = 0; c < fullChunks; c++)
+        {
+            var packedVec = Vector128.Create(packed.Slice(c * 16, 16));
+
+            // Extract each slot. Logical right shift on i16 lanes; bits bleed
+            // across the byte boundary inside the i16 but the mask zeros them.
+            // (See SSSE3 unpack proof: result_byte_low_bits = original byte's
+            // slot-N bits; cross-byte garbage lives in bits [7:2] which the
+            // mask drops.)
+            var slot0 = Sse2.And(packedVec, maskLow2);
+            var slot1 = Sse2.And(Sse2.ShiftRightLogical(packedVec.AsInt16(), 2).AsByte(), maskLow2);
+            var slot2 = Sse2.And(Sse2.ShiftRightLogical(packedVec.AsInt16(), 4).AsByte(), maskLow2);
+            var slot3 = Sse2.And(Sse2.ShiftRightLogical(packedVec.AsInt16(), 6).AsByte(), maskLow2);
+
+            // PSHUFB: code → sign-extended trit byte.
+            var t0 = Ssse3.Shuffle(lut, slot0);
+            var t1 = Ssse3.Shuffle(lut, slot1);
+            var t2 = Ssse3.Shuffle(lut, slot2);
+            var t3 = Ssse3.Shuffle(lut, slot3);
+
+            // Restore position order. PSHUFB output:
+            //   tk = [s_k_0, s_k_1, ..., s_k_15] (slot k of each packed byte)
+            // Required output:
+            //   trits = [s_0_0, s_1_0, s_2_0, s_3_0, s_0_1, s_1_1, ...]
+            // Two byte unpacks pair (slot0,slot1) and (slot2,slot3) per packed
+            // byte; two i16 unpacks then splice them into per-byte quads.
+            var lo01 = Sse2.UnpackLow(t0, t1);   // (s0,s1) pairs of packed bytes 0..7
+            var hi01 = Sse2.UnpackHigh(t0, t1);  // (s0,s1) pairs of packed bytes 8..15
+            var lo23 = Sse2.UnpackLow(t2, t3);
+            var hi23 = Sse2.UnpackHigh(t2, t3);
+
+            var out0 = Sse2.UnpackLow(lo01.AsInt16(), lo23.AsInt16()).AsSByte();   // packed bytes 0..3 → trits 0..15
+            var out1 = Sse2.UnpackHigh(lo01.AsInt16(), lo23.AsInt16()).AsSByte();  // packed bytes 4..7 → trits 16..31
+            var out2 = Sse2.UnpackLow(hi01.AsInt16(), hi23.AsInt16()).AsSByte();   // packed bytes 8..11 → trits 32..47
+            var out3 = Sse2.UnpackHigh(hi01.AsInt16(), hi23.AsInt16()).AsSByte();  // packed bytes 12..15 → trits 48..63
+
+            out0.CopyTo(trits.Slice(c * 64 + 0));
+            out1.CopyTo(trits.Slice(c * 64 + 16));
+            out2.CopyTo(trits.Slice(c * 64 + 32));
+            out3.CopyTo(trits.Slice(c * 64 + 48));
+        }
+
+        // Scalar tail: any trits past the last 64-aligned chunk.
+        for (var wi = processedTrits; wi < totalTrits; wi++)
+        {
+            var byteIdx = wi / 4;
+            var slot = wi % 4;
+            var b = packed[byteIdx];
+            var shift = 6 - slot * 2;
+            trits[wi] = (sbyte)((sbyte)(b << shift) >> 6);
+        }
+    }
+
+    /// <summary>
     /// Fused pack-native SIMD-friendly ternary dot. Walks 4-trits/byte
     /// packed row, decodes each slot via arith right shift (sign-extends
     /// 2-bit signed code to sbyte trit), accumulates activations with
@@ -226,12 +338,38 @@ public static class TritPacking
     /// overflow on FFN-size rows.
     /// </summary>
     /// <summary>
-    /// SIMD ternary dot against pre-decoded trits. Use this when a caller
-    /// already decoded a packed row via <see cref="SimdUnpackLayer"/> and
-    /// wants to amortize the decode across many activation vectors (i.e.,
-    /// outer-loop-outputColumn in BitLinear.Forward).
+    /// SIMD ternary dot against pre-decoded trits. Dispatches at runtime to
+    /// the fastest path supported by the host: AVX-512 VNNI &gt; AVX-VNNI-INT8
+    /// &gt; AVX2 (VPSIGNB) &gt; generic <see cref="System.Numerics.Vector{T}"/>
+    /// &gt; scalar. Every path is bit-exact with <see cref="TernaryDotScalar"/>;
+    /// the equivalence is enforced by <c>TritDotAvx2Tests</c> and
+    /// <c>TritDotAvx512Tests</c>.
     /// </summary>
     public static int TernaryDotSimdUnpacked(
+        ReadOnlySpan<sbyte> trits,
+        ReadOnlySpan<sbyte> activations)
+    {
+        if (TritDotDispatch.UseAvxVnniInt8V512)
+        {
+            return TernaryDotAvxVnniInt8V512(trits, activations);
+        }
+        if (TritDotDispatch.UseAvxVnniInt8)
+        {
+            return TernaryDotAvxVnniInt8(trits, activations);
+        }
+        if (TritDotDispatch.UseAvx2Sign)
+        {
+            return TernaryDotAvx2Sign(trits, activations);
+        }
+        return TernaryDotSimdUnpackedGeneric(trits, activations);
+    }
+
+    /// <summary>
+    /// Generic <see cref="System.Numerics.Vector{T}"/> implementation, kept
+    /// as the universal fallback. Pre-G-series this was the public
+    /// <c>TernaryDotSimdUnpacked</c>.
+    /// </summary>
+    internal static int TernaryDotSimdUnpackedGeneric(
         ReadOnlySpan<sbyte> trits,
         ReadOnlySpan<sbyte> activations)
     {
@@ -276,6 +414,25 @@ public static class TritPacking
             else if (t < 0) sum -= activations[i];
         }
 
+        return sum;
+    }
+
+    /// <summary>
+    /// Branch-free scalar oracle. Exposed as <c>internal</c> for the
+    /// equivalence tests and BDN microbenchmarks; not on a hot path.
+    /// </summary>
+    internal static int TernaryDotScalar(
+        ReadOnlySpan<sbyte> trits,
+        ReadOnlySpan<sbyte> activations)
+    {
+        var length = trits.Length;
+        var sum = 0;
+        for (var i = 0; i < length; i++)
+        {
+            var t = trits[i];
+            if (t > 0) sum += activations[i];
+            else if (t < 0) sum -= activations[i];
+        }
         return sum;
     }
 

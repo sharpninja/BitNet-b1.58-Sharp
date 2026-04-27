@@ -105,6 +105,71 @@ public sealed class IntegerSoftmaxTests
     }
 
     [Fact]
+    public void ApplyRowInPlace_MatchesApplyToFloat_RowByRow()
+    {
+        // Phase F7: composer attention loops want a per-row softmax that does
+        // not allocate a fresh float[,] per (head, target) tuple. The in-place
+        // overload must produce numerically identical output to the existing
+        // ApplyToFloat row-by-row.
+        const int rows = 5;
+        const int cols = 13;
+        var rng = new Random(19);
+        var logits = new float[rows, cols];
+        for (var r = 0; r < rows; r++)
+        {
+            for (var c = 0; c < cols; c++)
+            {
+                logits[r, c] = ((float)rng.NextDouble() - 0.5f) * 8f;
+            }
+        }
+
+        var integer = new IntegerSoftmax();
+        var expected = integer.ApplyToFloat(logits);
+
+        var rowBuf = new float[cols];
+        var outBuf = new float[cols];
+        for (var r = 0; r < rows; r++)
+        {
+            for (var c = 0; c < cols; c++) rowBuf[c] = logits[r, c];
+            integer.ApplyRowInPlace(rowBuf.AsSpan(), outBuf.AsSpan());
+            for (var c = 0; c < cols; c++)
+            {
+                Assert.Equal(expected[r, c], outBuf[c]);
+            }
+        }
+    }
+
+    [Fact]
+    public void ApplyRowInPlace_AllowsAliasedBuffer()
+    {
+        // Allow the same buffer for input and output so callers that no
+        // longer need the raw logits can avoid the second allocation.
+        var integer = new IntegerSoftmax();
+        var logits = new float[] { 2.0f, -1.0f, 0.5f, 3.5f, -0.25f };
+        var reference = new float[5];
+        var refLogits = new float[1, 5];
+        for (var c = 0; c < 5; c++) refLogits[0, c] = logits[c];
+        var expected = integer.ApplyToFloat(refLogits);
+
+        var aliased = (float[])logits.Clone();
+        integer.ApplyRowInPlace(aliased.AsSpan(), aliased.AsSpan());
+        for (var c = 0; c < 5; c++)
+        {
+            Assert.Equal(expected[0, c], aliased[c]);
+        }
+    }
+
+    [Fact]
+    public void ApplyRowInPlace_RejectsLengthMismatch()
+    {
+        var integer = new IntegerSoftmax();
+        var logits = new float[8];
+        var output = new float[6];
+        Assert.Throws<ArgumentException>(() =>
+            integer.ApplyRowInPlace(logits.AsSpan(), output.AsSpan()));
+    }
+
+    [Fact]
     public void Ctor_RejectsInvalidLutSize()
     {
         Assert.Throws<ArgumentOutOfRangeException>(() =>

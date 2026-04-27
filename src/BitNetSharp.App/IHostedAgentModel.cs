@@ -66,6 +66,34 @@ public interface IHostedAgentModel : IDisposable
             yield return response.Text;
         }
     }
+
+    /// <summary>
+    /// Section A2: streams per-token <see cref="GeneratedToken"/> events
+    /// carrying TokenId, TokenText, Step, ForwardMs, SelectMs, DecodeMs.
+    /// Default implementation degrades to <see cref="StreamResponseAsync(string, int?, CancellationToken)"/>
+    /// and yields a single GeneratedToken per text chunk with zero timing
+    /// (callers without native per-token timing get the text but lose the
+    /// telemetry). Implementations backed by an in-process model should
+    /// override and surface real per-token timing.
+    /// </summary>
+    async IAsyncEnumerable<GeneratedToken> StreamTokensAsync(
+        string prompt,
+        int? maxOutputTokens = null,
+        [System.Runtime.CompilerServices.EnumeratorCancellation] CancellationToken cancellationToken = default)
+    {
+        ArgumentNullException.ThrowIfNull(prompt);
+        var step = 0;
+        await foreach (var piece in StreamResponseAsync(prompt, maxOutputTokens, cancellationToken).ConfigureAwait(false))
+        {
+            yield return new GeneratedToken(
+                TokenId: -1,
+                TokenText: piece,
+                Step: step++,
+                ForwardMs: 0d,
+                SelectMs: 0d,
+                DecodeMs: 0d);
+        }
+    }
 }
 
 public interface IInspectableHostedAgentModel

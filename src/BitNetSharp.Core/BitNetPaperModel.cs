@@ -68,7 +68,8 @@ public sealed class BitNetPaperModel
                 BitNetTrainingCorpus.CreateVocabulary(trainingExamples),
                 verbosity,
                 EnableChainBuckets: enableChainBuckets,
-                EnableSequenceCompression: enableSequenceCompression),
+                EnableSequenceCompression: enableSequenceCompression,
+                UseIntegerForward: BitNetOptions.IntegerForwardEnvDefault),
             logger,
             loggerFactory,
             config,
@@ -203,7 +204,8 @@ public sealed class BitNetPaperModel
                 BitNetTrainingCorpus.CreateDefaultVocabulary(),
                 verbosity,
                 EnableChainBuckets: enableChainBuckets,
-                EnableSequenceCompression: enableSequenceCompression),
+                EnableSequenceCompression: enableSequenceCompression,
+                UseIntegerForward: BitNetOptions.IntegerForwardEnvDefault),
             lf.CreateLogger<BitNetPaperModel>(),
             lf));
     }
@@ -262,6 +264,22 @@ public sealed class BitNetPaperModel
         string prompt,
         int? maxTokens,
         Action<int>? emitToken,
+        CancellationToken cancellationToken)
+        => GenerateResponse(prompt, maxTokens, emitToken, onTokenEmitted: null, cancellationToken);
+
+    /// <summary>
+    /// Section A2 overload: same as the four-argument version but also fires
+    /// a richer per-token callback that carries the decode timing for the
+    /// emitted token. The rich event is fired on the iteration AFTER the
+    /// token's decode finishes (so its <c>DecodeMs</c> field is populated),
+    /// or at loop exit for the final token (with <c>DecodeMs = 0</c> because
+    /// no follow-up decode runs).
+    /// </summary>
+    public BitNetGenerationResult GenerateResponse(
+        string prompt,
+        int? maxTokens,
+        Action<int>? emitToken,
+        Action<GeneratedToken>? onTokenEmitted,
         CancellationToken cancellationToken)
     {
         ArgumentNullException.ThrowIfNull(prompt);
@@ -344,16 +362,43 @@ public sealed class BitNetPaperModel
 
                 var cache = Transformer.CreateCache(Config.MaxSequenceLength);
                 var prefillSw = System.Diagnostics.Stopwatch.StartNew();
-                var logits = Transformer.Forward(contextTokenIds, cache);
+                var logits = Options.UseIntegerForward
+                    ? Transformer.ForwardWithCacheInteger(contextTokenIds, cache)
+                    : Transformer.Forward(contextTokenIds, cache);
                 prefillSw.Stop();
                 _logger.LogInformation(
                     "Prefill prompt_tokens={PromptTokens} prefill_ms={PrefillMs:F1}",
                     contextTokenIds.Count,
                     prefillSw.Elapsed.TotalMilliseconds);
 
+                // A1: forward_ms reported per step is the timing of the forward
+                // pass that produced the logits this step is sampling from.
+                // Step 0 reads the prefill timing; step N+1 reads the prior
+                // step's decode timing. Seeded with prefill so step 0 is
+                // never zero.
+                var lastForwardMs = prefillSw.Elapsed.TotalMilliseconds;
+
+                // A2: deferred rich-event emission. pendingEvent holds the
+                // GeneratedToken for the previous step with DecodeMs unfilled;
+                // it fires at the top of the next iteration once DecodeMs is
+                // known (= the decode just measured into lastForwardMs). The
+                // final token flushes after the loop with DecodeMs = 0.
+                GeneratedToken? pendingEvent = null;
+
                 for (var step = 0; step < maxGeneratedTokens; step++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
+
+                    if (pendingEvent.HasValue && onTokenEmitted is not null)
+                    {
+                        onTokenEmitted(pendingEvent.Value with { DecodeMs = lastForwardMs });
+                        pendingEvent = null;
+                    }
+                    else if (pendingEvent.HasValue)
+                    {
+                        pendingEvent = null;
+                    }
+
                     var stepSw = System.Diagnostics.Stopwatch.StartNew();
                     var nextToken = SelectNextToken(logits, contextTokenIds);
                     var selectMs = stepSw.Elapsed.TotalMilliseconds;
@@ -361,7 +406,7 @@ public sealed class BitNetPaperModel
                         "Step[{Step}] seq_len={SeqLen} forward_ms={ForwardMs:F1} select_ms={SelectMs:F1} token_id={TokenId} logit={Logit:F3}",
                         step,
                         contextTokenIds.Count,
-                        0d,
+                        lastForwardMs,
                         selectMs,
                         nextToken.TokenId,
                         nextToken.Logit);
@@ -376,6 +421,21 @@ public sealed class BitNetPaperModel
                     contextTokenIds.Add(nextToken.TokenId);
                     emitToken?.Invoke(nextToken.TokenId);
 
+                    if (onTokenEmitted is not null)
+                    {
+                        // TokenText is filled by the streaming wrapper - the
+                        // synchronous loop does not detokenize. Step keeps the
+                        // 0-based index. DecodeMs is finalized in the next
+                        // iteration (or at flush below).
+                        pendingEvent = new GeneratedToken(
+                            nextToken.TokenId,
+                            TokenText: string.Empty,
+                            Step: step,
+                            ForwardMs: lastForwardMs,
+                            SelectMs: selectMs,
+                            DecodeMs: 0d);
+                    }
+
                     if (Options.Verbosity == VerbosityLevel.Verbose)
                     {
                         diagnostics.Add($"Prediction: token={_idToToken[nextToken.TokenId]}, logit={nextToken.Logit:0.###}");
@@ -388,14 +448,17 @@ public sealed class BitNetPaperModel
                         break;
                     }
 
-                    // Decode step: feed just the newly selected token through the cache.
+                    // Decode step: feed just the newly selected token through
+                    // the cache. The duration becomes next iteration's
+                    // forward_ms (A1). The previously separate decode debug
+                    // log is dropped because the step log line at the top of
+                    // the next iteration carries the same number.
                     var decodeSw = System.Diagnostics.Stopwatch.StartNew();
-                    logits = Transformer.Forward(new[] { nextToken.TokenId }, cache);
-                    _logger.LogDebug(
-                        "Step[{Step}] decode past_length={PastLength} decode_ms={DecodeMs:F1}",
-                        step,
-                        cache.PastLength,
-                        decodeSw.Elapsed.TotalMilliseconds);
+                    logits = Options.UseIntegerForward
+                        ? Transformer.ForwardWithCacheInteger(new[] { nextToken.TokenId }, cache)
+                        : Transformer.Forward(new[] { nextToken.TokenId }, cache);
+                    decodeSw.Stop();
+                    lastForwardMs = decodeSw.Elapsed.TotalMilliseconds;
 
                     // Chain-bucket speculative decoding: after each normally generated token,
                     // check if the current context tail matches a known chain prefix.
@@ -467,7 +530,9 @@ public sealed class BitNetPaperModel
                                         $"Speculation accepted: token={_idToToken[speculativeId]}, chain={chain.ChainId}, probability={verifyProbability:0.###}");
                                 }
 
-                                logits = Transformer.Forward(new[] { speculativeId }, cache);
+                                logits = Options.UseIntegerForward
+                                    ? Transformer.ForwardWithCacheInteger(new[] { speculativeId }, cache)
+                                    : Transformer.Forward(new[] { speculativeId }, cache);
                             }
 
                             if (acceptedTokensForChain > 0)
@@ -478,6 +543,14 @@ public sealed class BitNetPaperModel
                         }
                     }
                 }
+                // A2: flush the final token's pending event with DecodeMs=0
+                // because no follow-up decode runs (loop exited on EOS, UNK,
+                // context-full, or hit cap).
+                if (pendingEvent.HasValue && onTokenEmitted is not null)
+                {
+                    onTokenEmitted(pendingEvent.Value);
+                }
+
                 _logger.LogInformation(
                     "Autoregressive loop end exit_reason={ExitReason} generated_tokens={Generated} chain_attempts={ChainAttempts} chain_accepts={ChainAccepts}",
                     exitReason,
@@ -553,22 +626,31 @@ public sealed class BitNetPaperModel
             SingleReader = true,
             SingleWriter = true
         });
-        var step = 0;
         var pendingPrefix = new List<int>();
         var producer = Task.Run(() =>
         {
             try
             {
-                GenerateResponse(prompt, maxTokens, tokenId =>
-                {
-                    cancellationToken.ThrowIfCancellationRequested();
-                    var localStep = step++;
-                    pendingPrefix.Add(tokenId);
-                    var joined = _tokenizer.Detokenize(pendingPrefix.Select(id => _idToToken[id]));
-                    var priorLength = localStep == 0 ? 0 : _tokenizer.Detokenize(pendingPrefix.Take(pendingPrefix.Count - 1).Select(id => _idToToken[id])).Length;
-                    var piece = priorLength <= joined.Length ? joined[priorLength..] : string.Empty;
-                    channel.Writer.TryWrite(new GeneratedToken(tokenId, piece, localStep));
-                }, cancellationToken);
+                // A2: use the rich onTokenEmitted callback so per-token
+                // ForwardMs/SelectMs/DecodeMs surface in the GeneratedToken.
+                // The callback fires one iteration after token emission so
+                // DecodeMs is populated for all but the final token.
+                GenerateResponse(
+                    prompt,
+                    maxTokens,
+                    emitToken: null,
+                    onTokenEmitted: evt =>
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        pendingPrefix.Add(evt.TokenId);
+                        var joined = _tokenizer.Detokenize(pendingPrefix.Select(id => _idToToken[id]));
+                        var priorLength = evt.Step == 0
+                            ? 0
+                            : _tokenizer.Detokenize(pendingPrefix.Take(pendingPrefix.Count - 1).Select(id => _idToToken[id])).Length;
+                        var piece = priorLength <= joined.Length ? joined[priorLength..] : string.Empty;
+                        channel.Writer.TryWrite(evt with { TokenText = piece });
+                    },
+                    cancellationToken);
                 channel.Writer.TryComplete();
             }
             catch (Exception ex)
@@ -1143,6 +1225,25 @@ public sealed class BitNetPaperModel
 
 /// <summary>
 /// Single token emission from <see cref="BitNetPaperModel.StreamGenerateAsync"/>.
-/// TokenText is the detokenized incremental slice (what the caller should append).
+/// <para>
+/// <c>TokenText</c> is the detokenized incremental slice (what the caller
+/// should append).
+/// </para>
+/// <para>
+/// Timing fields (added in Section A2 of the residual close-out): all in
+/// milliseconds. <c>ForwardMs</c> is the duration of the forward pass that
+/// produced the logits this token was sampled from (= prefill_ms for step 0,
+/// = previous step's decode for step N+1). <c>SelectMs</c> is the
+/// argmax/sample/repetition-penalty cost. <c>DecodeMs</c> is the duration of
+/// the decode forward triggered after this token was emitted, which becomes
+/// the next token's <c>ForwardMs</c>; it is 0 for the final emitted token
+/// because no follow-up decode runs.
+/// </para>
 /// </summary>
-public readonly record struct GeneratedToken(int TokenId, string TokenText, int Step);
+public readonly record struct GeneratedToken(
+    int TokenId,
+    string TokenText,
+    int Step,
+    double ForwardMs,
+    double SelectMs,
+    double DecodeMs);

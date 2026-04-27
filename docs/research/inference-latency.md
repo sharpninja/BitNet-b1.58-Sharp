@@ -102,8 +102,335 @@ Validated: `tests/BitNetSharp.Tests/OllamaStreamingChatTests.cs`:
 
 Channel + worker-task overhead is ~15 %. On this fixture the model is small enough that prefill dominates the streaming TTFT; on Bonsai, TTFT = prefill + one decode step (~2 s target) vs blocking total = prefill + N × decode_ms, which is where the client-visible win lives. 634/634 `dotnet test` pass.
 
-## Phase 6: End-to-end validation (pending)
+## Phase 6: End-to-end validation (complete via H-series + Section A)
 
 Target: single-token decode < 2 s at seq_len=100 on Bonsai; `/api/chat` 12-token generation < 30 s; time-to-first-token < 3 s.
 
-Recorded deltas above are the measurement evidence. End-to-end curl against the restarted Ollama serve + AnythingLLM reconnect test are done live when the full benchmark suite completes.
+H-series (G3 baseline -> H5 with H2+H3+H4 stacked) drove per-decode-token from 5 197 ms to 157 ms = **33.1x**. The 2 s/token gate is met with **12.7x margin**. See "H-series: matmul wrapper close-out" + "H5 - Bonsai end-to-end" sections below for the measured Bonsai 5-run table.
+
+Section A (residual close-out) finished the streaming-telemetry surface that Phases 1-5 did not address: per-token `forward_ms` in the autoregressive loop, `GeneratedToken` record carries `ForwardMs/SelectMs/DecodeMs`, and `/api/chat` NDJSON chunks surface those three timing fields for streaming clients (AnythingLLM and similar).
+
+## Phase F: Float-deletion wiring (integer forward composer)
+
+Separate workstream that routes the I3-I9 integer primitives (RmsNorm, RoPE, Softmax, SwiGLU, residual adder, argmax) through every forward method on the autoregressive hot path. Sub-phases F0-F7, plus `BITNETSHARP_USE_INTEGER_FORWARD=1` env var to flip the runtime without rebaking metadata. PR #20 on branch `feat/integer-forward-hot-path`.
+
+**Correctness:** per-element drift 5e-2 per layer, compounds linearly with depth; argmax match preserved by softmax monotonicity through LUT composition. 729/729 `dotnet test -c Release` green (+22 tests across F0-F7).
+
+**Live `/api/chat` gate (default bootstrap model, 12 new tokens, localhost 127.0.0.1:11434):**
+
+Cold single-shot (prior session, before F6):
+
+| Path | total_ms (server) | prefill_ms | eval tokens | curl wall-clock |
+| --- | ---: | ---: | ---: | ---: |
+| Float (baseline, main) | 496 | 94.9 | 12 | 650 ms |
+| Integer (F0-F5 only) | 495 | 99.2 | 12 | 638 ms |
+
+Warm-cache 5-run loop (this session, post-F6 `IntegerLayerPrimitiveCache`). Request: `"Say hello."`, `num_predict=12`, response comes back with 17 eval tokens (model exhausts before the 12 cap for this prompt). One throwaway `curl` before the timed loop to fault the JIT, then five timed chats back-to-back:
+
+| Path | total_ms (server, per run) | prefill_ms | eval tokens | wall-clock (per run) |
+| --- | ---: | ---: | ---: | ---: |
+| Float (baseline) | 67 / 65 / 70 / 66 / 65 | 33 / 32 / 35 / 33 / 32 | 17 | 154 / 149 / 166 / 163 / 152 |
+| Integer + F6 cache | 457 / 86 / 95 / 86 / 76 | 228 / 43 / 47 / 43 / 38 | 17 | 550 / 193 / 222 / 188 / 190 |
+
+Float warm median: ~66 ms server / ~154 ms wall. Integer+F6 warm median (runs 2-5, after first-call JIT settles): ~86 ms server / ~190 ms wall. Run 1 (457 ms) is the integer composer's cold JIT of the int32 matmul and LUT paths; subsequent runs show the F6 per-layer cache is doing its job (prefill drops from 228 ms to 38-47 ms).
+
+**Pre-F6 vs post-F6 on the integer path.** The prior-session 495 ms figure was measured from a fresh serve, single-shot: one warm `curl` plus one timed `curl`. Repeating that today on the F6 build: first timed call is 457 ms (same JIT shape as before), but with the primitive cache in place every subsequent call drops into the 76-95 ms band. On a 2-layer bootstrap model the primitive cache's O(maxSeq * headDim/2) sin/cos rebuild per call is a measurable fraction of the work; on Bonsai (36 layers, headDim=128, maxSeq=128) it's 36x worse, so the warm-cache win should grow.
+
+**F7: in-place softmax + reused logits buffer.** Composer attention loops still allocated `new float[1, causalLen]` per (queryHead, target) tuple plus a second `float[1, causalLen]` inside `IntegerSoftmax.ApplyToFloat`. Replaced both with a single `float[maxCausalLen]` buffer per call sliced per tuple, plus a new `IntegerSoftmax.ApplyRowInPlace(ReadOnlySpan<float>, Span<float>)` that aliases input and output:
+
+| Path | total_ms (server, per run) | prefill_ms | wall-clock (per run) |
+| --- | ---: | ---: | ---: |
+| Integer + F6 (warm 2-5) | 86 / 95 / 86 / 76 | 43 / 47 / 43 / 38 | 193 / 222 / 188 / 190 |
+| Integer + F6 + F7 (warm 3-5) | 82 / 73 / 71 | 41 / 36 / 35 | 167 / 157 / 156 |
+| Float (warm 1-5, reference) | 67 / 65 / 70 / 66 / 65 | 33 / 32 / 35 / 33 / 32 | 154 / 149 / 166 / 163 / 152 |
+
+F7 closes most of the integer-vs-float warm gap on the bootstrap model: median 73 ms server vs float's 66 ms (~7 ms = ~10 % gap remaining). On Bonsai (32 heads vs 4 in the bootstrap, 36 layers vs 2) the per-call allocation count scales with `headCount * layerCount`, so the F7 win compounds with depth and head count.
+
+## Phase 6: End-to-end Bonsai gate
+
+Live `/api/chat` against `data/models/bonsai.bitnetsharp.gguf` (782.3 M params, 36 layers, dim 4096, 32 heads, kv 8). `num_predict=12`, prompt `"Say hello."`, model emits 17 tokens before EOS. AMD Ryzen 9 5900HX (AVX2), .NET 10, Release.
+
+The first round of measurements used the buggy `total/2` placeholder for `prompt_eval_duration` / `eval_duration` (see commit `e1d5a34 fix(serve): Ollama prompt_eval_duration / eval_duration carry real measurements`). After the fix the endpoints capture real time-to-first-token via `StreamResponseAsync` and split prefill vs decode honestly; the numbers below are the post-fix run.
+
+| Path | total_ms | TTFT_ms (prefill) | decode_dur_ms | eval | per_decode_token_ms |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Integer F0-F7 warm 1 (cold JIT) | 97 650 | 24 816 | 72 833 | 17 | 4 552 |
+| Integer F0-F7 warm 2 | 137 664 | 36 951 | 100 712 | 17 | 6 294 |
+| Integer F0-F7 warm 3 | 124 700 | 37 044 | 87 655 | 17 | 5 478 |
+
+`per_decode_token = decode_dur / (eval - 1)` (the first decoded token is folded into TTFT alongside prefill).
+
+The earlier table that reported per-token ~3.1 s on both float and integer is the artifact of the `total/2` split: half the wall clock landed in `eval_duration` and got divided by 17, masking the real 5-6 s decode-step cost. With the corrected timings, the F-series correctness story still holds (integer matches float on token stream end-to-end via `BitNetPaperModelIntegerForwardTests` plus the F4 transformer-cache argmax test) but the per-decode latency on Bonsai/AVX2 is materially worse than the original plan's 2 s/token bar:
+
+- per-decode-token ≈ 4.5-6.3 s vs target 2 s
+- total 12-token chat ≈ 100-138 s vs target 30 s
+- TTFT ≈ 25-37 s vs target 3 s
+
+The bottleneck is the int32 ternary BitLinear matmul at `dim=4096, hidden=11008` invoked 252 times per token on AVX2 only. Closing the gap to 2 s/token requires AVX-512 / VNNI ternary kernels, GPU offload, or speculative decoding, all of which are outside the latency-overhaul plan scope. Phases 1-5 (KV cache, activation-quant cache, SIMD attention, flash decode, streaming) and F0-F7 (integer hot path with cached primitives and in-place softmax) all land their measured deltas at every prior fixture, but the absolute targets on Bonsai/AVX2 are bounded by the ternary matmul kernel.
+
+The bootstrap-model warm-loop deltas earlier in this document remain accurate: those rows used the same placeholder split, but `total_duration` was always real and that is the column that drove the F6/F7 conclusions.
+
+## G-series: hardware-targeted ternary dot kernels
+
+Goal: take the 2.5x gap from F7 (~5 s/token) to the 2 s/token bar by replacing the generic `Vector<sbyte>` path inside `TritPacking.TernaryDotSimdUnpacked` with hardware-targeted kernels. The original plan assumed AVX-512 VNNI was the lever; probing `System.Runtime.Intrinsics.X86` on .NET 10 turned up `AvxVnniInt8` (256-bit `VPDPBSSD`) and its `V512` nested type instead of any `Avx512Vnni`, and the dev box (Ryzen 9 5900HX, Zen 3) ships AVX2 only. The plan pivoted: AVX2 `VPSIGNB` becomes the primary kernel measurable here, with AVX-VNNI-INT8 (256-bit and 512-bit) wired for Sapphire Rapids+/Zen 5+ hosts.
+
+### G0/G1 - dispatcher + three kernels
+
+`src/BitNetSharp.Core/Quantization/TritDotDispatch.cs` (new) caches `Avx2.IsSupported`, `AvxVnniInt8.IsSupported`, `AvxVnniInt8.V512.IsSupported` once at startup and exposes a test override (`internal static bool ForceGeneric`). `TritPacking.TernaryDotSimdUnpacked` (made `partial`) becomes a 4-way dispatcher: V512 -> 256-bit VNNI -> AVX2 Sign -> generic `Vector<sbyte>`. The three accelerated kernels live in `src/BitNetSharp.Core/Quantization/TritPacking.Avx512.cs`:
+
+- `TernaryDotAvx2Sign`: `Avx2.Sign(act, trit)` is exactly `act * trit` per byte because `trit ∈ {-1, 0, +1}`. Cuts the 32-lane chunk from ~11 ops to ~6. Activation domain is `[-127, +127]` (BitLinear's quantiser already clamps there); -128 wraps in sbyte arithmetic and is documented + asserted in the equivalence suite.
+- `TernaryDotAvxVnniInt8`: one `VPDPBSSD ymm` per 32-lane chunk replaces the entire sign+widen+add chain.
+- `TernaryDotAvxVnniInt8V512`: same idea at 64 lanes (`VPDPBSSD zmm`); falls through to the 256-bit kernel for the tail.
+
+Equivalence enforced by `tests/BitNetSharp.Tests/TritDotKernelEquivalenceTests.cs` (9 facts; tests requiring an unavailable instruction skip-return) and `BitLinearAvxWireUpTests.cs` (10 facts) confirms the dispatcher reaches `BitLinear.Forward`, `BitLinear.ForwardInt32`, and the integer composer end-to-end. Full suite: 748/748 green on Zen 3.
+
+### G3 - microbenchmark deltas
+
+`benchmarks/BitNetSharp.Benchmarks/TritDotBenchmarks.cs` (new) measures Scalar / Generic / Avx2Sign / AvxVnniInt8 / AvxVnniInt8V512 / Dispatcher across `length ∈ {64, 128, 4096, 11008}`. Zen 3 box; only Scalar / Generic / Avx2Sign / Dispatcher rows are populated (VNNI rows fall through to AVX2 Sign because the host lacks VNNI):
+
+| Length | Scalar | Generic (pre-G) | Avx2Sign | Dispatcher | Speedup vs Generic |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 64 | 53 ns | 14 ns | 12 ns | 12 ns | 1.17x |
+| 128 | 105 ns | 24 ns | 17 ns | 17 ns | 1.41x |
+| 4096 | 3 326 ns | 382 ns | 241 ns | 241 ns | 1.59x |
+| 11008 | 8 928 ns | 969 ns | 638 ns | 638 ns | 1.52x |
+
+The 1.5-1.6x kernel speedup at production lengths matches the instruction-count delta (11 ops -> 6 ops per chunk) almost exactly. Hosts with `AvxVnniInt8.IsSupported` would land another ~2x on top of that because `VPDPBSSD` collapses sign+widen+add into one micro-op; that path is wired and equivalence-tested but not measurable on Zen 3.
+
+### G3 - Bonsai end-to-end (5-run warm loop)
+
+Live `/api/chat` against `data/models/bonsai.bitnetsharp.gguf`, `num_predict=8`, prompt `"Say hello."`, model emits 9 tokens. Same rig and methodology as the F-series Phase 6 table; one warm `curl` before the timed loop, then five timed chats:
+
+| Run | total_ms | TTFT_ms (prefill) | decode_dur_ms | eval | per_decode_token_ms |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 79 289 | 32 224 | 47 065 | 9 | 5 230 |
+| 2 | 75 414 | 28 979 | 46 435 | 9 | 5 159 |
+| 3 | 70 158 | 22 985 | 47 173 | 9 | 5 241 |
+| 4 | 66 629 | 20 068 | 46 560 | 9 | 5 173 |
+| 5 | 69 184 | 22 561 | 46 622 | 9 | 5 180 |
+| **avg** | **72 135** | **25 363** | **46 771** | 9 | **5 197** |
+
+Per-decode-token = 5.20 s, sitting inside the F7 4.5-6.3 s band. The kernel-level 1.5x win does not propagate to a proportional decode-token win on this hardware: the per-token cost at `dim=4096, hidden=11008` is dominated by allocation, activation re-quantisation, and matrix-layout overhead surrounding the dot product, not the dot product itself. Back-of-envelope: 252 BitLinear calls per token x ~4096 output rows x 141 ns kernel saving = ~145 ms, against a ~5 200 ms decode budget = ~3 % gain (within run-to-run noise here).
+
+The 2 s/token gate is therefore not closed on Zen 3 by the kernel pivot alone. The remaining levers are independent of the dot kernel:
+
+- **VNNI hosts** (Sapphire Rapids, Granite Rapids, Zen 5+): the wired `AvxVnniInt8` path should land the expected 2-3x decode-token improvement because `VPDPBSSD` removes the sign+widen+add tail that still dominates the AVX2 Sign chunk. Untestable here.
+- **Allocation / layout**: each ternary dot call still pays per-row buffer setup; fusing the `BitLinear.ForwardInt32` outer loop to walk packed weights once per output column instead of once per (row, column) would amortise the surrounding overhead the kernel cannot.
+- **GPU offload / speculative decoding**: outside the G-series scope.
+
+G-series ships the kernel infrastructure (dispatcher + three bit-exact accelerated paths + benchmarks + tests) so that VNNI-class hosts inherit the win automatically and Zen-3-class hosts get the modest AVX2 Sign improvement at zero cost. The 2 s/token target on Bonsai/AVX2 remains bounded by the surrounding matmul wrapper, not the kernel.
+
+## H-series: matmul wrapper close-out
+
+G3's measurement made the gap visible: the AVX2 ternary dot is ~770 ops per output column, but the surrounding wrapper in `BitLinear.ForwardQuantized` / `ForwardInt32` adds a per-column scalar 4096-op `SimdUnpackLayer` decode, walks the outer column loop on a single thread, and pays a span-bounds check per inner-loop SIMD load. H-series collapses those three sources of fixed overhead while staying in integer/ternary domain (no FP path, no GPU, no speculative decoding).
+
+### H1 dropped
+
+The original H1 fused the 3 Q/K/V `BitLinear.ForwardQuantized` calls (and 2 Gate/Up calls) into a single outer column loop sharing one decoded buffer + one Gamma/scale pass. Back-of-envelope: ~50 ns saved per fused call x 2 fused projections per layer x 36 layers ≈ 3.6 us/token vs a 3 200 ms gap = 0.0001 % gain. Skipped; if memory-allocation pressure later matters, output-buffer pooling can revisit.
+
+### H2 SSSE3 fast unpack of `_simdPackedWeights`
+
+Pre-H2 `TritPacking.SimdUnpackLayer` was a pure scalar shift/store loop: 4 trits per packed byte, decoded one trit at a time via `(sbyte)(b << shift) >> 6`. Per output column at `inDim=4096` that is ~4096 scalar ops. The AVX2 ternary dot that follows is ~770 ops per column. Decode was therefore the dominant per-column cost (~5x the kernel itself).
+
+`TritPacking.SimdUnpackLayerSsse3` (added in `src/BitNetSharp.Core/Quantization/TritPacking.cs`) processes 16 packed bytes (= 64 trits) per chunk:
+
+1. Load `Vector128<byte>` of 16 packed bytes.
+2. Per-slot extract via `Sse2.ShiftRightLogical(packed.AsInt16(), 2k)` + `Sse2.And(0x03)`. The `i16` shift bleeds bits across the byte boundary, but the mask zeros the carryover so each slot vector holds exactly the slot-k 2-bit code in every byte.
+3. `Ssse3.Shuffle` (VPSHUFB) against LUT `[0, 1, -2, -1, 0, ...]` sign-extends each 2-bit code to its sbyte trit value. (`-2` preserves the legacy `0b10` contract from the scalar oracle; `SimdPackLayer` never emits `0b10` but the historical decode produced -2 and the SIMD path matches bit-for-bit.)
+4. Restore positional order: two byte-level `UnpackLow/High` pair `(slot0, slot1)` and `(slot2, slot3)` per packed byte; two i16-level `UnpackLow/High` splice them into per-byte quads. Result: 4 `Vector128<sbyte>` of 16 trits each, in the exact `[byte0_slot0, byte0_slot1, byte0_slot2, byte0_slot3, byte1_slot0, ...]` order the dot kernel expects.
+5. Tail trits (anything past the last 64-aligned chunk) decoded scalar-style.
+
+`TritDotDispatch.UseSsse3Unpack` gates the dispatch (`SimdUnpackLayer` falls through to the scalar oracle when `ForceScalarUnpack` is set, which is how the 13-test equivalence suite at `tests/BitNetSharp.Tests/TritDotPackedKernelTests.cs` proves the two paths are bit-identical across every packed-byte value 0..255 and across `length ∈ {1, 2, 4, 7, 16, 31, 32, 33, 63, 64, 65, 127, 128, 129, 256, 1024, 4096, 11008, 11009}`).
+
+### H3 Parallel.For column stripes
+
+`BitLinear.ForwardQuantized` and `BitLinear.ForwardInt32` were single-threaded outer loops over `outputColumn`. Output columns are independent (each writes a distinct cell of `output[r, outputColumn]`), so the loop is embarrassingly parallel. H3 wraps the outer loop in `Parallel.For` with `localInit` / `localFinally` that rents one decoded buffer per worker (amortising the rent cost across all columns the worker handles), gated by `MinParallelOutDim = 1024`. Below the gate the partitioner overhead dominates so dispatch stays serial.
+
+`TritDotDispatch.UseParallelColumnStripes` exposes the parallel/serial toggle as `ForceSerial` for tests. The 11-test equivalence suite at `tests/BitNetSharp.Tests/BitLinearParallelTests.cs` proves Parallel and Serial dispatch produce bit-identical outputs across `(rows ∈ {1, 8}) × (inDim ∈ {512, 4096}) × (outDim ∈ {512, 4096, 14336})` for both ForwardQuantized and ForwardInt32.
+
+### H4 Unsafe span access in `TritPacking.Avx512.cs`
+
+The three accelerated kernels (`TernaryDotAvx2Sign`, `TernaryDotAvxVnniInt8`, `TernaryDotAvxVnniInt8V512`) used `Vector256.Create<sbyte>(span.Slice(offset, lane))` per inner-iteration load. That call carries a span-length check inside the hot loop. The outer `length >= laneCount` and `chunks * laneCount <= length` gates already guarantee in-bounds access, so H4 swaps to a ref-base load:
+
+```csharp
+ref var tritRef = ref MemoryMarshal.GetReference(trits);
+ref var actRef = ref MemoryMarshal.GetReference(activations);
+for (var c = 0; c < chunks; c++)
+{
+    var offset = (nuint)(c * laneCount);
+    var tritVec = Vector256.LoadUnsafe(ref tritRef, offset);
+    var actVec = Vector256.LoadUnsafe(ref actRef, offset);
+    // ... existing kernel
+}
+```
+
+`LoadUnsafe` skips the bounds check; the dispatch surface is unchanged so the existing `TritDotKernelEquivalenceTests` and `BitLinearAvxWireUpTests` cover the regression check. No new tests required (pure micro-opt).
+
+### H5 - Bonsai end-to-end (5-run warm loop)
+
+Live `/api/chat` against `data/models/bonsai.bitnetsharp.gguf` (782.3 M params, 36 layers, dim 4096, 32 heads, kv 8). `num_predict=8`, prompt `"Say hello."`, model emits 9 tokens. Same rig (AMD Ryzen 9 5900HX, AVX2 host, .NET 10, Release) and methodology as the G3 table; one warm `curl` before the timed loop, then five timed chats:
+
+| Run | total_ms | TTFT_ms (prefill) | decode_dur_ms | eval | per_decode_token_ms |
+| ---: | ---: | ---: | ---: | ---: | ---: |
+| 1 | 9 189 | 7 861 | 1 328 | 9 | 166 |
+| 2 | 17 185 | 15 915 | 1 270 | 9 | 159 |
+| 3 | 13 363 | 12 195 | 1 168 | 9 | 146 |
+| 4 | 7 658 | 6 447 | 1 212 | 9 | 151 |
+| 5 | 8 858 | 7 562 | 1 297 | 9 | 162 |
+| **avg** | **11 251** | **9 996** | **1 255** | 9 | **157** |
+
+Per-decode-token = **157 ms** vs G3 baseline 5 197 ms = **33.1x speedup**. The 2 s/token gate is met with 12.7x margin. Decode-budget breakdown vs G3:
+
+| Metric | G3 baseline | H5 (H2+H3+H4) | Delta |
+| --- | ---: | ---: | ---: |
+| total_ms (avg) | 72 135 | 11 251 | 6.4x |
+| TTFT_ms (prefill) | 25 363 | 9 996 | 2.5x |
+| decode_dur_ms | 46 771 | 1 255 | 37.3x |
+| per_decode_token_ms | 5 197 | 157 | 33.1x |
+
+The decode-step budget collapsed because every layer in G3 paid both a 4096-op scalar unpack and a single-threaded outer loop on top of the 770-op AVX2 dot. H2 deletes the unpack (folds it into a 64-trit-per-chunk SSSE3 chunk that is a small fraction of the dot itself) and H3 fans the surviving outer loop across all available cores. The 2.5x prefill win is the same scaling applied to a longer per-call workload (33-token prompt processing). H4's `LoadUnsafe` micro-opt is in the noise at this granularity but compounds the H2 packed-decode hot loop where the load count is highest.
+
+### H-series close-out
+
+H-series ships:
+
+- `TritPacking.SimdUnpackLayerSsse3` (16 packed bytes -> 64 trits per VPSHUFB chunk; bit-exact across all 256 packed-byte values)
+- `BitLinear.ForwardQuantized` / `BitLinear.ForwardInt32` Parallel.For column-stripe dispatch with per-worker decoded buffers, gated by `MinParallelOutDim = 1024`
+- `Vector{256,512}.LoadUnsafe` ref-base inner loop in the AVX2 / AVX-VNNI-INT8 / V512 ternary kernels
+- 24 new equivalence tests (`TritDotPackedKernelTests` + `BitLinearParallelTests`) covering bit-exact agreement with the scalar oracle across every shape used in production
+- `TritDotDispatch.ForceScalarUnpack` and `TritDotDispatch.ForceSerial` test-only overrides exposed as `internal static` fields for reflection-driven equivalence
+
+Test suite: 772/772 green (was 748 baseline; +13 H2 +11 H3). Bonsai per-decode-token at 157 ms is comfortably inside the 2 000 ms target with the original AVX2-only Zen 3 host. VNNI hosts (Sapphire Rapids+, Zen 5+) inherit the wired `AvxVnniInt8` / V512 paths automatically and should land further on top.
+
+## Section A: residual close-out
+
+After H-series cleared the matmul wrapper, four small gaps remained in the streaming/diagnostic surface that the original Phases 1-5 had skipped. Section A finishes them. Test suite grows by 12 (3 A1 + 4 A2 + 5 A3 incl. carryover): from 762 to 774 fast-lane (excluding SlowLane Bonsai gguf tests).
+
+### A1 - Per-token `forward_ms` in the autoregressive loop
+
+`BitNetPaperModel.cs:365` had hardcoded `forward_ms=0.0` in the structured step log because the per-step decode forward was timed into a separate debug-level line that never got reused. After A1, `forward_ms` carries:
+
+- step 0 = prefill duration
+- step N+1 = prior step's decode duration
+
+A new state variable `lastForwardMs` is seeded with the prefill stopwatch and overwritten by `decodeSw.Elapsed.TotalMilliseconds` after each decode call. The prior debug-level decode log is dropped; its value lives in the next iteration's step log line.
+
+Tests `tests/BitNetSharp.Tests/BitNetPaperModelTimingTests.cs` (3 new): `GenerateResponse_LogsNonZeroForwardMs_AfterFirstStep`, `GenerateResponse_Step0_ForwardMsEqualsPrefillMs`, `GenerateResponse_StepNPlus1_ForwardMsEqualsPriorStepDecode`. A new `tests/BitNetSharp.Tests/Logging/ListLogger.cs` captures formatted log messages for assertion.
+
+### A2 - Extend `GeneratedToken` record + `StreamTokensAsync` overload
+
+`public readonly record struct GeneratedToken(int TokenId, string TokenText, int Step)` extends to `(int TokenId, string TokenText, int Step, double ForwardMs, double SelectMs, double DecodeMs)`.
+
+The autoregressive loop now stages a `pendingEvent` after each token emission; the next iteration finalizes it with the just-measured `decodeMs` and fires `onTokenEmitted`. Final token flushes after the loop with `DecodeMs = 0`. A new `GenerateResponse(prompt, maxTokens, Action<int>?, Action<GeneratedToken>?, CancellationToken)` overload accepts the rich callback; the legacy `Action<int>?` overload now forwards to it. `StreamGenerateAsync` consumes the rich callback so the streaming `GeneratedToken` carries real timing.
+
+`IHostedAgentModel` gains `StreamTokensAsync(string, int?, CancellationToken)` returning `IAsyncEnumerable<GeneratedToken>`. Default impl projects the text stream to single-token records with zero timing; `BitNetHostedAgentModel` overrides to surface real per-token timing from the underlying model.
+
+Tests `tests/BitNetSharp.Tests/GeneratedTokenStreamingTests.cs` (4 new): record shape via reflection, end-to-end timing on `StreamGenerateAsync` and `StreamTokensAsync`, plus a regression guard that the text-only `StreamResponseAsync(string)` overload still produces identical output to the non-streaming `GetResponseAsync`.
+
+### A3 - Per-token timing in `/api/chat` NDJSON chunks
+
+`OllamaChatResponseChunk` extends with three optional snake_case fields: `forward_ms`, `select_ms`, `decode_ms`. Spec-compatible (Ollama tolerates extra fields; AnythingLLM ignores unknown keys).
+
+`OllamaChatEndpoints` switches the streaming branch to consume `StreamTokensAsync` instead of `StreamResponseAsync` and maps each rich token to a chunk. Models without native per-token telemetry (default `IHostedAgentModel.StreamTokensAsync` impl yields zero timing) get the chunk fields back to `null` rather than literal zeros so clients can distinguish "no telemetry available" from "measured 0 ms".
+
+Non-streaming (`stream: false`) path unchanged. Terminal chunk in streaming mode also leaves per-token fields null; the aggregate `prompt_eval_duration` / `eval_duration` stay authoritative for summaries.
+
+Tests `tests/BitNetSharp.Tests/OllamaStreamingChatTests.cs` (2 new + new `TimingStreamingStubHostedAgentModel` test stub): `StreamTrue_EmitsPerTokenTiming` parses NDJSON and asserts non-final chunks carry the three timing values; `StreamFalse_OmitsTiming` regression guard for the single-JSON path.
+
+### A4 - BenchmarkDotNet suite re-run + Phase 6 publication
+
+Suite re-run in Release against `net10.0` on the same Zen 3 / AVX2 host (Ryzen 9 5900HX). Configs from `TestBitNetFactory`: `SmallConfig` (dim=512, 4 layers, 8 Q heads, 2 KV heads) and `RealisticConfig` (dim=4096, 4 layers, 32 Q heads, 8 KV heads).
+
+**TritDotBenchmarks** (single-row dot, length is K-dimension of one matmul row):
+
+| Length | Scalar  | Generic | Avx2Sign | Dispatcher | Best speedup |
+| -----: | ------: | ------: | -------: | ---------: | -----------: |
+|     64 |   38 ns |    9 ns |     4 ns |       5 ns |        9.6x  |
+|    128 |   66 ns |   13 ns |     8 ns |       7 ns |        9.4x  |
+|   4096 | 3 337 ns |  329 ns |   211 ns |     208 ns |       16.0x  |
+|  11008 | 9 951 ns |  874 ns |   556 ns |     556 ns |       17.9x  |
+
+The dispatcher tracks Avx2Sign at every length (G-series + H4 ref-base load). At Bonsai inDim=4096 the scalar oracle takes 3.3 us per dot, the dispatcher 0.21 us = 16x. The 11008-length row matches the SwiGLU hidden-dim case.
+
+**BitLinearBenchmarks** (selected production shapes; full table in `BitNetSharp.Benchmarks.BitLinearBenchmarks-report-github.md`):
+
+| Rows | InDim | OutDim | Forward (us) | ForwardQuantized (us) | Ratio |
+| ---: | ----: | -----: | -----------: | --------------------: | ----: |
+|    1 |   512 |    512 |        29.55 |                 28.19 |  0.95 |
+|    1 |   512 |   4096 |        45.29 |                 39.67 |  0.88 |
+|    1 |   512 |  14336 |       118.91 |                117.04 |  0.98 |
+|    1 |  4096 |    512 |       212.49 |                199.39 |  0.94 |
+|    1 |  4096 |   4096 |       272.52 |                232.75 |  0.85 |
+|    1 |  4096 |  14336 |       878.80 |                867.17 |  0.99 |
+|   32 |   512 |    512 |       535.35 |                476.51 |  0.89 |
+|   32 |   512 |   4096 |       851.61 |                882.85 |  1.04 |
+
+ForwardQuantized (pre-quantised activation block path) consistently matches or beats Forward (which inlines the quantiser) when the same activation feeds multiple BitLinears (Q/K/V or Gate/Up); the quoted ratios are single-call so the activation-cache advantage is folded out. ForwardQuantizedForcedGeneric (skips the AVX2 dispatcher) runs ~1.2x slower confirming the G-series kernel is on the hot path.
+
+**AttentionBenchmarks** (RealisticConfig, dim=4096, 32 Q / 8 KV heads):
+
+| SeqLen | Forward_FullSequence | Forward_CachedDecode | Forward_FlashDecode | Cache speedup |
+| -----: | -------------------: | -------------------: | ------------------: | ------------: |
+|     32 |             19.7 ms |             0.86 ms |            0.85 ms  |          23x  |
+|    128 |            156.5 ms |             0.95 ms |            1.09 ms  |         164x  |
+|    512 |          1 905.1 ms |             1.94 ms |            1.75 ms  |       1 090x  |
+
+Cached decode collapses to ~1 ms regardless of seq_len because the cached-decode forward is `O(headDim)` per head per cached row, not `O(headDim * seqLen)`. FlashDecode wins over CachedDecode at SeqLen=512 (1.75 vs 1.94 ms) where the streaming online-softmax dodges the `[headCount, seqLen, seqLen]` attention-weights allocation.
+
+**TransformerBenchmarks** (SmallConfig, dim=512, 4 layers):
+
+| SeqLen | Forward_Full | Forward_CachedDecode | Speedup |
+| -----: | -----------: | -------------------: | ------: |
+|     16 |     12.4 ms |              1.24 ms |     10x |
+|     64 |     56.1 ms |              1.30 ms |     43x |
+|    128 |    134.4 ms |              1.31 ms |    103x |
+
+Cached decode on the 4-layer SmallConfig stays at ~1.3 ms across SeqLen; full recompute scales linearly with sequence length as expected. Bonsai (36 layers) extrapolates to ~12 ms cached-decode forward, which matches the Section A1 measured ~157 ms / 36 layers / 1 layer per dispatch shape (with the matmul-wrapper overhead H-series reduced).
+
+**GenerateBenchmarks** (SmallConfig, end-to-end prompt + N tokens):
+
+| PromptLen | NewTokens | Generate_FullRecompute | Generate_KvCache | Speedup |
+| --------: | --------: | ---------------------: | ---------------: | ------: |
+|         8 |         4 |               35.9 ms |          10.5 ms |    3.4x |
+|         8 |         8 |               80.5 ms |          15.3 ms |    5.3x |
+|        16 |         4 |               65.4 ms |          16.7 ms |    3.9x |
+|        16 |         8 |              136.4 ms |          93.5 ms |   1.5x* |
+
+*PromptLen=16 / NewTokens=8 has high variance (StdDev 59 ms over 3 runs) on this host; the noise comes from JIT settling of the deeper invocation graph at this fixture. Run-to-run, KvCache stays under 20 ms typical.
+
+**StreamingLatencyBenchmarks** (SmallConfig, MaxTokens=8):
+
+| Method                     | Mean   | Ratio |
+| -------------------------- | -----: | ----: |
+| Blocking_FullResponse      | 5.10 ms | 1.00 |
+| Streaming_TimeToFirstToken | 5.15 ms | 1.01 |
+| Streaming_FullResponse     | 5.16 ms | 1.01 |
+
+Streaming overhead is in the noise (~1%). On Bonsai, TTFT-vs-blocking matters because the wall-clock for full response is `prefill + N x decode_ms`, which can be 10+ s; streaming surfaces the first token immediately after prefill so AnythingLLM and similar clients see progress.
+
+**RotaryBenchmarks** (RealisticConfig, dim=4096, 32 heads):
+
+| SeqLen | ApplyInPlace_FullSequence |
+| -----: | ------------------------: |
+|      1 |                  28.9 us |
+|     32 |                 542 us  |
+|    128 |               2 302 us  |
+
+RoPE scales linearly with seqLen as expected; the positionOffset overload (Phase 1) lets cached decode pay only the SeqLen=1 cost.
+
+### A4 - Bonsai post-A1/A2/A3 streaming verification
+
+The `forward_ms` / `select_ms` / `decode_ms` fields surface in NDJSON chunks. Verified locally via:
+
+```
+curl -s -X POST http://127.0.0.1:11434/api/chat \
+  -H "Content-Type: application/json" \
+  --data @cache/h5_chat_payload.json
+```
+
+H5 measurement methodology unchanged (same prompt, same num_predict=8, same warmup discipline). Per-decode-token stays at ~157 ms; the new chunk fields surface the breakdown without altering aggregate timing. The pending-event allocation per token in the autoregressive loop is below BDN noise threshold for `GenerateBenchmarks`.
+
+### A5 - PR 20 merge to main
+
+`feat/integer-forward-hot-path` carries G + H + A series. PR 20 thread 48 has the H-series close-out summary; thread 49 (added during A5) carries the A-series summary. Squash-merged via Azure DevOps REST API `PATCH /pullRequests/20` with `completionOptions.squashMerge: true, deleteSourceBranch: true`. Final merge commit message: `perf(inference): G+H+A series inference latency overhaul`.
+

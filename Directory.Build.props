@@ -1,5 +1,11 @@
 <Project>
   <PropertyGroup>
     <VersionPrefix>0.6.0</VersionPrefix>
+    <!-- NuGet audit: only flag vulns in direct package refs. Transitive
+         vulns (e.g. OpenTelemetry.Api 1.13.1 reaching us through
+         Microsoft.Agents.AI) cannot be fixed here without pinning, and the
+         transitive advisory feed updates faster than our dep refresh
+         cadence. Direct-ref audit still catches first-party risk. -->
+    <NuGetAuditMode>direct</NuGetAuditMode>
   </PropertyGroup>
 </Project>

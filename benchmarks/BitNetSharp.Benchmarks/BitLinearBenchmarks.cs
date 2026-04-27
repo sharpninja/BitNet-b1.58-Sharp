@@ -1,3 +1,4 @@
+using System.Reflection;
 using BenchmarkDotNet.Attributes;
 using BenchmarkDotNet.Jobs;
 using BitNetSharp.Core.Layers;
@@ -10,6 +11,9 @@ namespace BitNetSharp.Benchmarks;
 /// Baseline BitLinear.Forward cost across (rows, in_dim, out_dim). Rows=1
 /// models the decode-time hot path; rows=32/128 the prefill path.
 /// Out_dim 14336 matches the FFN hidden dimension used by Bonsai.
+/// G-series adds <see cref="ForwardQuantizedForcedGeneric"/> so the BDN
+/// report shows the BitLinear-level delta of the accelerated dispatch
+/// against the pre-G generic path directly.
 /// </summary>
 [MemoryDiagnoser]
 [SimpleJob(RuntimeMoniker.Net10_0, warmupCount: 3, iterationCount: 10)]
@@ -27,6 +31,9 @@ public class BitLinearBenchmarks
     private BitLinear _layer = null!;
     private float[,] _input = null!;
     private QuantizedActivationBlock _quant = null!;
+    private static readonly FieldInfo ForceGenericField =
+        typeof(TritPacking).Assembly.GetType("BitNetSharp.Core.Quantization.TritDotDispatch")!
+            .GetField("ForceGeneric", BindingFlags.NonPublic | BindingFlags.Static)!;
 
     [GlobalSetup]
     public void Setup()
@@ -41,4 +48,19 @@ public class BitLinearBenchmarks
 
     [Benchmark]
     public float[,] ForwardQuantized() => _layer.ForwardQuantized(_quant);
+
+    [Benchmark]
+    public float[,] ForwardQuantizedForcedGeneric()
+    {
+        var orig = (bool)ForceGenericField.GetValue(null)!;
+        try
+        {
+            ForceGenericField.SetValue(null, true);
+            return _layer.ForwardQuantized(_quant);
+        }
+        finally
+        {
+            ForceGenericField.SetValue(null, orig);
+        }
+    }
 }

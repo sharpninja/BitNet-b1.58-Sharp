@@ -36,33 +36,74 @@ internal static class OllamaGenerateEndpoints
                     new[] { new Microsoft.Extensions.AI.ChatMessage(Microsoft.Extensions.AI.ChatRole.User, request.Prompt ?? string.Empty) });
 
             int? maxOutputTokens = TryReadMaxOutputTokens(request.Options);
-            var response = await entry.Model.GetResponseAsync(prompt, maxOutputTokens, http.RequestAborted).ConfigureAwait(false);
+
+            // Switch to StreamResponseAsync internally so we can capture the
+            // real time-to-first-token. Both stream=false and stream=true land
+            // here; the only difference is whether intermediate pieces are
+            // surfaced over NDJSON or batched into the terminal payload.
+            var sb = new System.Text.StringBuilder();
+            long ttfbNs = 0;
+            bool firstSeen = false;
 
             if (!stream)
             {
-                return Results.Json(BuildTerminalGenerate(entry.Card.Name, response.Text, start, prompt), ServeJson.Options);
+                await foreach (var piece in entry.Model.StreamResponseAsync(prompt, maxOutputTokens, http.RequestAborted).ConfigureAwait(false))
+                {
+                    if (!firstSeen && !string.IsNullOrEmpty(piece))
+                    {
+                        ttfbNs = ServeTimings.ElapsedNanoseconds(start);
+                        firstSeen = true;
+                    }
+                    sb.Append(piece);
+                }
+                return Results.Json(BuildTerminalGenerate(entry.Card.Name, sb.ToString(), start, prompt, ttfbNs), ServeJson.Options);
             }
 
-            return Results.Stream(async (stream) =>
+            return Results.Stream(async (outputStream) =>
             {
-                var writer = new OllamaStreamWriter(stream);
-                if (!string.IsNullOrEmpty(response.Text))
+                var writer = new OllamaStreamWriter(outputStream);
+                try
                 {
-                    var chunk = new OllamaGenerateResponseChunk(
-                        Model: entry.Card.Name,
-                        CreatedAt: ServeTimings.UtcNow(),
-                        Response: response.Text,
-                        Done: false);
-                    await writer.WriteAsync(chunk, http.RequestAborted).ConfigureAwait(false);
+                    await foreach (var piece in entry.Model.StreamResponseAsync(prompt, maxOutputTokens, http.RequestAborted).ConfigureAwait(false))
+                    {
+                        if (string.IsNullOrEmpty(piece))
+                        {
+                            continue;
+                        }
+                        if (!firstSeen)
+                        {
+                            ttfbNs = ServeTimings.ElapsedNanoseconds(start);
+                            firstSeen = true;
+                        }
+                        sb.Append(piece);
+                        var chunk = new OllamaGenerateResponseChunk(
+                            Model: entry.Card.Name,
+                            CreatedAt: ServeTimings.UtcNow(),
+                            Response: piece,
+                            Done: false);
+                        await writer.WriteAsync(chunk, http.RequestAborted).ConfigureAwait(false);
+                    }
                 }
-                await writer.WriteAsync(BuildTerminalGenerate(entry.Card.Name, string.Empty, start, prompt), http.RequestAborted).ConfigureAwait(false);
+                catch (OperationCanceledException) when (http.RequestAborted.IsCancellationRequested)
+                {
+                    return;
+                }
+                await writer.WriteAsync(BuildTerminalGenerate(entry.Card.Name, string.Empty, start, prompt, ttfbNs), http.RequestAborted).ConfigureAwait(false);
             }, contentType: "application/x-ndjson");
         });
     }
 
-    private static OllamaGenerateResponseChunk BuildTerminalGenerate(string modelName, string response, DateTimeOffset start, string prompt)
+    private static OllamaGenerateResponseChunk BuildTerminalGenerate(string modelName, string response, DateTimeOffset start, string prompt, long ttfbNs)
     {
+        // Real prefill_ms = TTFT (time to first emitted piece); real eval_ms =
+        // total - prefill. Both come from the actual stream timings.
         long total = ServeTimings.ElapsedNanoseconds(start);
+        long prefill = ttfbNs > 0 ? ttfbNs : total;
+        long eval = total - prefill;
+        if (eval < 0)
+        {
+            eval = 0;
+        }
         return new OllamaGenerateResponseChunk(
             Model: modelName,
             CreatedAt: ServeTimings.UtcNow(),
@@ -72,9 +113,9 @@ internal static class OllamaGenerateEndpoints
             TotalDuration: total,
             LoadDuration: 0,
             PromptEvalCount: ServeTimings.EstimateTokens(prompt),
-            PromptEvalDuration: total / 2,
+            PromptEvalDuration: prefill,
             EvalCount: ServeTimings.EstimateTokens(response),
-            EvalDuration: total / 2);
+            EvalDuration: eval);
     }
 
     private static int? TryReadMaxOutputTokens(System.Collections.Generic.IReadOnlyDictionary<string, object?>? options)

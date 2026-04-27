@@ -69,7 +69,8 @@ public static class BitNetPaperGguf
             GetRequiredBool(reader.Metadata, "bitnetsharp.enable_chain_buckets"),
             GetRequiredBool(reader.Metadata, "bitnetsharp.enable_sequence_compression"),
             ReadAcceptanceThreshold(reader.Metadata),
-            ReadOptionalBool(reader.Metadata, "bitnetsharp.enable_recall_heat_map", defaultValue: true));
+            ReadOptionalBool(reader.Metadata, "bitnetsharp.enable_recall_heat_map", defaultValue: true),
+            UseIntegerForward: BitNetOptions.IntegerForwardEnvDefault);
 
         var bootstrapSeed = GetRequiredInt32(reader.Metadata, "bitnetsharp.bootstrap_seed");
         var model = new BitNetPaperModel(options, logger, loggerFactory, config, bootstrapSeed);

@@ -100,6 +100,80 @@ public sealed class OllamaStreamingChatTests
     }
 
     [Fact]
+    public async Task StreamTrue_EmitsPerTokenTiming()
+    {
+        // Section A3: NDJSON chunks carry per-token forward_ms / select_ms /
+        // decode_ms when the underlying model surfaces them via the rich
+        // StreamTokensAsync overload.
+        var tokens = new[]
+        {
+            new GeneratedToken(TokenId: 1, TokenText: "hello", Step: 0, ForwardMs: 12.5, SelectMs: 0.7, DecodeMs: 9.4),
+            new GeneratedToken(TokenId: 2, TokenText: " world", Step: 1, ForwardMs: 9.4, SelectMs: 0.6, DecodeMs: 8.1),
+            new GeneratedToken(TokenId: 3, TokenText: "!", Step: 2, ForwardMs: 8.1, SelectMs: 0.5, DecodeMs: 0d),
+        };
+        var stub = new TimingStreamingStubHostedAgentModel("alpha", "sys", tokens);
+        using var host = await BuildTestHostAsync(stub);
+        var client = host.GetTestClient();
+
+        var chatRequest = new OllamaChatRequest(
+            Model: "alpha",
+            Messages: new[] { new OllamaChatMessage("user", "hi") },
+            Stream: true,
+            Options: new Dictionary<string, object?> { ["num_predict"] = tokens.Length });
+
+        using var response = await client.PostAsJsonAsync("/api/chat", chatRequest, ServeJson.Options);
+        response.EnsureSuccessStatusCode();
+
+        var body = await response.Content.ReadAsStringAsync();
+        var lines = body.Split('\n', StringSplitOptions.RemoveEmptyEntries);
+        Assert.Equal(tokens.Length + 1, lines.Length);
+
+        for (var i = 0; i < tokens.Length; i++)
+        {
+            var chunk = JsonSerializer.Deserialize<OllamaChatResponseChunk>(lines[i], ServeJson.Options);
+            Assert.NotNull(chunk);
+            Assert.False(chunk!.Done);
+            Assert.Equal(tokens[i].TokenText, chunk.Message!.Content);
+            Assert.Equal(tokens[i].ForwardMs, chunk.ForwardMs);
+            Assert.Equal(tokens[i].SelectMs, chunk.SelectMs);
+            Assert.Equal(tokens[i].DecodeMs, chunk.DecodeMs);
+        }
+
+        var terminal = JsonSerializer.Deserialize<OllamaChatResponseChunk>(lines[^1], ServeJson.Options);
+        Assert.NotNull(terminal);
+        Assert.True(terminal!.Done);
+        // Terminal chunk does not need per-token timing (aggregate fields
+        // cover it). Per-token fields stay null on the terminal chunk so
+        // clients can distinguish summary vs. mid-stream.
+        Assert.Null(terminal.ForwardMs);
+        Assert.Null(terminal.SelectMs);
+        Assert.Null(terminal.DecodeMs);
+    }
+
+    [Fact]
+    public async Task StreamFalse_OmitsTiming()
+    {
+        var tokens = new List<string> { "alpha ", "beta" };
+        var stub = new StreamingStubHostedAgentModel("alpha", "sys", tokens);
+        using var host = await BuildTestHostAsync(stub);
+        var client = host.GetTestClient();
+
+        var chatRequest = new OllamaChatRequest(
+            Model: "alpha",
+            Messages: new[] { new OllamaChatMessage("user", "hi") },
+            Stream: false);
+
+        using var response = await client.PostAsJsonAsync("/api/chat", chatRequest, ServeJson.Options);
+        var chunk = await response.Content.ReadFromJsonAsync<OllamaChatResponseChunk>(ServeJson.Options);
+
+        Assert.NotNull(chunk);
+        Assert.True(chunk!.Done);
+        Assert.Null(chunk.ForwardMs);
+        Assert.Null(chunk.SelectMs);
+        Assert.Null(chunk.DecodeMs);
+    }
+
+    [Fact]
     public async Task CancellationMidStream_StopsGeneration()
     {
         var stub = new CancellableStubHostedAgentModel("alpha", "sys");
@@ -192,6 +266,58 @@ public sealed class OllamaStreamingChatTests
         }
 
         public async IAsyncEnumerable<string> StreamResponseAsync(
+            string prompt,
+            int? maxOutputTokens = null,
+            [EnumeratorCancellation] CancellationToken cancellationToken = default)
+        {
+            foreach (var t in _tokens)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                yield return t;
+                await Task.Yield();
+            }
+        }
+
+        public void Dispose() { }
+    }
+
+    /// <summary>Stub that yields rich GeneratedToken events with non-zero timing via StreamTokensAsync directly.</summary>
+    private sealed class TimingStreamingStubHostedAgentModel : IHostedAgentModel
+    {
+        private readonly IReadOnlyList<GeneratedToken> _tokens;
+
+        public TimingStreamingStubHostedAgentModel(string modelId, string systemPrompt, IReadOnlyList<GeneratedToken> tokens)
+        {
+            ModelId = modelId;
+            AgentName = modelId;
+            SystemPrompt = systemPrompt;
+            _tokens = tokens;
+        }
+
+        public string AgentName { get; }
+        public string ModelId { get; }
+        public string DisplayName => "timing streaming stub";
+        public string PrimaryLanguage => "en";
+        public VerbosityLevel Verbosity => VerbosityLevel.Quiet;
+        public string SystemPrompt { get; }
+
+        public IReadOnlyList<string> DescribeModel() => new[] { DisplayName };
+
+        public Task<HostedAgentModelResponse> GetResponseAsync(
+            string prompt,
+            int? maxOutputTokens = null,
+            CancellationToken cancellationToken = default)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var sb = new System.Text.StringBuilder();
+            foreach (var t in _tokens)
+            {
+                sb.Append(t.TokenText);
+            }
+            return Task.FromResult(new HostedAgentModelResponse(sb.ToString(), Array.Empty<string>()));
+        }
+
+        public async IAsyncEnumerable<GeneratedToken> StreamTokensAsync(
             string prompt,
             int? maxOutputTokens = null,
             [EnumeratorCancellation] CancellationToken cancellationToken = default)

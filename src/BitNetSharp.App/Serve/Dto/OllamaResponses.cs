@@ -34,7 +34,12 @@ public sealed record OllamaShowResponse(
 /// <summary>
 /// /api/chat streaming chunk. Intermediate chunks carry a content delta and
 /// <c>done=false</c>; the terminal chunk carries <c>done=true</c> plus timing
-/// metadata. For v1 pseudo-streaming we emit exactly two chunks per request.
+/// metadata. Section A3 added optional per-token <c>forward_ms</c>,
+/// <c>select_ms</c>, <c>decode_ms</c> fields on intermediate chunks so
+/// streaming clients see per-token cost without parsing server logs. The
+/// fields are nullable; the terminal chunk leaves them null and the
+/// aggregate <c>eval_duration</c>/<c>prompt_eval_duration</c> fields stay
+/// authoritative for summaries.
 /// </summary>
 public sealed record OllamaChatResponseChunk(
     string Model,
@@ -47,7 +52,10 @@ public sealed record OllamaChatResponseChunk(
     [property: JsonPropertyName("prompt_eval_count")] int? PromptEvalCount = null,
     [property: JsonPropertyName("prompt_eval_duration")] long? PromptEvalDuration = null,
     [property: JsonPropertyName("eval_count")] int? EvalCount = null,
-    [property: JsonPropertyName("eval_duration")] long? EvalDuration = null);
+    [property: JsonPropertyName("eval_duration")] long? EvalDuration = null,
+    [property: JsonPropertyName("forward_ms")] double? ForwardMs = null,
+    [property: JsonPropertyName("select_ms")] double? SelectMs = null,
+    [property: JsonPropertyName("decode_ms")] double? DecodeMs = null);
 
 public sealed record OllamaGenerateResponseChunk(
     string Model,

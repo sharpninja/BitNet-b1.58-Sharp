@@ -4,6 +4,7 @@ using System.Threading.Tasks;
 using BitNetSharp.App.Serve.Dto;
 using BitNetSharp.App.Serve.Framing;
 using BitNetSharp.App.Serve.Inference;
+using BitNetSharp.Core;
 using Microsoft.AspNetCore.Builder;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Routing;
@@ -39,32 +40,60 @@ internal static class OllamaChatEndpoints
             if (!stream)
             {
                 var sb = new System.Text.StringBuilder();
+                long ttfbNs = 0;
+                bool firstSeen = false;
                 await foreach (var piece in entry.Model.StreamResponseAsync(prompt, maxOutputTokens, http.RequestAborted).ConfigureAwait(false))
                 {
+                    if (!firstSeen && !string.IsNullOrEmpty(piece))
+                    {
+                        ttfbNs = ServeTimings.ElapsedNanoseconds(start);
+                        firstSeen = true;
+                    }
                     sb.Append(piece);
                 }
                 var fullText = sb.ToString();
-                return Results.Json(BuildTerminalChat(entry.Card.Name, fullText, start, prompt, fullText), ServeJson.Options);
+                return Results.Json(BuildTerminalChat(entry.Card.Name, fullText, start, prompt, fullText, ttfbNs), ServeJson.Options);
             }
 
             return Results.Stream(async (outputStream) =>
             {
                 var writer = new OllamaStreamWriter(outputStream);
                 var accumulated = new System.Text.StringBuilder();
+                long ttfbNs = 0;
+                bool firstSeen = false;
                 try
                 {
-                    await foreach (var piece in entry.Model.StreamResponseAsync(prompt, maxOutputTokens, http.RequestAborted).ConfigureAwait(false))
+                    // A3: consume the rich per-token stream so each NDJSON
+                    // chunk carries forward_ms / select_ms / decode_ms.
+                    // Models without native per-token telemetry (default
+                    // IHostedAgentModel.StreamTokensAsync impl) surface a
+                    // synthetic GeneratedToken with zero timing, in which
+                    // case the timing fields stay zero rather than nullable -
+                    // we map "exactly zero" back to null on the chunk so
+                    // clients can distinguish "no telemetry available" from
+                    // "measured 0 ms".
+                    await foreach (var token in entry.Model.StreamTokensAsync(prompt, maxOutputTokens, http.RequestAborted).ConfigureAwait(false))
                     {
+                        var piece = token.TokenText;
                         if (string.IsNullOrEmpty(piece))
                         {
                             continue;
                         }
+                        if (!firstSeen)
+                        {
+                            ttfbNs = ServeTimings.ElapsedNanoseconds(start);
+                            firstSeen = true;
+                        }
                         accumulated.Append(piece);
+                        var hasTiming = token.ForwardMs > 0d || token.SelectMs > 0d || token.DecodeMs > 0d;
                         var chunk = new OllamaChatResponseChunk(
                             Model: entry.Card.Name,
                             CreatedAt: ServeTimings.UtcNow(),
                             Message: new OllamaChatMessage(Role: "assistant", Content: piece),
-                            Done: false);
+                            Done: false,
+                            ForwardMs: hasTiming ? token.ForwardMs : null,
+                            SelectMs: hasTiming ? token.SelectMs : null,
+                            DecodeMs: hasTiming ? token.DecodeMs : null);
                         await writer.WriteAsync(chunk, http.RequestAborted).ConfigureAwait(false);
                     }
                 }
@@ -72,14 +101,23 @@ internal static class OllamaChatEndpoints
                 {
                     return;
                 }
-                await writer.WriteAsync(BuildTerminalChat(entry.Card.Name, string.Empty, start, prompt, accumulated.ToString()), http.RequestAborted).ConfigureAwait(false);
+                await writer.WriteAsync(BuildTerminalChat(entry.Card.Name, string.Empty, start, prompt, accumulated.ToString(), ttfbNs), http.RequestAborted).ConfigureAwait(false);
             }, contentType: "application/x-ndjson");
         });
     }
 
-    private static OllamaChatResponseChunk BuildTerminalChat(string modelName, string visibleContent, DateTimeOffset start, string prompt, string fullResponse)
+    private static OllamaChatResponseChunk BuildTerminalChat(string modelName, string visibleContent, DateTimeOffset start, string prompt, string fullResponse, long ttfbNs)
     {
+        // Real prefill_ms = time to first emitted token (TTFT). Real eval_ms =
+        // remaining wall-clock for the rest of the decode. Both are measured on
+        // the server, not estimated.
         long total = ServeTimings.ElapsedNanoseconds(start);
+        long prefill = ttfbNs > 0 ? ttfbNs : total;
+        long eval = total - prefill;
+        if (eval < 0)
+        {
+            eval = 0;
+        }
         return new OllamaChatResponseChunk(
             Model: modelName,
             CreatedAt: ServeTimings.UtcNow(),
@@ -89,9 +127,9 @@ internal static class OllamaChatEndpoints
             TotalDuration: total,
             LoadDuration: 0,
             PromptEvalCount: ServeTimings.EstimateTokens(prompt),
-            PromptEvalDuration: total / 2,
+            PromptEvalDuration: prefill,
             EvalCount: ServeTimings.EstimateTokens(fullResponse),
-            EvalDuration: total / 2);
+            EvalDuration: eval);
     }
 
     private static int? TryReadMaxOutputTokens(System.Collections.Generic.IReadOnlyDictionary<string, object?>? options)

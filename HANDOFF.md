@@ -1,176 +1,111 @@
-# BitNet-b1.58-Sharp Distributed Training — Session Handoff
+# BitNet-b1.58-Sharp - Session Handoff
 
-**Date:** 2026-04-16 (updated after tokenizer + presets)
-**Session:** `Claude-20260415T120000Z-bitnet-distributed-training`
-**HEAD:** `adc801a` (both origin + azure synced)
-**Tests:** 314 fast-lane passing
+**Date:** 2026-04-26
+**Session:** `ClaudeCode-20260426T033736Z-plugin` (MCP server `http://PAYTON-LEGION2:7147`)
+**HEAD:** `cf6c801` (pushed to Azure DevOps `origin`)
+**Branch:** `feat/integer-forward-hot-path`
+**Open PR:** [PR 20](https://dev.azure.com/McpServer/McpServer/_git/BitNet-b1.58-Sharp/pullrequest/20) (thread 48 carries the close-out summary)
+**Tests:** 772/772 green (xunit, net10.0)
 
-**Latest additions since initial handoff:**
-- WordLevelTokenizer (5174-vocab, Contracts) + tokenize-corpus CLI
-- TruckMateModelPresets (small ~7M, medium ~56M, large ~121M)
-- CoordinatorOptions.ModelPreset → WeightApplicationService dimension override
-- Pre-tokenized corpus staged on PAYTON-DESKTOP (1.83M tokens, 10 binary shards)
+## What was just shipped: H-series matmul wrapper close-out
 
-## What was built
+Bonsai 782M (36 layers, dim=4096, 32 Q / 8 KV heads) per-decode-token latency on the same Zen 3 / AVX2 host (PAYTON-LEGION2):
 
-A complete distributed CPU training system for the BitNet b1.58 ternary
-SLM, targeting the **Truck Mate** voice-assistant intent-classification
-use case. The system spans four .NET projects, a Docker image, and a
-Windows service deployment on two machines.
+| Metric             | G3 baseline | H5 (H2+H3+H4) |   Delta |
+| ------------------ | ----------: | ------------: | ------: |
+| total_ms (avg)     |      72 135 |        11 251 |    6.4x |
+| TTFT_ms (prefill)  |      25 363 |         9 996 |    2.5x |
+| decode_dur_ms      |      46 771 |         1 255 |   37.3x |
+| per_decode_token_ms|       5 197 |           157 |   33.1x |
 
-### Project layout
+The 2 s/token gate is met with **12.7x margin**. 5-run warm `/api/chat` measurement.
+
+### Pieces in the H stack
+
+- **H1 dropped.** Matmul-wrapper-cache analysis showed ~3.6 us/token win against a 3 200 ms gap. Not worth the risk surface.
+- **H2 - SSSE3 fast unpack** (`src/BitNetSharp.Core/Quantization/TritPacking.cs`, new `SimdUnpackLayerSsse3`). Pre-H2 `SimdUnpackLayer` was a scalar shift/store loop costing ~4096 ops per output column at inDim=4096 vs ~770 ops for the AVX2 dot. New kernel decodes 16 packed bytes (= 64 trits) per chunk via mask+shift slot extraction, VPSHUFB sign-extend lookup against a 16-byte LUT `[0, 1, -2, -1, ...]`, and `VPUNPCKL/H` byte+i16 interleave to restore positional order. SSSE3 chosen over AVX2 to dodge the 128-bit lane-crossing wart of VPSHUFB on YMM. LUT keeps the legacy `0b10 -> -2` contract so it stays bit-exact with the scalar oracle even though `SimdPackLayer` never emits 0b10. 13 equivalence tests cover all 256 byte values + lengths 1..11009.
+- **H3 - Parallel.For column stripes** (`src/BitNetSharp.Core/Layers/BitLinear.cs`, both `ForwardQuantized` and `ForwardInt32`). Outer column loop wrapped in `Parallel.For` with `localInit` (ArrayPool-rent decoded buffer) / body (decode + dot per row) / `localFinally` (return to pool). Gated by `MinParallelOutDim = 1024` to skip overhead on small shapes. New `TritDotDispatch.UseParallelColumnStripes` flag (with internal `ForceSerial` backdoor so tests can pin determinism). 11 equivalence tests confirm parallel matches serial across production shapes.
+- **H4 - `Vector{256,512}.LoadUnsafe` ref-base loads** (`src/BitNetSharp.Core/Quantization/TritPacking.Avx512.cs`, all three of `TernaryDotAvx2Sign`, `TernaryDotAvxVnniInt8`, `TernaryDotAvxVnniInt8V512`). `Vector256.Create<sbyte>(span.Slice(...))` emits a length check on every iteration; `LoadUnsafe(ref T, nuint)` trusts the caller. Outer `(length >= laneCount)` and `chunks * laneCount <= length` gates already guarantee in-bounds, so the per-iteration check was dead weight.
+
+### Files touched in commit `cf6c801`
 
 ```
-src/
-  BitNetSharp.Distributed.Contracts/    # Wire-format DTOs, codecs, tokenizer
-  BitNetSharp.Distributed.Coordinator/  # ASP.NET Core host (Duende IS + Blazor)
-  BitNetSharp.Distributed.Worker/       # Console app with BDN calibration + Serilog
-docker/
-  worker/                               # Dockerfile + docker-compose + build.ps1
-.claude/
-  scripts/                              # PS remoting deployment scripts for PAYTON-DESKTOP
-tests/
-  BitNetSharp.Tests/                    # 307+ xunit cases
+src/BitNetSharp.Core/Layers/BitLinear.cs
+src/BitNetSharp.Core/Quantization/TritDotDispatch.cs
+src/BitNetSharp.Core/Quantization/TritPacking.Avx512.cs
+src/BitNetSharp.Core/Quantization/TritPacking.cs
+tests/BitNetSharp.Tests/BitLinearParallelTests.cs       (new, 11 tests)
+tests/BitNetSharp.Tests/TritDotPackedKernelTests.cs     (new, 13 tests)
+docs/research/inference-latency.md                       (H-series section appended)
 ```
 
-### Coordinator (`BitNetSharp.Distributed.Coordinator`)
+## What is still open
 
-- **Hosting:** ASP.NET Core Web + `UseWindowsService` — runs as console or Windows service
-- **Auth:** Duende IdentityServer 7.4.7 — worker machine-login (client_credentials), admin OIDC (code+PKCE)
-- **Persistence:** SQLite WAL — 5 stores (WorkQueue, WorkerRegistry, ClientRevocation, Telemetry, LogStore)
-- **Weights:** `FileSystemWeightStore` — immutable versioned fp32 blobs with SHA-256 sidecars
-- **Weight apply:** `WeightApplicationService` — in-memory global fp32 vector, staleness compensation (`lr / (1 + staleness * α)`), max-staleness rejection, persist-on-every-apply
-- **CQRS:** McpServer.Cqrs library (cross-repo ProjectReference to `F:\GitHub\McpServer`) — `IDispatcher`, `Result<T>` monad, assembly-scanned handlers
-- **MVVM:** CommunityToolkit.Mvvm ObservableObject ViewModels, minimal Razor code-behind
-- **Background services:** `StaleSweeperService` (stale workers → Gone, timed-out tasks → Pending), `TelemetryPruneService` (hourly DELETE of old rows)
-- **Codecs:** `Int8GradientCodec` (per-tensor scale + error-feedback residual), `WeightBlobCodec` (version + fp32 vector)
-- **Corpus:** `TruckMateCorpusGenerator` (50K synthetic intent examples), `WordLevelTokenizer` (5174-vocab word-level, pre-tokenized to binary int32 shards)
+The G/H series knocked the matmul wrapper down ~33x. The remaining gap to "human-fast" sits at higher layers - the same items that were scoped in the original `fuzzy-orbiting-parrot.md` plan. With matmul effectively saturated on AVX2, the next dollar is in the wrapper around it:
 
-**Blazor admin pages (all OIDC cookie-gated):**
-| Page | URL | Features |
-|------|-----|----------|
-| Dashboard | `/admin/dashboard` | Interactive server-render, 5s auto-refresh, per-worker table with Drain/Gone/Rotate actions, task counts, weight version, telemetry rollup |
-| API keys | `/admin/api-keys` | List/rotate worker OAuth secrets with immediate JWT revocation |
-| Tasks | `/admin/tasks` | Queue snapshot + bulk seed form |
-| Install | `/admin/install` | Per-client bash + PowerShell worker bootstrap scripts |
-| Logs | `/admin/logs` | Structured log viewer with worker/level/search filtering |
-| Login | `/Account/Login` | Duende IS interactive login |
+1. **KV cache** for attention K/V across decode steps. Currently every decode step re-projects the full growing context. Plan section: Phase 1 of `~\.claude\plans\fuzzy-orbiting-parrot.md` (data model, RoPE position-offset overload, cache-aware `Forward` overloads on `MultiHeadAttention` / `GroupedQueryAttention` / `BitNetLayer` / `BitNetTransformer` / `BitNetPaperModel`). 5 red tests pre-defined.
+2. **Activation-quantisation cache** so the shared layer input is quantised once and reused across Q/K/V (and Gate/Up). New `QuantizedActivationBlock`, `BitLinear.ForwardQuantized(QuantizedActivationBlock)`. 3 red tests pre-defined. Noted that H-series already added a `ForwardQuantized` path; phase-2 should consume it from the attention/FFN sites.
+3. **SIMD attention inner loop** - `for d in headDim` dot products in `GroupedQueryAttention` lines 110-113, 139-142 are still scalar. New `AttentionMath` static class. 3 red tests pre-defined.
+4. **Fused flash-style attention** for the decode case (query length = 1) so no N×N attention-weight tensor is materialised at decode time. Online-softmax kernel. 2 red tests pre-defined.
+5. **Streaming `/api/chat`** - emit one NDJSON chunk per token so clients see progress before the full generation finishes. 3 red tests pre-defined.
+6. **BenchmarkDotNet harness** - new `benchmarks/BitNetSharp.Benchmarks/` project, 6 suites covering every component above. Pinned at `[SimpleJob(RuntimeMoniker.Net100, warmupCount: 3, iterationCount: 10)]`.
 
-**REST endpoints:**
-| Method | Path | Auth | Purpose |
-|--------|------|------|---------|
-| POST | `/connect/token` | Public | OAuth client_credentials → JWT |
-| POST | `/register` | JWT | Worker registration + capability report |
-| GET | `/work` | JWT | Atomic task claim (204 when empty) |
-| POST | `/heartbeat` | JWT | Worker keep-alive |
-| POST | `/gradient` | JWT | Task completion + gradient decode/apply |
-| POST | `/logs` | JWT | Structured log ingestion |
-| GET | `/weights/{version}` | JWT | Weight blob download with range support |
-| GET | `/corpus/{shardId}` | JWT | Corpus shard download |
-| GET | `/health` | Public | Health check |
-| GET | `/status` | Public | Queue + worker counts JSON |
+The plan is still binding. Each phase follows Byrd TDD (red tests first), publishes deltas to `docs/research/inference-latency.md`, and does not land until the suite stays green.
 
-**CLI subcommands:**
-- `seed-tasks [count]` — inject pending tasks into SQLite queue
-- `generate-corpus [count]` — produce synthetic Truck Mate training examples
-- `tokenize-corpus [maxVocab]` — train tokenizer + write binary int32 shards
+## Decode kernel shape after H-series
 
-### Worker (`BitNetSharp.Distributed.Worker`)
+```
+BitLinear.ForwardQuantized(QuantizedActivationBlock input)
+  -> Parallel.For(0, outDim, MinParallelOutDim=1024 gate)
+       per-worker: ArrayPool<sbyte>.Rent(inDim)
+       per-column:
+         SimdUnpackLayerSsse3(packedRow, decoded)        // H2
+         per-row: TernaryDotSimdUnpacked(decoded, act)   // H4 ref-base load inside
+```
 
-- **Calibration:** BenchmarkDotNet InProcessNoEmitToolchain on startup — measures int8×ternary matmul throughput, reports tokens/sec
-- **Task sizing:** `CapabilityReport.RecommendedTokensPerTask()` scales to 10-minute target per worker
-- **HTTP client:** `CoordinatorClient` with JWT token cache, auto-refresh, fire-and-forget retry
-- **Logging:** Serilog dual-sink (Console + `CoordinatorLogSink` batching to POST /logs)
-- **Gradient:** D-4b int8 error-feedback encoding with cross-step residual accumulation
-- **Docker:** Multi-stage `mcr.microsoft.com/dotnet/runtime:10.0`, non-root uid 10001, HEALTHCHECK via beacon file mtime, `docker-compose.yml` with `--scale worker=N`
+Dispatcher knobs in `TritDotDispatch`:
 
-### Deployment (Phase D-2 proven)
-
-- **Coordinator:** Windows service `BitNetCoordinator` on PAYTON-DESKTOP (Ryzen 7 2700X, 16 threads, 32GB)
-  - `http://192.168.1.77:5000` (LAN IPv4)
-  - DB: `F:\ProgramData\BitNetCoordinator\coordinator.db`
-  - Corpus: `F:\ProgramData\BitNetCoordinator\corpus/` (50K text + 10 tokenized binary shards)
-  - Env vars in `HKLM\SYSTEM\CurrentControlSet\Services\BitNetCoordinator\Environment`
-- **Worker:** Console process on PAYTON-LEGION2 (Ryzen 9 5900HX, 16 threads, 24GB)
-  - Calibrates at ~4,750 tok/s
-  - Full lifecycle proven: JWT → register → heartbeat → work → gradient → task Done
-
-### Probability floor fix
-
-Commit `ae8ee29` aligned all three perplexity code paths (BitNetPaperModel, BitNetPaperAudit ×2) to `1e-6` matching TraditionalLocalModel. Impact: WikiText2 audit 19661→16444, C4 66957→16533, RedPajama 19576→9333.
-
-## What's next (Phase A — real training)
-
-### Blockers before Truck Mate training can start
-
-1. **Scale BitNetSharp.Core model config**
-   - Current: VocabSize=68, ~4.5M params
-   - Target: VocabSize=5174, hidden=512, layers=12-16, ~100-150M params
-   - Files: `BitNetPaperModel.cs` config struct, `BitNetPaperModelConfig` or similar
-   - Risk: scaling may surface numerical issues in the ternary quantization path
-
-2. **Worker corpus loader**
-   - Download tokenized `.bin` shards from coordinator via `GET /corpus/{shardId}`
-   - Parse int32 sequences into batches of (input, target) pairs
-   - Feed into BitNet forward pass
-   - Files: new `CorpusDataLoader` in Worker or Core
-
-3. **Replace D-4b synthetic gradient with real backprop**
-   - Worker's `RunWorkLoopAsync` currently generates fake gradients
-   - Swap for: load weights → forward on corpus batch → backward → encode gradient
-   - Files: `Worker/Program.cs` work loop + integration with `BitNetPaperModel.Train`
-
-4. **Convergence sanity check**
-   - Seed 50K-example corpus as tasks
-   - Run 1-3 epochs of distributed training
-   - Verify loss descends in the dashboard telemetry
-
-### Nice-to-haves deferred
-
-- ngrok tunnel setup for external workers
-- Admin client_credentials grant for scripted task seeding (current: OIDC-only + CLI)
-- Blazor interactive-server upgrade for log viewer (dashboard already upgraded)
-- Antiforgery tokens on login + admin POST forms
-- CSRF hardening audit
-
-## Credentials (regenerated each install)
-
-Credentials rotate on every `desktop-install-service-only.ps1` run. The latest set is printed by the install script's output. The admin page at `/admin/api-keys` shows the current worker client secrets after OIDC login.
-
-## Key architectural decisions
-
-1. SQLite WAL for all coordinator persistence — single-writer topology, zero ops
-2. Duende IdentityServer for both worker machine-login and admin OIDC — one auth provider
-3. McpServer.Cqrs cross-repo ProjectReference — MVVM+CQRS enforced, all handlers assembly-scanned
-4. Int8 + per-tensor scale gradient codec with error-feedback residual — not ternary, because staleness effect dominates quantization term
-5. Staleness compensation: `effective_lr = base_lr / (1 + staleness * α)` with hard reject beyond MaxStalenessSteps
-6. Worker self-calibration via BenchmarkDotNet — coordinator sizes tasks to 10-minute target per worker
-7. Word-level tokenizer (not BPE) — 5174 vocab is sufficient for the narrow trucking intent domain
-8. Static SSR Blazor for most pages, Interactive Server for dashboard only — minimizes SignalR overhead
+| Flag                        | Default   | Test override |
+| --------------------------- | --------- | ------------- |
+| `UseParallelColumnStripes`  | `true`    | `ForceSerial` field flips it |
+| (existing G-series gates)   | unchanged | unchanged     |
 
 ## How to resume
 
 ```powershell
-# On PAYTON-LEGION2 (dev box):
+# On PAYTON-LEGION2 (current dev box):
 cd F:\GitHub\BitNet-b1.58-Sharp
+git fetch origin
+git checkout feat/integer-forward-hot-path
 dotnet build BitNet-b1.58-Sharp.slnx -c Release
 dotnet test tests/BitNetSharp.Tests -c Release -f net10.0 --filter "Category!=SlowLane"
 
-# Coordinator service on PAYTON-DESKTOP:
-pwsh .claude/scripts/desktop-install-service-only.ps1
-
-# Generate + tokenize corpus:
-pwsh .claude/scripts/desktop-stage-corpus.ps1
-pwsh .claude/scripts/desktop-tokenize-corpus.ps1
-
-# Seed tasks + run worker:
-pwsh .claude/scripts/desktop-seed-tasks-cli.ps1 -Count 100
-$env:BITNET_COORDINATOR_URL = "http://192.168.1.77:5000/"
-$env:BITNET_CLIENT_ID = "<from install output>"
-$env:BITNET_CLIENT_SECRET = "<from install output>"
-dotnet run --project src/BitNetSharp.Distributed.Worker -c Release -f net10.0
+# Re-run the H5 Bonsai measurement (server must be up):
+dotnet run --project src/BitNetSharp.App -c Release -- serve
+# In a second shell:
+curl -sS -X POST http://127.0.0.1:11434/api/chat `
+  -H "Content-Type: application/json" `
+  --data @cache/h5_chat_payload.json
 ```
+
+Plan to pick up next: `~\.claude\plans\fuzzy-orbiting-parrot.md` Phase 1 (KV cache). All red tests are listed; start with `TransformerKvCacheTests.cs` and bring the cache-aware overloads up.
+
+## Key architectural decisions (this round)
+
+1. **SSSE3 over AVX2 for trit unpack.** YMM-VPSHUFB has the lane-crossing wart and was not worth a 256-bit version once the 128-bit kernel cleared the bottleneck.
+2. **Per-worker ArrayPool buffer in Parallel.For.** Per-iteration rent/return would dominate at outDim=4096; `localInit/localFinally` amortizes it across the worker's iteration block.
+3. **`MinParallelOutDim = 1024` gate.** Below that the spawn overhead beats the win. Tunable; held constant for the close-out.
+4. **`ForceSerial` test backdoor on dispatcher.** Lets the parallel-vs-serial equivalence tests pin determinism without polluting production behaviour.
+5. **LUT preserves legacy `0b10 -> -2` contract.** The packer never emits 0b10 but the historical scalar oracle's sign-extension would, so the SSSE3 LUT keeps it for bit-exact equivalence.
+6. **H1 dropped on cost-vs-risk.** Matmul-wrapper-cache surfaces a coherent invalidation surface for ~3.6 us/token. Not worth it against the 3 200 ms gap.
 
 ## MCP session log
 
-Session `Claude-20260415T120000Z-bitnet-distributed-training` on MCP server at `http://PAYTON-LEGION2:7147`. ~20 turns logged covering every commit and design decision.
+Session `ClaudeCode-20260426T033736Z-plugin` on `http://PAYTON-LEGION2:7147` carries 5 turns: H2 (SSSE3 unpack), H3 (Parallel.For stripes), H4 (LoadUnsafe ref-base loads), H5 (Bonsai measurement + commit + push + PR 20 thread), and this handoff turn. Posted via `POST /mcpserver/sessionlog` with full `UnifiedSessionLogDto`.
+
+## Reference
+
+- Plan: `~\.claude\plans\fuzzy-orbiting-parrot.md` (KV cache + activation-quant cache + SIMD attention + flash + streaming + BDN harness)
+- Latency log: `docs/research/inference-latency.md` (G-series + H-series tables)
+- PR 20 thread 48: H-series summary on Azure DevOps
+- Distributed-training context (now historical): see commit `adc801a` and earlier session `Claude-20260415T120000Z-bitnet-distributed-training`
