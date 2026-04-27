@@ -96,4 +96,79 @@ public sealed class AttentionMathTests
 
         Assert.True(MathF.Abs(expected - actual) < Tolerance);
     }
+
+    // Section B-KV3 - DotInt8 / AccumulateWeightedInt8.
+    // Equivalence target: relative error <= 2/127 (one absmax quantisation
+    // step per dimension), which is the inherent worst case for per-row
+    // int8 absmax + per-element rounding.
+
+    private static (sbyte[] qInt8, float scale) QuantiseAbsmax(ReadOnlySpan<float> src)
+    {
+        var maxAbs = 0f;
+        for (var i = 0; i < src.Length; i++)
+        {
+            var a = MathF.Abs(src[i]);
+            if (a > maxAbs)
+            {
+                maxAbs = a;
+            }
+        }
+        var scale = maxAbs <= 0f ? 1f : maxAbs / 127f;
+        var q = new sbyte[src.Length];
+        for (var i = 0; i < src.Length; i++)
+        {
+            var v = (int)MathF.Round(src[i] / scale, MidpointRounding.AwayFromZero);
+            q[i] = (sbyte)Math.Clamp(v, -127, 127);
+        }
+        return (q, scale);
+    }
+
+    [Theory]
+    [InlineData(32)]
+    [InlineData(64)]
+    [InlineData(127)]
+    [InlineData(128)]
+    public void DotInt8_EqualsFp32DotWithinQuantizationError(int headDim)
+    {
+        var qFloat = RandomVector(headDim, seed: 911 + headDim);
+        var kFloat = RandomVector(headDim, seed: 977 + headDim);
+        var (kInt8, kScale) = QuantiseAbsmax(kFloat);
+
+        var fp32 = ScalarDot(qFloat, kFloat, headDim);
+        var int8Dot = AttentionMath.DotInt8(qFloat, kInt8, kScale, headDim);
+
+        // Absolute error bounded by sum_i |q[i]| * (kScale / 2). Use a
+        // generous 2x bound to cover RNG worst case + AwayFromZero rounding.
+        var absQ = 0f;
+        for (var i = 0; i < headDim; i++)
+        {
+            absQ += MathF.Abs(qFloat[i]);
+        }
+        var bound = absQ * kScale + 1e-4f;
+        Assert.InRange(int8Dot - fp32, -bound, bound);
+    }
+
+    [Theory]
+    [InlineData(32)]
+    [InlineData(64)]
+    [InlineData(127)]
+    [InlineData(128)]
+    public void AccumulateWeightedInt8_EqualsFp32WithinQuantizationError(int headDim)
+    {
+        var src = RandomVector(headDim, seed: 1009 + headDim);
+        var (srcInt8, srcScale) = QuantiseAbsmax(src);
+        var weight = 0.37f;
+
+        var targetFp32 = new float[headDim];
+        AttentionMath.AccumulateWeighted(targetFp32, src, weight, headDim);
+
+        var targetInt8 = new float[headDim];
+        AttentionMath.AccumulateWeightedInt8(targetInt8, srcInt8, srcScale, weight, headDim);
+
+        var bound = MathF.Abs(weight) * srcScale + 1e-4f;
+        for (var i = 0; i < headDim; i++)
+        {
+            Assert.InRange(targetInt8[i] - targetFp32[i], -bound, bound);
+        }
+    }
 }

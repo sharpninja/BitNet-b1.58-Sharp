@@ -90,10 +90,17 @@ public sealed partial class BitNetTransformer
             ? Config.KvHeadCount * Config.HeadDimension
             : Config.HeadCount * Config.HeadDimension;
 
-        var layers = new LayerKvCache[Layers.Length];
+        // Section B - KV5b: per Config.KvCacheQuantization, allocate either
+        // an fp32 LayerKvCache slab (default) or an int8 QuantizedKvLayerCache
+        // slab per layer. Both implement IKvCache.
+        var layers = new IKvCache[Layers.Length];
         for (var i = 0; i < Layers.Length; i++)
         {
-            layers[i] = new LayerKvCache(capacity, kvDim);
+            layers[i] = Config.KvCacheQuantization switch
+            {
+                KvCacheQuantization.Int8 => new QuantizedKvLayerCache(capacity, kvDim),
+                _ => new LayerKvCache(capacity, kvDim),
+            };
         }
 
         return new TransformerCache(layers, capacity);
@@ -144,6 +151,8 @@ public sealed partial class BitNetTransformer
         for (var i = 0; i < Layers.Length; i++)
         {
             var layerStart = sw.Elapsed.TotalMilliseconds;
+            // KV5b: pass through IKvCache; BitNetLayer.Forward dispatches
+            // on concrete type (LayerKvCache vs QuantizedKvLayerCache).
             hidden = Layers[i].Forward(hidden, cache.Layers[i], positionOffset);
             if (_logger.IsEnabled(LogLevel.Trace))
             {

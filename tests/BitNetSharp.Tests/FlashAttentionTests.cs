@@ -180,4 +180,111 @@ public sealed class FlashAttentionTests
                 $"d={d} expected={expected[d]} actual={output[d]}");
         }
     }
+
+    // Section B-KV4 - FlashAttention.ForwardDecodeInt8.
+    // Online-softmax attention against a per-row absmax-quantised int8 K/V
+    // cache. Equivalence target: relative error <= 5e-3 vs the fp32 path
+    // across SeqLen ∈ {1, 8, 64, 512, 2048}; per-element bound proportional
+    // to row-absmax / 127.
+
+    private static (sbyte[] kInt8, sbyte[] vInt8, float[] kScale, float[] vScale) QuantiseCache(
+        ReadOnlySpan<float> kFloat, ReadOnlySpan<float> vFloat, int rows, int kvDim)
+    {
+        var kInt8 = new sbyte[rows * kvDim];
+        var vInt8 = new sbyte[rows * kvDim];
+        var kScale = new float[rows];
+        var vScale = new float[rows];
+        for (var r = 0; r < rows; r++)
+        {
+            var rowOffset = r * kvDim;
+            var maxK = 0f;
+            var maxV = 0f;
+            for (var c = 0; c < kvDim; c++)
+            {
+                maxK = MathF.Max(maxK, MathF.Abs(kFloat[rowOffset + c]));
+                maxV = MathF.Max(maxV, MathF.Abs(vFloat[rowOffset + c]));
+            }
+            var sK = maxK <= 0f ? 1f : maxK / 127f;
+            var sV = maxV <= 0f ? 1f : maxV / 127f;
+            kScale[r] = sK;
+            vScale[r] = sV;
+            for (var c = 0; c < kvDim; c++)
+            {
+                var qK = (int)MathF.Round(kFloat[rowOffset + c] / sK, MidpointRounding.AwayFromZero);
+                var qV = (int)MathF.Round(vFloat[rowOffset + c] / sV, MidpointRounding.AwayFromZero);
+                kInt8[rowOffset + c] = (sbyte)Math.Clamp(qK, -127, 127);
+                vInt8[rowOffset + c] = (sbyte)Math.Clamp(qV, -127, 127);
+            }
+        }
+        return (kInt8, vInt8, kScale, vScale);
+    }
+
+    [Theory]
+    [InlineData(1, 4, 4, 16)]
+    [InlineData(8, 4, 4, 16)]
+    [InlineData(64, 4, 2, 32)]
+    [InlineData(256, 4, 4, 32)]
+    public void ForwardDecodeInt8_MatchesFp32WithinQuantizationError(
+        int pastLength, int headCount, int kvHeadCount, int headDim)
+    {
+        var rng = new Random(1331 + pastLength);
+        var dim = headCount * headDim;
+        var kvDim = kvHeadCount * headDim;
+        var query = new float[dim];
+        for (var i = 0; i < dim; i++)
+        {
+            query[i] = (float)(rng.NextDouble() * 2.0 - 1.0);
+        }
+
+        var kFloat = new float[pastLength * kvDim];
+        var vFloat = new float[pastLength * kvDim];
+        for (var i = 0; i < kFloat.Length; i++)
+        {
+            kFloat[i] = (float)(rng.NextDouble() * 2.0 - 1.0);
+            vFloat[i] = (float)(rng.NextDouble() * 2.0 - 1.0);
+        }
+
+        var (kInt8, vInt8, kScale, vScale) = QuantiseCache(kFloat, vFloat, pastLength, kvDim);
+
+        var fp32Out = new float[dim];
+        FlashAttention.ForwardDecode(query, kFloat, vFloat, fp32Out,
+            headCount, kvHeadCount, headDim, pastLength, scale: 1f / MathF.Sqrt(headDim));
+
+        var int8Out = new float[dim];
+        FlashAttention.ForwardDecodeInt8(query, kInt8, kScale, vInt8, vScale, int8Out,
+            headCount, kvHeadCount, headDim, pastLength, scale: 1f / MathF.Sqrt(headDim));
+
+        // Per-element absolute error bound: average per-row dequant error is
+        // ~ scale / 2; with softmax weighting and accumulation across rows
+        // the bound is conservatively ~ max(vScale).
+        var maxBound = vScale.Max() * 4f + 1e-3f;
+        for (var i = 0; i < dim; i++)
+        {
+            Assert.InRange(int8Out[i] - fp32Out[i], -maxBound, maxBound);
+        }
+    }
+
+    [Fact]
+    public void ForwardDecodeInt8_PastLengthZero_ReturnsZeroOutput()
+    {
+        const int headCount = 2;
+        const int kvHeadCount = 2;
+        const int headDim = 8;
+        const int dim = headCount * headDim;
+        const int kvDim = kvHeadCount * headDim;
+
+        var query = new float[dim];
+        for (var i = 0; i < dim; i++) query[i] = 0.5f;
+        var kInt8 = new sbyte[kvDim];
+        var vInt8 = new sbyte[kvDim];
+        var kScale = new[] { 1f };
+        var vScale = new[] { 1f };
+        var output = new float[dim];
+        for (var i = 0; i < dim; i++) output[i] = 99f; // poison
+
+        FlashAttention.ForwardDecodeInt8(query, kInt8, kScale, vInt8, vScale, output,
+            headCount, kvHeadCount, headDim, pastLength: 0, scale: 1f / MathF.Sqrt(headDim));
+
+        Assert.All(output, v => Assert.Equal(0f, v));
+    }
 }

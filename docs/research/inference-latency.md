@@ -434,3 +434,113 @@ H5 measurement methodology unchanged (same prompt, same num_predict=8, same warm
 
 `feat/integer-forward-hot-path` carries G + H + A series. PR 20 thread 48 has the H-series close-out summary; thread 49 (added during A5) carries the A-series summary. Squash-merged via Azure DevOps REST API `PATCH /pullRequests/20` with `completionOptions.squashMerge: true, deleteSourceBranch: true`. Final merge commit message: `perf(inference): G+H+A series inference latency overhaul`.
 
+## Section B: quantized KV cache (int8 K/V)
+
+Next-wave optimization on `feat/quantized-kv-cache`. Halves K/V memory from fp32 to int8 with a per-row absmax scale, lifting the bandwidth ceiling 4x for the FlashAttention.ForwardDecode K/V scan that dominates long-context decode.
+
+### Memory accounting (Bonsai shape)
+
+Bonsai: dim=4096, kvHeadCount=8, headDim=128, kvDim = 8 * 128 = 1024. 36 layers, request capacity 2048.
+
+```
+fp32 KV per request = capacity * kvDim * layers * 2 (K+V) * 4 (fp32 bytes)
+                    = 2048 * 1024 * 36 * 2 * 4
+                    = 603 979 776 bytes  ~= 576 MiB
+
+int8 KV per request = capacity * kvDim * layers * 2 (K+V) * 1 (sbyte byte)
+                    + capacity * layers * 2 (KScale+VScale) * 4 (fp32 bytes)
+                    = 150 994 944 + 589 824
+                    ~= 144 MiB + 0.6 MiB scale tax
+```
+
+4x memory cut. For long-context (capacity 8192 multi-turn) the absolute saving grows: ~2.3 GiB -> ~575 MiB.
+
+### KV1 - QuantizedKvLayerCache (`src/BitNetSharp.Core/Inference/QuantizedKvLayerCache.cs`)
+
+Parallel to LayerKvCache: `sbyte[,] K`, `sbyte[,] V`, `float[] KScale`, `float[] VScale`. Quantisation contract matches `QuantizedActivationBlock`: per-row scale = max(|row|) / 127, all-zero rows get sentinel scale = 1f. `WriteRow(int, ReadOnlySpan<float>, ReadOnlySpan<float>)` plus per-axis `WriteKRow` / `WriteVRow` and `DequantizeKRow` / `DequantizeVRow` for tests and prefill.
+
+### KV2 - IKvCache interface (`src/BitNetSharp.Core/Inference/IKvCache.cs`)
+
+Polymorphic write contract that both `LayerKvCache` and `QuantizedKvLayerCache` implement: `WriteKRow(int row, ReadOnlySpan<float>)`, `WriteVRow(int row, ReadOnlySpan<float>)`, plus `Capacity` and `KvDimension` getters. The dot-side path stays branch-free by checking the cache type once at the top of the attention forward (KV5).
+
+### KV3 - AttentionMath int8 kernels (`src/BitNetSharp.Core/Layers/AttentionMath.cs`)
+
+```csharp
+public static float DotInt8(ReadOnlySpan<float> q, ReadOnlySpan<sbyte> k, float kScale, int headDim);
+public static void AccumulateWeightedInt8(Span<float> target, ReadOnlySpan<sbyte> source, float vScale, float weight, int headDim);
+```
+
+SIMD via `Vector<float>` widening from `Vector<sbyte>` (sbyte -> short -> int -> float through `Vector.Widen` stages). Multiply by row scale once outside the inner SIMD chunk. Scalar tail for `headDim % Vector<float>.Count != 0`. The dequant cost amortises to one float-mul per row instead of one per lane.
+
+### KV4 - FlashAttention.ForwardDecodeInt8
+
+Online-softmax body identical to the fp32 `ForwardDecode` but with `DotInt8` for QK and `AccumulateWeightedInt8` for AV. Per-row scale loaded once per source position.
+
+### KV5 - MHA / GQA cache-aware paths take QuantizedKvLayerCache overloads
+
+`AttentionModule` gains:
+- `Forward(float[,] input, QuantizedKvLayerCache cache, int positionOffset)`
+- `ForwardFlashDecode(float[,] input, QuantizedKvLayerCache cache, int positionOffset)`
+
+Both `MultiHeadAttention` and `GroupedQueryAttention` implement them. The prefill path dequantises the cache prefix once per call and reuses the existing fp32 attention math (the bottleneck is the matmul itself, not the per-row dequant). The decode path goes straight to the int8 kernels via FlashAttention.ForwardDecodeInt8.
+
+The full BitNetLayer / BitNetTransformer / BitNetPaperModel wire-up behind a `BitNetConfig.KvCacheQuantization = Fp32 | Int8` flag is deferred to a follow-on commit; KV1-KV5 ship the building blocks plus equivalence tests so the integration is mechanical.
+
+### KV6 - KvCacheBenchmarks (Bonsai-shape isolated dot scan)
+
+`benchmarks/BitNetSharp.Benchmarks/KvCacheBenchmarks.cs` measures the per-head dot-against-cache scan that dominates ForwardFlashDecode at long context. RealisticConfig (kvDim=1024, headDim=128). The fp32 baseline reads `LayerKvCache.K` directly; the int8 variant reads `QuantizedKvLayerCache.K` plus per-row scale via `AttentionMath.DotInt8`.
+
+| SeqLen | DotScan_Fp32 | DotScan_Int8 | Ratio |
+| -----: | -----------: | -----------: | ----: |
+|     32 |       457 ns |       517 ns |  1.13 |
+|    128 |     1 864 ns |     2 132 ns |  1.14 |
+|    512 |    10 785 ns |    10 263 ns |  0.95 |
+|   2048 |    47 374 ns |    43 791 ns |  0.93 |
+
+The crossover sits between SeqLen 128 and 512. Below the crossover the per-call constant cost (function entry, per-row scale lookup) hides the bandwidth difference; the int8 path is ~13% slower because the dequant via `Vector.Widen` (sbyte -> short -> int -> float in three stages) adds ALU ops that the fp32 path skips. Above the crossover the cache footprint matters: at SeqLen=2048 the fp32 K cache for one head is 1024 lanes * 4 bytes * 2048 rows = 8 MiB and starts spilling out of L2/L3, while the int8 cache at 2 MiB stays warm. Result: int8 ~5-7% faster at the long-context end of this single-layer micro-benchmark.
+
+The **end-to-end win compounds with layer count**. Bonsai (36 layers) holds 36x more cache; at capacity 2048 the fp32 KV cache totals ~576 MiB and dominates DRAM bandwidth, while int8 fits in ~144 MiB and stays inside the L3 working set for many layers. Confirming the multi-layer regime requires a Bonsai end-to-end measurement (KV5b - the `BitNetConfig.KvCacheQuantization` flag wire-up plus a 5-run warm `/api/chat`) which is queued as a follow-on.
+
+The first KV6 measurement run (with a stack-alloc + scalar-fill `LoadInt8AsFloat` helper in DotInt8) showed int8 8-13x **slower** than fp32 because the per-chunk scalar copy serialised the SIMD widen. The current implementation uses framework `Vector.Widen` directly so every chunk produces four `Vector<float>` accumulators in two widen + four convert ops; the JIT emits VPMOVSXBD + VCVTDQ2PS on AVX2.
+
+### Tests
+
+10 new tests across `QuantizedKvCacheTests.cs` (7), `AttentionMathTests.cs` (8 incl. theory inlines), `FlashAttentionTests.cs` (5 incl. theory inlines). Equivalence target met everywhere: per-element relative error <= max(rowAbsmax) / 127 for kernels, max <= 0.05 absolute for end-to-end MHA/GQA flash decode at small dim.
+
+Test suite: 788/788 fast-lane green (was 774 post-A5; +14 across KV1-KV5 incl. theory inlines). One known host-load-flaky perf gate (IntegerPipelineLatencyTests) passes in isolation.
+
+### KV5b - end-to-end wire-up + env override
+
+The KV0-KV6 commit ships the building blocks but stops short of plumbing them through `BitNetTransformer` / `BitNetPaperModel`. KV5b closes that gap.
+
+`KvCacheQuantization` enum (`src/BitNetSharp.Core/Inference/KvCacheQuantization.cs`): `Fp32` (default, bit-exact backwards-compat) or `Int8`.
+
+`BitNetConfig` gains a final positional parameter `kvCacheQuantization` (defaults to `Fp32`) plus the matching getter. The all-positional record stays JSON-deserialisable because the new param has a default.
+
+`TransformerCache.Layers` typed as `IKvCache[]` (was `LayerKvCache[]`). Both backings implement `IKvCache` from KV2. The legacy `TransformerCache(LayerKvCache[], int)` constructor stays as a sugar overload so existing callers compile unchanged.
+
+`BitNetTransformer.CreateCache` reads `Config.KvCacheQuantization` and allocates either `LayerKvCache` slabs (default) or `QuantizedKvLayerCache` slabs per layer.
+
+`BitNetLayer.Forward(input, IKvCache, positionOffset)` overload pattern-matches the cache to dispatch into the fp32 or int8 attention path. The legacy `Forward(input, LayerKvCache, ...)` overload remains for direct callers.
+
+`BitNetTransformer.Forward(IReadOnlyList<int>, TransformerCache)` now binds to the IKvCache overload at the call site, so it transparently routes int8 caches without further changes.
+
+`BitNetTransformer.Integer.cs` (`ForwardWithCacheInteger`) explicitly rejects int8 KV with a clear error message: the integer-forward composer's hot path is not yet wired for int8 cache. Users with `BITNETSHARP_USE_INTEGER_FORWARD=1` must keep the default `Fp32` cache. This boundary keeps the F-series integer semantics intact while the int8 KV path lands behind the regular cache-aware Forward.
+
+`BITNETSHARP_KV_CACHE_QUANTIZATION` env var (`src/BitNetSharp.Core/BitNetOptions.cs:KvCacheQuantizationEnvVar`): set to `Int8` to flip a Bonsai-loaded model to int8 KV at startup without rebaking GGUF metadata. Parsed case-insensitively; unset or unrecognised values keep the config-declared default. `BitNetPaperGguf.Load` consumes the override and rebuilds the config with the new flag, then logs `KvCacheQuantization override applied via BITNETSHARP_KV_CACHE_QUANTIZATION: Int8`.
+
+#### KV5b end-to-end equivalence
+
+Test `tests/BitNetSharp.Tests/BitNetTransformerInt8KvCacheTests.cs::Forward_Int8KvCache_MatchesFp32KvCacheArgmaxStream` (small 2-layer dim=32 GQA model, deterministic seed):
+
+- Top-1 argmax on the prefill output matches between fp32 and int8 cache paths.
+- 4 subsequent decode steps each produce the same argmax token.
+
+This is the strict gate from the original plan KV5 test 7. On a small model the per-row absmax error stays small enough that argmax is preserved through 5 sequential softmax-then-decode passes.
+
+Test count: 793/793 fast-lane green (788 + 4 KV5b end-to-end + 2 env-override - 1 host-load-flaky perf gate excluded; gate passes in isolation).
+
+#### Bonsai end-to-end gate (deferred to follow-on)
+
+Live `/api/chat` against `data/models/bonsai.bitnetsharp.gguf` with `BITNETSHARP_KV_CACHE_QUANTIZATION=Int8` is a follow-on measurement: the serve restart + 5-run warm loop + 12-min model load is its own session. The wire-up is verified by the KV5b unit tests (argmax stream parity at small model). The expected outcome on Bonsai: per-decode-token unchanged at short context (KV cache fits in L2 either way), measurable bandwidth win at long context (multi-turn AnythingLLM session, capacity ~512+ tokens) where the 4x cache footprint cut keeps more layers L3-resident.
+

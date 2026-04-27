@@ -1,3 +1,5 @@
+using BitNetSharp.Core.Inference;
+
 namespace BitNetSharp.Core;
 
 public sealed record BitNetOptions(
@@ -31,4 +33,36 @@ public sealed record BitNetOptions(
         Environment.GetEnvironmentVariable(UseIntegerForwardEnvVar),
         "1",
         StringComparison.Ordinal);
+
+    /// <summary>
+    /// Section B - KV5b: env var that overrides the model config's
+    /// <see cref="BitNetConfig.KvCacheQuantization"/> at runtime. Accepts
+    /// "Fp32" or "Int8" (case-insensitive). When unset or unrecognised,
+    /// the config-declared value (default Fp32) is used. Set
+    /// <c>BITNETSHARP_KV_CACHE_QUANTIZATION=Int8</c> before launching the
+    /// serve to switch a Bonsai-loaded model to int8 KV without rebaking
+    /// config or GGUF metadata.
+    /// </summary>
+    public const string KvCacheQuantizationEnvVar = "BITNETSHARP_KV_CACHE_QUANTIZATION";
+
+    /// <summary>
+    /// Reads <see cref="KvCacheQuantizationEnvVar"/> and returns a parsed
+    /// <see cref="KvCacheQuantization"/>, or <c>null</c> if unset or
+    /// unparseable. Construction sites should prefer the parsed override
+    /// to the config-declared value when present.
+    /// </summary>
+    public static KvCacheQuantization? KvCacheQuantizationEnvOverride
+    {
+        get
+        {
+            var raw = Environment.GetEnvironmentVariable(KvCacheQuantizationEnvVar);
+            if (string.IsNullOrWhiteSpace(raw))
+            {
+                return null;
+            }
+            return Enum.TryParse<KvCacheQuantization>(raw, ignoreCase: true, out var parsed)
+                ? parsed
+                : null;
+        }
+    }
 }

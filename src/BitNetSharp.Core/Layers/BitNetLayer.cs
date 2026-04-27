@@ -68,6 +68,36 @@ public sealed class BitNetLayer : Module
         return TensorMath.Add(residual, feedForwardOutput);
     }
 
+    /// <summary>
+    /// Section B - KV5b: cache-type-aware overload that dispatches to the
+    /// fp32 or int8 attention path based on the concrete <see cref="IKvCache"/>
+    /// implementation.
+    /// </summary>
+    public float[,] Forward(float[,] input, IKvCache cache, int positionOffset)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(cache);
+
+        return cache switch
+        {
+            LayerKvCache fp32 => Forward(input, fp32, positionOffset),
+            QuantizedKvLayerCache int8 => ForwardInt8(input, int8, positionOffset),
+            _ => throw new NotSupportedException(
+                $"Unsupported IKvCache implementation {cache.GetType().Name}; expected LayerKvCache or QuantizedKvLayerCache."),
+        };
+    }
+
+    private float[,] ForwardInt8(float[,] input, QuantizedKvLayerCache cache, int positionOffset)
+    {
+        var normed = PreAttentionNorm.Forward(input);
+        var attentionOutput = input.GetLength(0) == 1
+            ? Attention.ForwardFlashDecode(normed, cache, positionOffset)
+            : Attention.Forward(normed, cache, positionOffset);
+        var residual = TensorMath.Add(input, attentionOutput);
+        var feedForwardOutput = FeedForward.Forward(PreFeedForwardNorm.Forward(residual));
+        return TensorMath.Add(residual, feedForwardOutput);
+    }
+
     public override float[,] BackwardSTE(float[,] gradientOutput)
     {
         ArgumentNullException.ThrowIfNull(gradientOutput);

@@ -48,6 +48,29 @@ public static class BitNetPaperGguf
         ValidateMetadata(reader.Metadata);
 
         var config = ReadConfig(reader.Metadata);
+        // KV5b: env-var override for KvCacheQuantization. GGUF metadata does
+        // not declare cache quantisation (it's a runtime knob, not a model
+        // property); BITNETSHARP_KV_CACHE_QUANTIZATION=Int8 flips the loaded
+        // config's flag so cache-aware decode runs through QuantizedKvLayerCache.
+        var kvOverride = BitNetOptions.KvCacheQuantizationEnvOverride;
+        if (kvOverride.HasValue && kvOverride.Value != config.KvCacheQuantization)
+        {
+            config = new BitNetConfig(
+                vocabSize: config.VocabSize,
+                dimension: config.Dimension,
+                hiddenDimension: config.HiddenDimension,
+                layerCount: config.LayerCount,
+                headCount: config.HeadCount,
+                maxSequenceLength: config.MaxSequenceLength,
+                rmsNormEpsilon: config.RmsNormEpsilon,
+                kvHeadCount: config.KvHeadCount,
+                ropeTheta: config.RopeTheta,
+                kvCacheQuantization: kvOverride.Value);
+            logger.LogInformation(
+                "KvCacheQuantization override applied via {Var}: {Value}",
+                BitNetOptions.KvCacheQuantizationEnvVar,
+                kvOverride.Value);
+        }
         var vocabulary = DeserializeVocabulary(GetRequiredString(reader.Metadata, VocabularyMetadataKey));
         var memorizedResponses = DeserializeMemorizedResponses(GetRequiredString(reader.Metadata, MemorizedResponsesMetadataKey));
 

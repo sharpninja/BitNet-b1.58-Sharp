@@ -1,3 +1,5 @@
+using BitNetSharp.Core.Inference;
+
 namespace BitNetSharp.Core.Models;
 
 public sealed record BitNetConfig
@@ -18,7 +20,8 @@ public sealed record BitNetConfig
         int maxSequenceLength = 256,
         float rmsNormEpsilon = 1e-5f,
         int kvHeadCount = -1,
-        float ropeTheta = 10_000f)
+        float ropeTheta = 10_000f,
+        KvCacheQuantization kvCacheQuantization = KvCacheQuantization.Fp32)
     {
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(vocabSize);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(dimension);
@@ -58,6 +61,7 @@ public sealed record BitNetConfig
         RmsNormEpsilon = rmsNormEpsilon;
         KvHeadCount = resolvedKvHeadCount;
         RopeTheta = ropeTheta;
+        KvCacheQuantization = kvCacheQuantization;
     }
 
     public int VocabSize { get; }
@@ -77,6 +81,13 @@ public sealed record BitNetConfig
     public int KvHeadCount { get; }
 
     public float RopeTheta { get; }
+
+    /// <summary>
+    /// Section B: selects fp32 (default) or int8 K/V cache backing for
+    /// cache-aware decode. <see cref="BitNetTransformer.CreateCache"/> reads
+    /// this to allocate the right slab type.
+    /// </summary>
+    public KvCacheQuantization KvCacheQuantization { get; }
 
     public int HeadDimension => Dimension / HeadCount;
 

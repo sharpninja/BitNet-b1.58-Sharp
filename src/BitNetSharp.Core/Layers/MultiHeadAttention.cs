@@ -1,3 +1,4 @@
+using System.Runtime.InteropServices;
 using BitNetSharp.Core.Inference;
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Quantization;
@@ -187,6 +188,187 @@ public sealed class MultiHeadAttention : AttentionModule
                 }
             }
         }
+
+        return OutputProjection.Forward(attended);
+    }
+
+    public override float[,] Forward(float[,] input, QuantizedKvLayerCache cache, int positionOffset)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(cache);
+        ArgumentOutOfRangeException.ThrowIfNegative(positionOffset);
+        if (input.GetLength(1) != Config.Dimension)
+        {
+            throw new ArgumentException(
+                $"Expected input dimension {Config.Dimension}, received {input.GetLength(1)}.", nameof(input));
+        }
+
+        var newRows = input.GetLength(0);
+        var dim = Config.Dimension;
+        var headDim = Config.HeadDimension;
+        var headCount = Config.HeadCount;
+
+        if (cache.KvDimension != dim)
+        {
+            throw new ArgumentException(
+                $"Cache kv dimension {cache.KvDimension} does not match expected {dim}.", nameof(cache));
+        }
+        var totalLength = positionOffset + newRows;
+        if (totalLength > cache.Capacity)
+        {
+            throw new ArgumentException(
+                $"Cache capacity {cache.Capacity} too small for total length {totalLength}.", nameof(cache));
+        }
+
+        var sharedQuant = QuantizedActivationBlock.FromFloat(input);
+        var queries = QueryProjection.ForwardQuantized(sharedQuant);
+        var newKeys = KeyProjection.ForwardQuantized(sharedQuant);
+        var newValues = ValueProjection.ForwardQuantized(sharedQuant);
+
+        _rotaryPositionEmbedding.ApplyInPlace(queries, headCount, positionOffset);
+        _rotaryPositionEmbedding.ApplyInPlace(newKeys, headCount, positionOffset);
+
+        // KV5: write through IKvCache so int8 quantizer runs once per row.
+        var newKeysFlat = AttentionMath.AsFlatSpan(newKeys);
+        var newValuesFlat = AttentionMath.AsFlatSpan(newValues);
+        for (var row = 0; row < newRows; row++)
+        {
+            cache.WriteKRow(positionOffset + row, newKeysFlat.Slice(row * dim, dim));
+            cache.WriteVRow(positionOffset + row, newValuesFlat.Slice(row * dim, dim));
+        }
+
+        // Prefill (newRows > 1) dequantises the cache prefix once per call
+        // and reuses the existing fp32 attention math; this keeps the
+        // per-row absmax loss bounded the same way as decode and reuses the
+        // already-validated SIMD path. Decode (newRows == 1) bypasses this
+        // and goes straight to ForwardFlashDecode + ForwardDecodeInt8.
+        var attended = new float[newRows, dim];
+        var attendedFlat = AttentionMath.AsFlatSpan(attended);
+        var queriesFlat = AttentionMath.AsFlatSpan(queries);
+
+        var totalRows = positionOffset + newRows;
+        var kFloat = new float[totalRows * dim];
+        var vFloat = new float[totalRows * dim];
+        var kFloatSpan = kFloat.AsSpan();
+        var vFloatSpan = vFloat.AsSpan();
+        for (var r = 0; r < totalRows; r++)
+        {
+            cache.DequantizeKRow(r, kFloatSpan.Slice(r * dim, dim));
+            cache.DequantizeVRow(r, vFloatSpan.Slice(r * dim, dim));
+        }
+
+        for (var head = 0; head < headCount; head++)
+        {
+            var headOffset = head * headDim;
+            for (var targetRow = 0; targetRow < newRows; targetRow++)
+            {
+                var absoluteTarget = positionOffset + targetRow;
+                var scoreCount = absoluteTarget + 1;
+                var scores = new float[scoreCount];
+                var maxScore = float.NegativeInfinity;
+                var qSlice = queriesFlat.Slice(targetRow * dim + headOffset, headDim);
+
+                for (var source = 0; source < scoreCount; source++)
+                {
+                    var kSlice = kFloatSpan.Slice(source * dim + headOffset, headDim);
+                    var score = AttentionMath.Dot(qSlice, kSlice, headDim) * _attentionScale;
+                    scores[source] = score;
+                    if (score > maxScore)
+                    {
+                        maxScore = score;
+                    }
+                }
+
+                var partition = 0f;
+                for (var source = 0; source < scoreCount; source++)
+                {
+                    scores[source] = MathF.Exp(scores[source] - maxScore);
+                    partition += scores[source];
+                }
+
+                if (partition <= 0f)
+                {
+                    continue;
+                }
+
+                var attendedSlice = attendedFlat.Slice(targetRow * dim + headOffset, headDim);
+                var invPartition = 1f / partition;
+                for (var source = 0; source < scoreCount; source++)
+                {
+                    var weight = scores[source] * invPartition;
+                    var vSlice = vFloatSpan.Slice(source * dim + headOffset, headDim);
+                    AttentionMath.AccumulateWeighted(attendedSlice, vSlice, weight, headDim);
+                }
+            }
+        }
+
+        return OutputProjection.Forward(attended);
+    }
+
+    public override float[,] ForwardFlashDecode(float[,] input, QuantizedKvLayerCache cache, int positionOffset)
+    {
+        ArgumentNullException.ThrowIfNull(input);
+        ArgumentNullException.ThrowIfNull(cache);
+        ArgumentOutOfRangeException.ThrowIfNegative(positionOffset);
+        if (input.GetLength(0) != 1)
+        {
+            throw new ArgumentException("Flash decode expects exactly one query row.", nameof(input));
+        }
+        if (input.GetLength(1) != Config.Dimension)
+        {
+            throw new ArgumentException(
+                $"Expected input dimension {Config.Dimension}, received {input.GetLength(1)}.", nameof(input));
+        }
+
+        var dim = Config.Dimension;
+        var headDim = Config.HeadDimension;
+        var headCount = Config.HeadCount;
+
+        if (cache.KvDimension != dim)
+        {
+            throw new ArgumentException(
+                $"Cache kv dimension {cache.KvDimension} does not match expected {dim}.", nameof(cache));
+        }
+        var totalLength = positionOffset + 1;
+        if (totalLength > cache.Capacity)
+        {
+            throw new ArgumentException(
+                $"Cache capacity {cache.Capacity} too small for total length {totalLength}.", nameof(cache));
+        }
+
+        var sharedQuant = QuantizedActivationBlock.FromFloat(input);
+        var queries = QueryProjection.ForwardQuantized(sharedQuant);
+        var newKeys = KeyProjection.ForwardQuantized(sharedQuant);
+        var newValues = ValueProjection.ForwardQuantized(sharedQuant);
+
+        _rotaryPositionEmbedding.ApplyInPlace(queries, headCount, positionOffset);
+        _rotaryPositionEmbedding.ApplyInPlace(newKeys, headCount, positionOffset);
+
+        cache.WriteKRow(positionOffset, AttentionMath.AsFlatSpan(newKeys).Slice(0, dim));
+        cache.WriteVRow(positionOffset, AttentionMath.AsFlatSpan(newValues).Slice(0, dim));
+
+        var attended = new float[1, dim];
+        var attendedFlat = AttentionMath.AsFlatSpan(attended);
+        var queriesFlat = AttentionMath.AsFlatSpan(queries);
+        ref var kFirst = ref System.Runtime.CompilerServices.Unsafe.As<byte, sbyte>(
+            ref MemoryMarshal.GetArrayDataReference(cache.K));
+        ref var vFirst = ref System.Runtime.CompilerServices.Unsafe.As<byte, sbyte>(
+            ref MemoryMarshal.GetArrayDataReference(cache.V));
+        var cacheKFlat = MemoryMarshal.CreateSpan(ref kFirst, cache.K.Length);
+        var cacheVFlat = MemoryMarshal.CreateSpan(ref vFirst, cache.V.Length);
+
+        FlashAttention.ForwardDecodeInt8(
+            queriesFlat,
+            cacheKFlat,
+            cache.KScale.AsSpan(0, totalLength),
+            cacheVFlat,
+            cache.VScale.AsSpan(0, totalLength),
+            attendedFlat,
+            headCount,
+            headCount,
+            headDim,
+            totalLength,
+            _attentionScale);
 
         return OutputProjection.Forward(attended);
     }

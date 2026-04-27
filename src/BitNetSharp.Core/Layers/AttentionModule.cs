@@ -45,4 +45,24 @@ public abstract class AttentionModule : Module
     /// </summary>
     public virtual float[,] ForwardFlashDecode(float[,] input, LayerKvCache cache, int positionOffset)
         => throw new NotSupportedException($"{GetType().Name} does not implement flash decode.");
+
+    /// <summary>
+    /// Section B (KV cache quantization) - KV5: cache-aware forward with
+    /// int8 K/V backing. Same contract as
+    /// <see cref="Forward(float[,], LayerKvCache, int)"/> but writes
+    /// per-row absmax-quantised K/V into <paramref name="cache"/> and
+    /// dispatches the dot-side path through the int8 SIMD kernels.
+    /// </summary>
+    public virtual float[,] Forward(float[,] input, QuantizedKvLayerCache cache, int positionOffset)
+        => throw new NotSupportedException($"{GetType().Name} does not implement int8 cache-aware Forward.");
+
+    /// <summary>
+    /// Section B (KV cache quantization) - KV5: flash decode with int8 K/V
+    /// backing. Same contract as
+    /// <see cref="ForwardFlashDecode(float[,], LayerKvCache, int)"/> but
+    /// uses <see cref="QuantizedKvLayerCache"/> + the int8 online-softmax
+    /// kernel for the per-head attention pass.
+    /// </summary>
+    public virtual float[,] ForwardFlashDecode(float[,] input, QuantizedKvLayerCache cache, int positionOffset)
+        => throw new NotSupportedException($"{GetType().Name} does not implement int8 flash decode.");
 }

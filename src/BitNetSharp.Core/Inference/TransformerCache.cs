@@ -6,7 +6,7 @@ namespace BitNetSharp.Core.Inference;
 /// <see cref="Capacity"/> are pre-allocated scratch space. Cache slots are owned
 /// by the <see cref="TransformerCache"/>.
 /// </summary>
-public sealed class LayerKvCache
+public sealed class LayerKvCache : IKvCache
 {
     public LayerKvCache(int capacity, int kvDimension)
     {
@@ -26,6 +26,26 @@ public sealed class LayerKvCache
     public float[,] K { get; }
 
     public float[,] V { get; }
+
+    public void WriteKRow(int row, ReadOnlySpan<float> kFloat) => WriteRow(K, row, kFloat);
+
+    public void WriteVRow(int row, ReadOnlySpan<float> vFloat) => WriteRow(V, row, vFloat);
+
+    private void WriteRow(float[,] target, int row, ReadOnlySpan<float> src)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(row);
+        ArgumentOutOfRangeException.ThrowIfGreaterThanOrEqual(row, Capacity);
+        if (src.Length != KvDimension)
+        {
+            throw new ArgumentException(
+                $"Source length {src.Length} != KvDimension {KvDimension}.", nameof(src));
+        }
+
+        for (var i = 0; i < KvDimension; i++)
+        {
+            target[row, i] = src[i];
+        }
+    }
 }
 
 /// <summary>
@@ -39,6 +59,12 @@ public sealed class LayerKvCache
 public sealed class TransformerCache
 {
     public TransformerCache(LayerKvCache[] layers, int capacity)
+        : this((IKvCache[])layers, capacity)
+    {
+        ArgumentNullException.ThrowIfNull(layers);
+    }
+
+    public TransformerCache(IKvCache[] layers, int capacity)
     {
         ArgumentNullException.ThrowIfNull(layers);
         ArgumentOutOfRangeException.ThrowIfNegativeOrZero(capacity);
@@ -58,7 +84,14 @@ public sealed class TransformerCache
         PastLength = 0;
     }
 
-    public LayerKvCache[] Layers { get; }
+    /// <summary>
+    /// Per-layer cache slabs. Each entry implements <see cref="IKvCache"/>;
+    /// the concrete type is either <see cref="LayerKvCache"/> (fp32, default)
+    /// or <see cref="QuantizedKvLayerCache"/> (int8, opt-in via
+    /// <c>BitNetConfig.KvCacheQuantization</c>). Cache-aware Forward
+    /// methods type-dispatch on the concrete entry.
+    /// </summary>
+    public IKvCache[] Layers { get; }
 
     public int Capacity { get; }
 
