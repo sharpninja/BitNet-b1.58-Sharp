@@ -33,6 +33,14 @@
     <InternalsVisibleTo Include="BitNetSharp.Benchmarks.Maui" />
   </ItemGroup>
 
+  <ItemGroup>
+    <!-- WordLevelInferenceModel needs WordLevelTokenizer. Distributed.Contracts
+         has no deps so this stays acyclic. Naming aside ("Distributed.Contracts"
+         hints at coordinator-side use), the tokenizer is logically a shared
+         primitive used by training pipelines AND the on-device inference path. -->
+    <ProjectReference Include="..\BitNetSharp.Distributed.Contracts\BitNetSharp.Distributed.Contracts.csproj" />
+  </ItemGroup>
+
   <ItemGroup Condition="Exists('Data/Models/bitnet-b1.58-default.gguf')">
     <Content Include="Data/Models/bitnet-b1.58-default.gguf"
              Pack="true"

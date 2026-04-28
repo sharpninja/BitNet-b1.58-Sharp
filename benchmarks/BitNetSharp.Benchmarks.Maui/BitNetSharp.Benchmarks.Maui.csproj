@@ -93,6 +93,12 @@
 
 	<ItemGroup>
 		<ProjectReference Include="..\..\src\BitNetSharp.Core\BitNetSharp.Core.csproj" />
+		<!-- WordLevelTokenizer (used by ChatPage / IntentBenchPage's
+		     WordLevelInferenceModel construction) lives in
+		     Distributed.Contracts. Core already transitively pulls it but
+		     declare explicitly so this csproj doesn't break if Core's
+		     deps change. -->
+		<ProjectReference Include="..\..\src\BitNetSharp.Distributed.Contracts\BitNetSharp.Distributed.Contracts.csproj" />
 	</ItemGroup>
 
 </Project>

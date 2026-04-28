@@ -13,6 +13,7 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\BitNetSharp.Core\BitNetSharp.Core.csproj" />
+    <ProjectReference Include="..\..\src\BitNetSharp.Distributed.Contracts\BitNetSharp.Distributed.Contracts.csproj" />
   </ItemGroup>
 
 </Project>

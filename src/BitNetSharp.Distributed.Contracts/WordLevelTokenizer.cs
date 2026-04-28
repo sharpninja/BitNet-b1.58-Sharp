@@ -159,6 +159,38 @@ public sealed class WordLevelTokenizer
     }
 
     /// <summary>
+    /// Encodes a text line for autoregressive generation: prepends
+    /// <see cref="BosId"/> but does NOT append <see cref="EosId"/>, so
+    /// the generation loop can decide when to stop. Out-of-vocab tokens
+    /// map to <see cref="UnkId"/>.
+    /// </summary>
+    public int[] EncodeForGeneration(string text)
+    {
+        if (string.IsNullOrWhiteSpace(text))
+        {
+            return new[] { BosId };
+        }
+
+        var tokens = Tokenize(text);
+        var ids = new int[tokens.Count + 1];
+        ids[0] = BosId;
+        for (var i = 0; i < tokens.Count; i++)
+        {
+            ids[i + 1] = _tokenToId.TryGetValue(tokens[i], out var id) ? id : UnkId;
+        }
+        return ids;
+    }
+
+    /// <summary>
+    /// Returns the string form of token id <paramref name="id"/> (specials
+    /// rendered as their bracket forms). Out-of-range ids return
+    /// <c>[UNK]</c> so streaming detokenizers don't crash on a stray
+    /// argmax.
+    /// </summary>
+    public string GetTokenString(int id) =>
+        id >= 0 && id < _idToToken.Length ? _idToToken[id] : SpecialTokens[UnkId];
+
+    /// <summary>
     /// Decodes a sequence of token IDs back to text. Special tokens
     /// are rendered as their bracket-string forms.
     /// </summary>

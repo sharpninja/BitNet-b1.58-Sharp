@@ -1,17 +1,19 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using BitNetSharp.Core;
 using BitNetSharp.Core.Inference;
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Training;
+using BitNetSharp.Distributed.Contracts;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Benchmarks.Maui;
 
 public partial class ChatPage : ContentPage
 {
-    private BitNetPaperModel? _model;
+    private WordLevelInferenceModel? _model;
     private KvCacheQuantization _modelKv;
     private readonly StringBuilder _output = new();
 
@@ -85,30 +87,31 @@ public partial class ChatPage : ContentPage
                     kvCacheQuantization: pickedKv);
 
                 SetProgress(0.5, "Constructing transformer (skipRandomInit)...");
-                // skipRandomInit=true: BitLinear ctors allocate zero-filled
-                // ternary buffers; FlatParameterPack.Unpack overwrites all
-                // weights immediately after. No multi-GB random pass.
-                var ctorProgress = new Progress<double>(p =>
-                    SetProgress(0.5 + 0.3 * p, $"Constructing transformer ({p * 100:F0}%)"));
-                _model = new BitNetPaperModel(
-                    new BitNetOptions(header.Vocabulary, VerbosityLevel.Quiet, MaxResponseTokens: 32),
-                    NullLogger<BitNetPaperModel>.Instance,
-                    NullLoggerFactory.Instance,
-                    config: cfg,
+                var transformer = new BitNetTransformer(
+                    cfg,
+                    NullLogger<BitNetTransformer>.Instance,
                     seed: 42,
-                    constructionProgress: ctorProgress,
                     skipRandomInit: true);
 
                 SetProgress(0.85, "Unpacking weights...");
-                FlatParameterPack.Unpack(_model.Transformer, flat);
+                FlatParameterPack.Unpack(transformer, flat);
+
+                SetProgress(0.92, "Building tokenizer...");
+                var tokenizer = BuildTokenizerFromHeader(header);
+
+                _model = new WordLevelInferenceModel(transformer, tokenizer)
+                {
+                    MaxResponseTokens = 32,
+                    SuppressEosAndUnk = false,
+                };
                 sw.Stop();
 
-                _modelKv = _model.Config.KvCacheQuantization;
+                _modelKv = cfg.KvCacheQuantization;
                 Append($"Model loaded in {sw.Elapsed.TotalMilliseconds:F0} ms");
                 Append($"  KV={_modelKv} (requested={pickedKv})");
-                Append($"  vocab={_model.Config.VocabSize} dim={_model.Config.Dimension} layers={_model.Config.LayerCount} heads={_model.Config.HeadCount} kvHeads={_model.Config.KvHeadCount} headDim={_model.Config.HeadDimension}");
+                Append($"  vocab={cfg.VocabSize} dim={cfg.Dimension} layers={cfg.LayerCount} heads={cfg.HeadCount} kvHeads={cfg.KvHeadCount} headDim={cfg.HeadDimension}");
                 Append($"  AdvSimd.IsSupported={System.Runtime.Intrinsics.Arm.AdvSimd.IsSupported} Vector<float>.IsHardwareAccelerated={System.Numerics.Vector.IsHardwareAccelerated}");
-                Append($"  resident_bytes={_model.EstimateResidentParameterBytes():N0}");
+                Append($"  resident_bytes={transformer.EstimateResidentParameterBytes():N0}");
                 Append($"  GC.GetTotalMemory={GC.GetTotalMemory(false):N0}");
                 Append("");
             }
@@ -126,6 +129,25 @@ public partial class ChatPage : ContentPage
     }
 
     private const string ModelAssetName = "truckmate-small.tmv1";
+
+    private static WordLevelTokenizer BuildTokenizerFromHeader(TruckMateModelStore.Header header)
+    {
+        // WordLevelTokenizer.LoadFromFile is the only public ctor path.
+        // Round-trip through a temp file using its own JSON layout (a flat
+        // string[] of tokens in id order) so we don't have to mirror the
+        // private ctor.
+        var tempPath = Path.Combine(FileSystem.CacheDirectory, $"tmvocab-{Guid.NewGuid():N}.json");
+        try
+        {
+            var arr = header.Vocabulary is string[] direct ? direct : header.Vocabulary.ToArray();
+            File.WriteAllText(tempPath, JsonSerializer.Serialize(arr), Encoding.UTF8);
+            return WordLevelTokenizer.LoadFromFile(tempPath);
+        }
+        finally
+        {
+            try { File.Delete(tempPath); } catch { /* best-effort */ }
+        }
+    }
 
     /// <summary>
     /// Copies the MauiAsset truckmate-small.tmv1 to the app's private files

@@ -1,10 +1,12 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Text;
+using System.Text.Json;
 using BitNetSharp.Core;
 using BitNetSharp.Core.Inference;
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Training;
+using BitNetSharp.Distributed.Contracts;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Benchmarks.Maui;
@@ -17,10 +19,7 @@ public partial class IntentBenchPage : ContentPage
     /// Fixed bank of TruckMate prompts that exercise every intent family
     /// in the v1 corpus generator. Each tuple is (utterance,
     /// expected_intent_name). The bench records both raw decode
-    /// latency and substring-accuracy: did the model emit the expected
-    /// intent name anywhere in its decoded output. Substring beats
-    /// argmax-classification because the streaming path produces a
-    /// JSON-ish continuation, not a single label.
+    /// latency and substring-accuracy.
     /// </summary>
     private static readonly (string Utterance, string ExpectedIntent)[] Prompts =
     {
@@ -120,19 +119,23 @@ public partial class IntentBenchPage : ContentPage
                     kvCacheQuantization: pickedKv);
 
                 SetProgress(0.4, "Constructing transformer (skipRandomInit)...");
-                var ctorProgress = new Progress<double>(p =>
-                    SetProgress(0.4 + 0.4 * p, $"Constructing transformer ({p * 100:F0}%)"));
-                var model = new BitNetPaperModel(
-                    new BitNetOptions(header.Vocabulary, VerbosityLevel.Quiet, MaxResponseTokens: maxTokens),
-                    NullLogger<BitNetPaperModel>.Instance,
-                    NullLoggerFactory.Instance,
-                    config: cfg,
+                var transformer = new BitNetTransformer(
+                    cfg,
+                    NullLogger<BitNetTransformer>.Instance,
                     seed: 42,
-                    constructionProgress: ctorProgress,
                     skipRandomInit: true);
 
                 SetProgress(0.85, "Unpacking weights...");
-                FlatParameterPack.Unpack(model.Transformer, flat);
+                FlatParameterPack.Unpack(transformer, flat);
+
+                SetProgress(0.92, "Building tokenizer...");
+                var tokenizer = BuildTokenizerFromHeader(header);
+
+                var model = new WordLevelInferenceModel(transformer, tokenizer)
+                {
+                    MaxResponseTokens = maxTokens,
+                    SuppressEosAndUnk = true, // smoke build argmaxes to EOS too aggressively otherwise
+                };
                 loadSw.Stop();
                 Append($"Model ready in {loadSw.Elapsed.TotalMilliseconds:F0} ms (KV={pickedKv})");
                 Append($"AdvSimd={System.Runtime.Intrinsics.Arm.AdvSimd.IsSupported} Vector<float>.HW={System.Numerics.Vector.IsHardwareAccelerated}");
@@ -210,6 +213,21 @@ public partial class IntentBenchPage : ContentPage
         StatusLabel.Text = "Done.";
         HideProgress();
         RunBtn.IsEnabled = true;
+    }
+
+    private static WordLevelTokenizer BuildTokenizerFromHeader(TruckMateModelStore.Header header)
+    {
+        var tempPath = Path.Combine(FileSystem.CacheDirectory, $"tmvocab-{Guid.NewGuid():N}.json");
+        try
+        {
+            var arr = header.Vocabulary is string[] direct ? direct : header.Vocabulary.ToArray();
+            File.WriteAllText(tempPath, JsonSerializer.Serialize(arr), Encoding.UTF8);
+            return WordLevelTokenizer.LoadFromFile(tempPath);
+        }
+        finally
+        {
+            try { File.Delete(tempPath); } catch { /* best-effort */ }
+        }
     }
 
     /// <summary>

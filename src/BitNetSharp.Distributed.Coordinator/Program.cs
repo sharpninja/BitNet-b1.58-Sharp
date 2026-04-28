@@ -89,6 +89,11 @@ if (args.Length > 0 && string.Equals(args[0], "tokenize-corpus", StringCompariso
     return TokenizeCorpusCommandLine(args);
 }
 
+if (args.Length > 0 && string.Equals(args[0], "export-tmv1", StringComparison.OrdinalIgnoreCase))
+{
+    return ExportTmv1CommandLine(args);
+}
+
 if (args.Length > 0 && string.Equals(args[0], "seed-real-tasks", StringComparison.OrdinalIgnoreCase))
 {
     return SeedRealTasksCommandLine(args);
@@ -1177,6 +1182,138 @@ static int TokenizeCorpusCommandLine(string[] args)
     catch (Exception ex)
     {
         Console.Error.WriteLine($"tokenize-corpus failed: {ex}");
+        return 1;
+    }
+}
+
+static int ExportTmv1CommandLine(string[] args)
+{
+    try
+    {
+        var output = args.Length > 1 && !args[1].StartsWith("-", StringComparison.Ordinal)
+            ? args[1]
+            : "data/truckmate/truckmate-small.tmv1";
+        long? versionFilter = null;
+        for (var i = 1; i < args.Length; i++)
+        {
+            if (string.Equals(args[i], "--version", StringComparison.Ordinal) && i + 1 < args.Length
+                && long.TryParse(args[i + 1], System.Globalization.NumberStyles.Integer,
+                    System.Globalization.CultureInfo.InvariantCulture, out var parsed))
+            {
+                versionFilter = parsed;
+            }
+        }
+
+        var config = new ConfigurationBuilder()
+            .SetBasePath(System.IO.Path.GetDirectoryName(typeof(Program).Assembly.Location) ?? ".")
+            .AddJsonFile("appsettings.json", optional: true)
+            .AddJsonFile($"appsettings.{Environment.GetEnvironmentVariable("ASPNETCORE_ENVIRONMENT") ?? "Production"}.json", optional: true)
+            .AddEnvironmentVariables()
+            .Build();
+
+        var coordinator = new CoordinatorOptions();
+        config.GetSection(CoordinatorOptions.SectionName).Bind(coordinator);
+
+        var weightsRoot = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(coordinator.DatabasePath)) ?? ".",
+            "weights");
+        var corpusRoot = System.IO.Path.Combine(
+            System.IO.Path.GetDirectoryName(System.IO.Path.GetFullPath(coordinator.DatabasePath)) ?? ".",
+            "corpus");
+        var vocabPath = System.IO.Path.Combine(corpusRoot, "tokenized", "vocab.json");
+
+        if (!File.Exists(vocabPath))
+        {
+            Console.Error.WriteLine($"Vocab not found at {vocabPath}. Run tokenize-corpus first.");
+            return 2;
+        }
+
+        var store = new BitNetSharp.Distributed.Coordinator.Persistence.FileSystemWeightStore(weightsRoot);
+        var version = versionFilter ?? store.GetLatestVersion();
+        if (version is null)
+        {
+            Console.Error.WriteLine($"No weight versions found under {weightsRoot}.");
+            return 3;
+        }
+
+        var manifest = store.TryGetManifest(version.Value);
+        if (manifest is null)
+        {
+            Console.Error.WriteLine($"Weight version {version} not present in {weightsRoot}.");
+            return 4;
+        }
+
+        var presetName = string.IsNullOrWhiteSpace(coordinator.ModelPreset) ? "small" : coordinator.ModelPreset!;
+        var preset = BitNetSharp.Distributed.Contracts.TruckMateModelPresets.GetPreset(presetName);
+
+        var blobBytes = File.ReadAllBytes(manifest.PhysicalPath);
+        var weights = BitNetSharp.Distributed.Contracts.WeightBlobCodec.Decode(blobBytes, out var blobVersion);
+        Console.WriteLine($"Loaded weight blob: version={blobVersion} count={weights.Length:N0} ({manifest.SizeBytes:N0} bytes on disk)");
+
+        var tokenizer = BitNetSharp.Distributed.Contracts.WordLevelTokenizer.LoadFromFile(vocabPath);
+        Console.WriteLine($"Loaded vocab: size={tokenizer.VocabSize}");
+
+        if (tokenizer.VocabSize != preset.VocabSize)
+        {
+            Console.Error.WriteLine(
+                $"Tokenizer vocab size {tokenizer.VocabSize} differs from preset.VocabSize {preset.VocabSize}. "
+                + "Re-run tokenize-corpus or update Coordinator:ModelPreset.");
+            return 5;
+        }
+
+        var expectedFlat = BitNetSharp.Core.Training.FlatParameterPack.ComputeLength(
+            new BitNetSharp.Core.Models.BitNetConfig(
+                vocabSize: preset.VocabSize,
+                dimension: preset.Dimension,
+                hiddenDimension: preset.HiddenDimension,
+                layerCount: preset.LayerCount,
+                headCount: preset.HeadCount,
+                maxSequenceLength: preset.MaxSequenceLength));
+        if (weights.Length != expectedFlat)
+        {
+            Console.Error.WriteLine(
+                $"Weight blob length {weights.Length} does not match expected flat length {expectedFlat} "
+                + $"for preset {presetName}. Coordinator:ModelPreset and weight version are out of sync.");
+            return 6;
+        }
+
+        // Reconstruct the on-disk vocab list in id-order so the .tmv1
+        // header preserves the same id->token mapping the coordinator
+        // trained against. WordLevelTokenizer doesn't expose its
+        // _idToToken; we round-trip through GetTokenString for every id.
+        var vocabList = new string[tokenizer.VocabSize];
+        for (var id = 0; id < tokenizer.VocabSize; id++)
+        {
+            vocabList[id] = tokenizer.GetTokenString(id);
+        }
+
+        var presetCfg = new BitNetSharp.Core.Models.BitNetConfig(
+            vocabSize: preset.VocabSize,
+            dimension: preset.Dimension,
+            hiddenDimension: preset.HiddenDimension,
+            layerCount: preset.LayerCount,
+            headCount: preset.HeadCount,
+            maxSequenceLength: preset.MaxSequenceLength);
+
+        BitNetSharp.Core.TruckMateModelStore.Save(
+            output,
+            vocabSize: presetCfg.VocabSize,
+            dimension: presetCfg.Dimension,
+            hiddenDimension: presetCfg.HiddenDimension,
+            layerCount: presetCfg.LayerCount,
+            headCount: presetCfg.HeadCount,
+            maxSequenceLength: presetCfg.MaxSequenceLength,
+            kvHeadCount: presetCfg.KvHeadCount,
+            vocabulary: vocabList,
+            flatParameters: weights);
+
+        var fi = new FileInfo(output);
+        Console.WriteLine($"Wrote {output} ({fi.Length:N0} bytes) for preset={presetName} version={blobVersion}");
+        return 0;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"export-tmv1 failed: {ex}");
         return 1;
     }
 }

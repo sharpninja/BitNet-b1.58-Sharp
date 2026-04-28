@@ -11,31 +11,27 @@ using Microsoft.Extensions.Logging.Abstractions;
 // TruckMate SLM trainer (single-machine).
 //
 // Pipeline:
-//   1. Generate v1 synthetic corpus deterministically (seed=42) into a
-//      temp dir under the tool's working directory.
-//   2. Build a BitNetTokenizer-compatible vocab from the corpus (the
-//      same regex + lowercase pipeline BitNetPaperModel uses internally,
-//      so the on-device tokenizer rebuild is byte-identical).
-//   3. Construct a BitNetPaperModel with the small TruckMate preset
-//      (dim=256, hidden=1024, layers=4, heads=8, seq=128, ~7M params).
-//   4. Train one epoch on a slice of the corpus using BitNetFullTrainer
-//      against (Prompt = "[USER] utterance", Response = "[INTENT] {...}")
-//      pairs split out of each corpus line.
-//   5. Pack the trained transformer parameters via FlatParameterPack and
-//      write a TruckMateModelStore (.tmv1) checkpoint that the MAUI
-//      benchmark app can load on-device.
+//   1. Generate v1 synthetic corpus deterministically (seed=42).
+//   2. Train a WordLevelTokenizer over the corpus (5174 cap by default).
+//      This matches what the coordinator's tokenize-corpus CLI does, so
+//      checkpoints from this trainer are interchangeable with
+//      coordinator-trained .tmv1 files at inference time.
+//   3. Build a bare BitNetTransformer sized to the chosen preset.
+//   4. Pre-tokenize each corpus line into int[] sequences and call
+//      BitNetFullTrainer(transformer, options).Train(sequences, epochs).
+//   5. Pack the trained parameters via FlatParameterPack and write a
+//      TruckMateModelStore (.tmv1) checkpoint that the MAUI app loads
+//      via WordLevelInferenceModel.
 //
-// Defaults are tuned for an interactive dev-box loop (~5-15 min). Knobs
-// are environment variables so we don't have to thread CLI parsing
-// through this 10-day deadline crunch:
-//
-//   TM_OUTPUT_PATH        default: data/truckmate/truckmate-small.tmv1
-//   TM_CORPUS_DIR         default: tools/TruckMateTrainer/build/corpus
-//   TM_CORPUS_COUNT       default: 50000  (full v1 corpus)
-//   TM_TRAIN_SUBSET       default: 5000   (lines actually fed to the trainer)
-//   TM_EPOCHS             default: 1
-//   TM_PRESET             default: small  (small|medium|large)
-//   TM_VOCAB_CAP          default: 5174   (per scaling-truckmate-corpus doc)
+// Knobs (env vars):
+//   TM_OUTPUT_PATH       default: data/truckmate/truckmate-small.tmv1
+//   TM_CORPUS_DIR        default: tools/TruckMateTrainer/build/corpus
+//   TM_CORPUS_COUNT      default: 50000  (full v1 corpus)
+//   TM_TRAIN_SUBSET      default: 1000   (lines fed to the trainer)
+//   TM_SUBSET_OFFSET     default: 0      (start index for the subset window)
+//   TM_EPOCHS            default: 1
+//   TM_PRESET            default: small  (small|medium|large)
+//   TM_VOCAB_CAP         default: 5174   (per scaling-truckmate-corpus doc)
 
 var sw = Stopwatch.StartNew();
 
@@ -49,13 +45,15 @@ var corpusDir = Environment.GetEnvironmentVariable("TM_CORPUS_DIR")
 corpusDir = Path.GetFullPath(corpusDir);
 
 var totalCount = ParseInt("TM_CORPUS_COUNT", 50_000);
-var trainSubset = ParseInt("TM_TRAIN_SUBSET", 5_000);
+var trainSubset = ParseInt("TM_TRAIN_SUBSET", 1_000);
+var subsetOffset = ParseInt("TM_SUBSET_OFFSET", 0);
 var epochs = ParseInt("TM_EPOCHS", 1);
 var presetName = Environment.GetEnvironmentVariable("TM_PRESET") ?? "small";
 var vocabCap = ParseInt("TM_VOCAB_CAP", 5174);
 
-Console.WriteLine($"TruckMateTrainer");
-Console.WriteLine($"  preset={presetName} epochs={epochs} corpus_count={totalCount} train_subset={trainSubset} vocab_cap={vocabCap}");
+Console.WriteLine($"TruckMateTrainer (WordLevel pipeline)");
+Console.WriteLine($"  preset={presetName} epochs={epochs} corpus_count={totalCount}");
+Console.WriteLine($"  subset_offset={subsetOffset} train_subset={trainSubset} vocab_cap={vocabCap}");
 Console.WriteLine($"  corpus_dir={corpusDir}");
 Console.WriteLine($"  output={output}");
 Console.WriteLine();
@@ -80,9 +78,9 @@ else
 }
 Console.WriteLine($"      done in {(sw.Elapsed - t0).TotalSeconds:F1}s");
 
-// 2. Read all lines, build a BitNetTokenizer-compatible vocab.
+// 2. Read all lines, train WordLevelTokenizer.
 t0 = sw.Elapsed;
-Console.WriteLine($"[2/5] Reading corpus + building vocab (cap={vocabCap})...");
+Console.WriteLine($"[2/5] Reading corpus + training WordLevelTokenizer (cap={vocabCap})...");
 var allLines = new List<string>(totalCount);
 foreach (var shard in Directory.EnumerateFiles(corpusDir, "truckmate-v1-shard-*.txt").OrderBy(p => p))
 {
@@ -96,41 +94,18 @@ foreach (var shard in Directory.EnumerateFiles(corpusDir, "truckmate-v1-shard-*.
 }
 Console.WriteLine($"      read {allLines.Count} lines from {corpusDir}");
 
-// BitNetTokenizer.Tokenize lowercases + regex-splits BUT then maps
-// every out-of-vocab match to <unk>. We need the raw word list to
-// build the vocab in the first place, so run the same regex directly.
-// Pattern is duplicated from BitNetTokenizer.TokenRegex; keep in sync.
-var tokenRegex = new System.Text.RegularExpressions.Regex(
-    @"[A-Za-z]+(?:'[A-Za-z]+)?|[0-9]+|[^\sA-Za-z0-9]",
-    System.Text.RegularExpressions.RegexOptions.Compiled);
-var freq = new Dictionary<string, int>(StringComparer.Ordinal);
-foreach (var line in allLines)
+var tokenizer = WordLevelTokenizer.TrainFromCorpus(allLines, maxVocab: vocabCap, minFrequency: 1);
+if (tokenizer.VocabSize > vocabCap)
 {
-    foreach (System.Text.RegularExpressions.Match match in tokenRegex.Matches(line.ToLowerInvariant()))
-    {
-        var token = match.Value;
-        if (token == BitNetTokenizer.BeginToken || token == BitNetTokenizer.EndToken
-            || token == BitNetTokenizer.UnknownToken)
-        {
-            continue;
-        }
-        freq.TryGetValue(token, out var c);
-        freq[token] = c + 1;
-    }
+    Console.Error.WriteLine($"      Vocab size {tokenizer.VocabSize} exceeds cap {vocabCap}; aborting.");
+    return 3;
 }
-var rawVocabBudget = vocabCap - 3; // reserve for <bos>, <eos>, <unk>
-var rawWords = freq
-    .OrderByDescending(kvp => kvp.Value)
-    .ThenBy(kvp => kvp.Key, StringComparer.Ordinal)
-    .Take(rawVocabBudget)
-    .Select(kvp => kvp.Key)
-    .ToList();
-Console.WriteLine($"      unique words={freq.Count}, kept top {rawWords.Count} (budget {rawVocabBudget})");
+Console.WriteLine($"      vocab_size={tokenizer.VocabSize} (specials at 0..5: PAD/UNK/BOS/EOS/USER/INTENT)");
 Console.WriteLine($"      done in {(sw.Elapsed - t0).TotalSeconds:F1}s");
 
-// 3. Build BitNetPaperModel with the chosen preset shape.
+// 3. Build BitNetTransformer with the chosen preset.
 t0 = sw.Elapsed;
-var preset = TruckMateModelPresets.GetPreset(presetName, vocabSizeOverride: rawWords.Count + 3);
+var preset = TruckMateModelPresets.GetPreset(presetName, vocabSizeOverride: tokenizer.VocabSize);
 Console.WriteLine($"[3/5] {preset.ToDisplayString()}");
 var cfg = new BitNetConfig(
     vocabSize: preset.VocabSize,
@@ -141,42 +116,44 @@ var cfg = new BitNetConfig(
     maxSequenceLength: preset.MaxSequenceLength);
 Console.WriteLine($"      head_dim={cfg.HeadDimension} kv_heads={cfg.KvHeadCount}");
 
-var loggerFactory = NullLoggerFactory.Instance;
-var paperLogger = NullLogger<BitNetPaperModel>.Instance;
-var model = new BitNetPaperModel(
-    new BitNetOptions(rawWords.ToArray(), VerbosityLevel.Quiet, MaxResponseTokens: 32),
-    paperLogger,
-    loggerFactory,
-    config: cfg,
-    seed: 42);
-Console.WriteLine($"      model built ({model.EstimateResidentParameterBytes() / (1024d * 1024d):F1} MiB resident)");
+var transformer = new BitNetTransformer(cfg, NullLogger<BitNetTransformer>.Instance, seed: 42);
+Console.WriteLine($"      transformer built ({transformer.EstimateResidentParameterBytes() / (1024d * 1024d):F1} MiB resident)");
 Console.WriteLine($"      done in {(sw.Elapsed - t0).TotalSeconds:F1}s");
 
-// 4. Train one epoch on a subset.
+// 4. Tokenize the chosen subset slice + train.
 t0 = sw.Elapsed;
-Console.WriteLine($"[4/5] Training {epochs} epoch(s) on {trainSubset} examples...");
-var rng = new Random(42);
-var subsetLines = allLines
-    .OrderBy(_ => rng.Next())
-    .Take(trainSubset)
-    .ToList();
-var trainingExamples = new List<TrainingExample>(subsetLines.Count);
+Console.WriteLine($"[4/5] Tokenizing + training {epochs} epoch(s) on lines [{subsetOffset}..{subsetOffset + trainSubset})...");
+if (subsetOffset >= allLines.Count)
+{
+    Console.Error.WriteLine($"      subset_offset {subsetOffset} >= corpus size {allLines.Count}");
+    return 4;
+}
+var sliceEnd = Math.Min(allLines.Count, subsetOffset + trainSubset);
+var subsetLines = allLines.GetRange(subsetOffset, sliceEnd - subsetOffset);
+
+var tokenSequences = new List<int[]>(subsetLines.Count);
+var totalTokensSeen = 0L;
 foreach (var line in subsetLines)
 {
-    var idx = line.IndexOf("[INTENT]", StringComparison.Ordinal);
-    if (idx < 0)
+    // Use Encode here (BOS + tokens + EOS) so the trainer sees a complete
+    // utterance with terminal EOS — mirrors what the coordinator's
+    // tokenize-corpus produces in the .bin shards.
+    var ids = tokenizer.Encode(line);
+    if (ids.Length < 2) continue;
+    if (ids.Length > cfg.MaxSequenceLength)
     {
-        continue;
+        // Truncate from the front, preserving BOS at index 0 and EOS at -1.
+        var keep = cfg.MaxSequenceLength;
+        var trimmed = new int[keep];
+        trimmed[0] = WordLevelTokenizer.BosId;
+        trimmed[^1] = WordLevelTokenizer.EosId;
+        Array.Copy(ids, ids.Length - keep + 1, trimmed, 1, keep - 2);
+        ids = trimmed;
     }
-    var prompt = line[..idx].Trim();
-    var response = line[idx..].Trim();
-    if (prompt.Length == 0 || response.Length == 0)
-    {
-        continue;
-    }
-    trainingExamples.Add(new TrainingExample(prompt, response));
+    tokenSequences.Add(ids);
+    totalTokensSeen += ids.Length;
 }
-Console.WriteLine($"      built {trainingExamples.Count} TrainingExample pairs");
+Console.WriteLine($"      tokenized {tokenSequences.Count} sequences, total_tokens={totalTokensSeen:N0}");
 
 var trainingOptions = new BitNetTrainingOptions(
     epochs: epochs,
@@ -189,8 +166,8 @@ var trainingOptions = new BitNetTrainingOptions(
         shuffle: false,
         dropLast: false,
         seed: 42));
-var trainer = new BitNetFullTrainer(model, trainingOptions);
-var report = trainer.Train(trainingExamples);
+var trainer = new BitNetFullTrainer(transformer, trainingOptions);
+var report = trainer.Train(tokenSequences, epochs);
 var lastLoss = report.LossHistory.Count > 0 ? report.LossHistory[report.LossHistory.Count - 1] : double.NaN;
 Console.WriteLine($"      epochs done; final_loss={lastLoss:F4} ternary=(neg={report.NegativeWeights:N0} zero={report.ZeroWeights:N0} pos={report.PositiveWeights:N0})");
 Console.WriteLine($"      done in {(sw.Elapsed - t0).TotalSeconds:F1}s");
@@ -198,38 +175,12 @@ Console.WriteLine($"      done in {(sw.Elapsed - t0).TotalSeconds:F1}s");
 // 5. Pack + save.
 t0 = sw.Elapsed;
 Console.WriteLine($"[5/5] Packing + saving {output}...");
-var flat = FlatParameterPack.Pack(model.Transformer);
-// Reconstruct the full vocab BitNetPaperModel uses internally so the
-// on-device load can rebuild the same tokenizer + token-to-id map. The
-// paper model prepends the three specials and de-dupes/lowercases the
-// caller-supplied words.
-var fullVocab = new List<string>(model.Config.VocabSize)
+var flat = FlatParameterPack.Pack(transformer);
+
+var vocabList = new string[tokenizer.VocabSize];
+for (var id = 0; id < tokenizer.VocabSize; id++)
 {
-    BitNetTokenizer.BeginToken,
-    BitNetTokenizer.EndToken,
-    BitNetTokenizer.UnknownToken,
-};
-var seen = new HashSet<string>(StringComparer.Ordinal)
-{
-    BitNetTokenizer.BeginToken,
-    BitNetTokenizer.EndToken,
-    BitNetTokenizer.UnknownToken,
-};
-foreach (var word in rawWords)
-{
-    var lower = word.ToLowerInvariant();
-    if (seen.Add(lower))
-    {
-        fullVocab.Add(lower);
-    }
-}
-if (fullVocab.Count != cfg.VocabSize)
-{
-    Console.WriteLine($"      WARN: rebuilt vocab count {fullVocab.Count} != cfg.VocabSize {cfg.VocabSize}; padding with placeholder tokens");
-    while (fullVocab.Count < cfg.VocabSize)
-    {
-        fullVocab.Add($"<pad{fullVocab.Count}>");
-    }
+    vocabList[id] = tokenizer.GetTokenString(id);
 }
 
 TruckMateModelStore.Save(
@@ -241,7 +192,7 @@ TruckMateModelStore.Save(
     headCount: cfg.HeadCount,
     maxSequenceLength: cfg.MaxSequenceLength,
     kvHeadCount: cfg.KvHeadCount,
-    vocabulary: fullVocab,
+    vocabulary: vocabList,
     flatParameters: flat);
 var fileLen = new FileInfo(output).Length;
 Console.WriteLine($"      saved {fileLen / (1024d * 1024d):F2} MiB ({flat.Length:N0} float params)");

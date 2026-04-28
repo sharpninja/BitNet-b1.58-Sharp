@@ -1,23 +1,21 @@
 using System.Diagnostics;
 using BitNetSharp.Core;
-using BitNetSharp.Core.Inference;
 using BitNetSharp.Core.Models;
 using BitNetSharp.Core.Training;
+using BitNetSharp.Distributed.Contracts;
 using Microsoft.Extensions.Logging.Abstractions;
 
 // Validator: loads a truckmate-small.tmv1 checkpoint via TruckMateModelStore,
-// reconstructs a BitNetPaperModel via skipRandomInit + FlatParameterPack.Unpack,
-// and runs a fixed bank of TruckMate intent prompts through StreamGenerateAsync.
-// Reports per-prompt TTFT, per-decode-token ms, and intent-substring accuracy.
+// reconstructs a BitNetTransformer + WordLevelTokenizer, wraps in
+// WordLevelInferenceModel, and runs a fixed bank of TruckMate intent
+// prompts through StreamGenerateAsync. Reports per-prompt TTFT,
+// per-decode-token ms, throughput, and intent-substring accuracy.
 //
-// This is the dev-box mirror of IntentBenchPage in the MAUI benchmarks app.
-// Same prompts, same accuracy metric, same per-token timing format -> the x86
-// numbers serve as a sanity check before APK install + as a regression guard
-// in CI ("did the trainer just produce a checkpoint that crashes on load?").
+// Mirrors the MAUI IntentBenchPage; provides x86 sanity check + CI
+// regression guard before APK install.
 //
 // Usage:
 //   dotnet run -c Release --project tools/TruckMateValidator [path/to/.tmv1]
-// Default: data/truckmate/truckmate-small.tmv1 relative to the repo root.
 
 var path = args.Length > 0
     ? args[0]
@@ -32,7 +30,7 @@ if (!File.Exists(path))
     return 2;
 }
 
-Console.WriteLine($"TruckMateValidator");
+Console.WriteLine($"TruckMateValidator (WordLevel pipeline)");
 Console.WriteLine($"  checkpoint: {path}");
 Console.WriteLine($"  size: {new FileInfo(path).Length:N0} bytes");
 Console.WriteLine();
@@ -53,16 +51,38 @@ var cfg = new BitNetConfig(
     headCount: header.HeadCount,
     maxSequenceLength: header.MaxSequenceLength,
     kvHeadCount: header.KvHeadCount);
-var model = new BitNetPaperModel(
-    new BitNetOptions(header.Vocabulary, VerbosityLevel.Quiet, MaxResponseTokens: 24),
-    NullLogger<BitNetPaperModel>.Instance,
-    NullLoggerFactory.Instance,
-    config: cfg,
+
+// Build transformer + import flat weights.
+var transformer = new BitNetTransformer(
+    cfg,
+    NullLogger<BitNetTransformer>.Instance,
     seed: 42,
     skipRandomInit: true);
-FlatParameterPack.Unpack(model.Transformer, flat);
-Console.WriteLine($"[2/3] Built BitNetPaperModel + unpacked weights in {sw.Elapsed.TotalMilliseconds:F0} ms");
-Console.WriteLine($"      resident_bytes={model.EstimateResidentParameterBytes():N0}");
+FlatParameterPack.Unpack(transformer, flat);
+
+// Reconstruct tokenizer from the saved vocab list. SaveToFile + LoadFromFile
+// is the canonical round-trip path used by coordinator/worker; here we
+// build a temp file in memory.
+var vocabJson = System.Text.Json.JsonSerializer.Serialize(header.Vocabulary.ToArray());
+var tempVocabPath = Path.Combine(Path.GetTempPath(), $"tmvocab-{Guid.NewGuid():N}.json");
+File.WriteAllText(tempVocabPath, vocabJson, System.Text.Encoding.UTF8);
+WordLevelTokenizer tokenizer;
+try
+{
+    tokenizer = WordLevelTokenizer.LoadFromFile(tempVocabPath);
+}
+finally
+{
+    try { File.Delete(tempVocabPath); } catch { /* best-effort */ }
+}
+
+var model = new WordLevelInferenceModel(transformer, tokenizer)
+{
+    MaxResponseTokens = 24,
+    SuppressEosAndUnk = true, // smoke build will argmax to EOS quickly otherwise
+};
+Console.WriteLine($"[2/3] Built WordLevelInferenceModel in {sw.Elapsed.TotalMilliseconds:F0} ms");
+Console.WriteLine($"      resident_bytes={transformer.EstimateResidentParameterBytes():N0}");
 Console.WriteLine();
 
 (string Utterance, string ExpectedIntent)[] prompts =
