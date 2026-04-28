@@ -15,6 +15,10 @@
             Title="Chat"
             ContentTemplate="{DataTemplate local:ChatPage}"
             Route="ChatPage" />
+        <ShellContent
+            Title="Intent"
+            ContentTemplate="{DataTemplate local:IntentBenchPage}"
+            Route="IntentBenchPage" />
     </TabBar>
 
 </Shell>

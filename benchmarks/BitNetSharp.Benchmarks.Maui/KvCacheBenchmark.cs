@@ -10,18 +10,23 @@ namespace BitNetSharp.Benchmarks.Maui;
 /// <summary>
 /// Stopwatch-based KvCacheBenchmarks port for Android. BenchmarkDotNet does
 /// not run on Android (no JIT process spawning, no Process API), so this
-/// custom runner does warmup + iteration loop + simple stats. Mirrors the
-/// shape of the desktop KvCacheBenchmarks (Bonsai shape, kvDim=1024,
-/// headDim=128) so deltas can be compared 1:1 against x86 numbers.
+/// custom runner does warmup + iteration loop + simple stats. Sized to the
+/// truckmate-small preset (dim=256, heads=8, headDim=32, kvHeadCount=8 ->
+/// kvDim=256) which is the realistic phone-deployment target. Bonsai-shape
+/// numbers were retired as a benchmark axis: ~7-8 sec/token rules them out
+/// for interactive use on mid-tier phones, so optimizing the cache path
+/// for 1024-wide KV rows wastes engineering effort.
 /// </summary>
 public static class KvCacheBenchmark
 {
-    private const int HeadDim = 128;
-    private const int KvDim = 1024; // Bonsai-shape: kvHeadCount(8) * headDim(128)
+    private const int HeadDim = 32;
+    private const int KvDim = 256; // truckmate-small: kvHeadCount(8) * headDim(32)
     private const int WarmupIterations = 3;
     private const int MeasureIterations = 10;
 
-    private static readonly int[] SeqLens = [32, 128, 512, 2048];
+    // Smaller seq_lens too: the small preset's MaxSequenceLength=128
+    // makes a 2048-row scan irrelevant. 1024 kept as a stress probe.
+    private static readonly int[] SeqLens = [16, 64, 128, 512, 1024];
 
     public sealed record Row(int SeqLen, double Fp32MeanNs, double Int8MeanNs, double Ratio);
 
@@ -40,7 +45,7 @@ public static class KvCacheBenchmark
         log($"Runtime: {RuntimeInformation.FrameworkDescription}");
         log($"OS: {RuntimeInformation.OSDescription}");
         log($"Arch: {RuntimeInformation.OSArchitecture} / {RuntimeInformation.ProcessArchitecture}");
-        log($"Bonsai shape: HeadDim={HeadDim}, KvDim={KvDim}; per-row absmax int8 + per-row fp32 scale.");
+        log($"TruckMate-small shape: HeadDim={HeadDim}, KvDim={KvDim}; per-row absmax int8 + per-row fp32 scale.");
         log($"Warmup={WarmupIterations} Measure={MeasureIterations}");
         log("");
 

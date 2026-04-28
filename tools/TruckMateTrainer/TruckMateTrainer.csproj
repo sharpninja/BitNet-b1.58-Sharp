@@ -1,0 +1,23 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>TruckMateTrainer</RootNamespace>
+    <AssemblyName>TruckMateTrainer</AssemblyName>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+    <!-- Coordinator's TruckMateCorpusGenerator triggers the same trim/AOT
+         analyzers as Core. The trainer is a JIT-only console tool, never
+         AOT-published, so suppress here. -->
+    <NoWarn>$(NoWarn);IL2026;IL3050</NoWarn>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\..\src\BitNetSharp.Core\BitNetSharp.Core.csproj" />
+    <ProjectReference Include="..\..\src\BitNetSharp.Distributed.Contracts\BitNetSharp.Distributed.Contracts.csproj" />
+    <ProjectReference Include="..\..\src\BitNetSharp.Distributed.Coordinator\BitNetSharp.Distributed.Coordinator.csproj" />
+  </ItemGroup>
+
+</Project>

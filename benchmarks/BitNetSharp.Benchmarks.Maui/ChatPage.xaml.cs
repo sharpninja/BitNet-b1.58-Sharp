@@ -4,6 +4,7 @@ using System.Text;
 using BitNetSharp.Core;
 using BitNetSharp.Core.Inference;
 using BitNetSharp.Core.Models;
+using BitNetSharp.Core.Training;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace BitNetSharp.Benchmarks.Maui;
@@ -54,7 +55,7 @@ public partial class ChatPage : ContentPage
         SetProgress(0, "Starting...");
 
         var pickedKv = KvPicker.SelectedIndex == 1 ? KvCacheQuantization.Int8 : KvCacheQuantization.Fp32;
-        await Task.Run(async () =>
+        await Task.Run(() =>
         {
             try
             {
@@ -62,28 +63,53 @@ public partial class ChatPage : ContentPage
                     "BITNETSHARP_KV_CACHE_QUANTIZATION",
                     pickedKv.ToString());
 
-                var ggufPath = await EnsureGgufExtractedAsync();
-                Append($"Loading GGUF from {ggufPath}");
-                Append($"  size on disk: {new FileInfo(ggufPath).Length:N0} bytes");
+                var modelPath = EnsureModelExtractedAsync().GetAwaiter().GetResult();
+                Append($"Loading TMV1 from {modelPath}");
+                Append($"  size on disk: {new FileInfo(modelPath).Length:N0} bytes");
 
-                SetProgress(0, "Parsing GGUF header + tensors...");
-                var loadProgress = new Progress<double>(p =>
-                    SetProgress(p, $"Loading tensors ({p * 100:F0}%)"));
-
+                SetProgress(0, "Reading TMV1 header + flat-vector...");
                 var sw = Stopwatch.StartNew();
-                _model = BitNetPaperGguf.Load(
-                    ggufPath,
-                    Microsoft.Extensions.Logging.Abstractions.NullLogger<BitNetPaperModel>.Instance,
-                    Microsoft.Extensions.Logging.Abstractions.NullLoggerFactory.Instance,
-                    VerbosityLevel.Quiet,
-                    progress: loadProgress);
+                var (header, flat) = TruckMateModelStore.Load(modelPath);
+                var ioMs = sw.Elapsed.TotalMilliseconds;
+                Append($"  header_io_ms={ioMs:F0} vocab={header.VocabSize} flat_floats={flat.Length:N0}");
+
+                SetProgress(0.4, "Building config...");
+                var cfg = new BitNetConfig(
+                    vocabSize: header.VocabSize,
+                    dimension: header.Dimension,
+                    hiddenDimension: header.HiddenDimension,
+                    layerCount: header.LayerCount,
+                    headCount: header.HeadCount,
+                    maxSequenceLength: header.MaxSequenceLength,
+                    kvHeadCount: header.KvHeadCount,
+                    kvCacheQuantization: pickedKv);
+
+                SetProgress(0.5, "Constructing transformer (skipRandomInit)...");
+                // skipRandomInit=true: BitLinear ctors allocate zero-filled
+                // ternary buffers; FlatParameterPack.Unpack overwrites all
+                // weights immediately after. No multi-GB random pass.
+                var ctorProgress = new Progress<double>(p =>
+                    SetProgress(0.5 + 0.3 * p, $"Constructing transformer ({p * 100:F0}%)"));
+                _model = new BitNetPaperModel(
+                    new BitNetOptions(header.Vocabulary, VerbosityLevel.Quiet, MaxResponseTokens: 32),
+                    NullLogger<BitNetPaperModel>.Instance,
+                    NullLoggerFactory.Instance,
+                    config: cfg,
+                    seed: 42,
+                    constructionProgress: ctorProgress,
+                    skipRandomInit: true);
+
+                SetProgress(0.85, "Unpacking weights...");
+                FlatParameterPack.Unpack(_model.Transformer, flat);
                 sw.Stop();
+
                 _modelKv = _model.Config.KvCacheQuantization;
                 Append($"Model loaded in {sw.Elapsed.TotalMilliseconds:F0} ms");
                 Append($"  KV={_modelKv} (requested={pickedKv})");
-                Append($"  vocab={_model.Config.VocabSize} dim={_model.Config.Dimension} layers={_model.Config.LayerCount} heads={_model.Config.HeadCount} kvHeads={_model.Config.KvHeadCount}");
+                Append($"  vocab={_model.Config.VocabSize} dim={_model.Config.Dimension} layers={_model.Config.LayerCount} heads={_model.Config.HeadCount} kvHeads={_model.Config.KvHeadCount} headDim={_model.Config.HeadDimension}");
                 Append($"  AdvSimd.IsSupported={System.Runtime.Intrinsics.Arm.AdvSimd.IsSupported} Vector<float>.IsHardwareAccelerated={System.Numerics.Vector.IsHardwareAccelerated}");
-                Append($"  Working set bytes: GC.GetTotalMemory={GC.GetTotalMemory(false):N0}");
+                Append($"  resident_bytes={_model.EstimateResidentParameterBytes():N0}");
+                Append($"  GC.GetTotalMemory={GC.GetTotalMemory(false):N0}");
                 Append("");
             }
             catch (Exception ex)
@@ -99,39 +125,35 @@ public partial class ChatPage : ContentPage
         SendBtn.IsEnabled = _model is not null;
     }
 
-    private const string GgufAssetName = "bonsai.bitnetsharp.gguf";
+    private const string ModelAssetName = "truckmate-small.tmv1";
 
     /// <summary>
-    /// Copies the MauiAsset gguf to the app's private files directory on
-    /// first launch. Uses a sentinel marker file ('.complete') instead of a
-    /// size check so we never read the asset stream twice or copy on every
-    /// load tap. 4 MiB CopyToAsync buffer matches phone NAND page sizes.
-    /// Subsequent launches: instant cache hit.
+    /// Copies the MauiAsset truckmate-small.tmv1 to the app's private files
+    /// directory on first launch. Tens of MiB, fast (one-shot, sentinel
+    /// guard). Subsequent launches are instant cache hits.
     /// </summary>
-    private async Task<string> EnsureGgufExtractedAsync()
+    private async Task<string> EnsureModelExtractedAsync()
     {
-        var dst = Path.Combine(FileSystem.AppDataDirectory, GgufAssetName);
+        var dst = Path.Combine(FileSystem.AppDataDirectory, ModelAssetName);
         var sentinel = dst + ".complete";
         if (File.Exists(sentinel) && File.Exists(dst))
         {
-            Append($"GGUF cache hit at {dst}");
-            SetProgress(0, "GGUF cached; preparing reader...");
+            Append($"TMV1 cache hit at {dst}");
+            SetProgress(0, "TMV1 cached; preparing reader...");
             return dst;
         }
 
-        Append($"Extracting {GgufAssetName} from APK to {dst}...");
+        Append($"Extracting {ModelAssetName} from APK to {dst}...");
         SetProgress(0, "Extracting from APK...");
         var sw = Stopwatch.StartNew();
 
-        // Buffered manual copy with byte-count progress reporting. Update UI
-        // every 16 MiB to avoid Dispatcher flooding.
         const int bufferSize = 1 << 22; // 4 MiB
-        const long reportEvery = 16L * 1024 * 1024;
+        const long reportEvery = 4L * 1024 * 1024;
         var buffer = new byte[bufferSize];
         long copied = 0;
         long lastReport = 0;
         long? totalBytes = null;
-        await using (var src = await FileSystem.OpenAppPackageFileAsync(GgufAssetName))
+        await using (var src = await FileSystem.OpenAppPackageFileAsync(ModelAssetName))
         {
             try { totalBytes = src.Length; } catch (NotSupportedException) { /* unknown */ }
 
@@ -164,31 +186,6 @@ public partial class ChatPage : ContentPage
         return dst;
     }
 
-    private static BitNetPaperModel BuildBootstrapInt8()
-    {
-        // Mirror BitNetPaperModel.CreateDefault but flip KvCacheQuantization=Int8.
-        // Default vocab pulled from BitNetBootstrap defaults (small word list).
-        var defaultModel = BitNetBootstrap.CreatePaperModel(VerbosityLevel.Quiet);
-        var srcConfig = defaultModel.Config;
-        var int8Config = new BitNetConfig(
-            vocabSize: srcConfig.VocabSize,
-            dimension: srcConfig.Dimension,
-            hiddenDimension: srcConfig.HiddenDimension,
-            layerCount: srcConfig.LayerCount,
-            headCount: srcConfig.HeadCount,
-            maxSequenceLength: srcConfig.MaxSequenceLength,
-            rmsNormEpsilon: srcConfig.RmsNormEpsilon,
-            kvHeadCount: srcConfig.KvHeadCount,
-            ropeTheta: srcConfig.RopeTheta,
-            kvCacheQuantization: KvCacheQuantization.Int8);
-        return new BitNetPaperModel(
-            defaultModel.Options,
-            NullLogger<BitNetPaperModel>.Instance,
-            NullLoggerFactory.Instance,
-            int8Config,
-            seed: 42);
-    }
-
     private async void OnSendClicked(object? sender, EventArgs e)
     {
         if (_model is null)
@@ -204,7 +201,7 @@ public partial class ChatPage : ContentPage
 
         if (!int.TryParse(MaxTokensEntry.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out var maxTokens) || maxTokens <= 0)
         {
-            maxTokens = 16;
+            maxTokens = 32;
         }
 
         SendBtn.IsEnabled = false;

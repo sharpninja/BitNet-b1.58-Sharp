@@ -2,14 +2,14 @@
 <ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
              xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
              x:Class="BitNetSharp.Benchmarks.Maui.ChatPage"
-             Title="Chat smoke test">
+             Title="TruckMate intent chat">
 
     <ScrollView>
         <VerticalStackLayout Padding="20" Spacing="14">
-            <Label Text="BitNetSharp chat smoke test"
+            <Label Text="TruckMate SLM intent classifier"
                    Style="{StaticResource Headline}" />
 
-            <Label Text="Loads bonsai.bitnetsharp.gguf embedded in the APK (MauiAsset). First launch copies the gguf to AppDataDirectory (~30-60 s); subsequent launches reuse the cached file. Streams responses with per-token forward_ms / select_ms / decode_ms."
+            <Label Text="Loads truckmate-small.tmv1 (~17 MiB, 4.4M params) embedded in the APK as MauiAsset. First launch extracts to AppDataDirectory (sub-second); subsequent launches reuse the cached file. Streams per-token forward_ms / select_ms / decode_ms while the model classifies a TruckMate utterance."
                    Style="{StaticResource SubHeadline}" />
 
             <HorizontalStackLayout Spacing="12">
@@ -22,7 +22,7 @@
                 </Picker>
                 <Label Text="Max tokens:" VerticalOptions="Center" />
                 <Entry x:Name="MaxTokensEntry"
-                       Text="16"
+                       Text="32"
                        Keyboard="Numeric"
                        WidthRequest="80" />
             </HorizontalStackLayout>
@@ -32,10 +32,10 @@
                     Clicked="OnLoadClicked" />
 
             <Entry x:Name="PromptEntry"
-                   Placeholder="Enter prompt..."
-                   Text="how are you hosted" />
+                   Placeholder="Enter TruckMate utterance..."
+                   Text="[USER] take me to the flying j in dallas [INTENT]" />
 
-            <Label Text="Try memorized prompts: 'how are you hosted', 'where do I deploy', 'what makes BitNet fast'. The bootstrap model has a 68-word vocabulary; ad-hoc prompts may produce empty output. Push Bonsai gguf to /sdcard for full chat (separate session)."
+            <Label Text="Sample prompts: '[USER] take me to the flying j in dallas [INTENT]', '[USER] check my hours [INTENT]', '[USER] avoid tolls [INTENT]', '[USER] what's my eta [INTENT]'. The model will continue the [INTENT] {...} JSON. Quality depends on training depth (smoke build = 100-1000 examples; production = 50K)."
                    FontSize="10"
                    FontAttributes="Italic" />
 

@@ -431,3 +431,14 @@ AGENTS-README-FIRST.yaml
 # Ad-hoc source archives (local zip-and-send)
 src.zip
 
+
+# Local worktrees and Claude artifacts
+.claude/worktrees/
+cache/
+exports/
+mcp-full-dump.json
+todo-bootstrap.marker
+
+# TruckMate trainer outputs (regenerable from seed=42)
+data/truckmate/corpus/
+tools/TruckMateTrainer/build/

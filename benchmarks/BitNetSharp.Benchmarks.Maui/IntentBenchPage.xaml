@@ -1,0 +1,62 @@
+<?xml version="1.0" encoding="utf-8" ?>
+<ContentPage xmlns="http://schemas.microsoft.com/dotnet/2021/maui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2009/xaml"
+             x:Class="BitNetSharp.Benchmarks.Maui.IntentBenchPage"
+             Title="Intent bench">
+
+    <ScrollView>
+        <VerticalStackLayout Padding="20" Spacing="14">
+            <Label Text="TruckMate intent benchmark"
+                   Style="{StaticResource Headline}" />
+
+            <Label Text="Loads truckmate-small.tmv1, then runs a fixed bank of TruckMate utterances through StreamGenerateAsync. Reports per-prompt TTFT + per-decode-token latency and an intent-substring accuracy score (does the model emit the expected intent name in the first N tokens). Designed to give a fast, repeatable phone-deployability number."
+                   Style="{StaticResource SubHeadline}" />
+
+            <HorizontalStackLayout Spacing="12">
+                <Label Text="KV:" VerticalOptions="Center" />
+                <Picker x:Name="KvPicker" WidthRequest="160" SelectedIndex="1">
+                    <Picker.Items>
+                        <x:String>Fp32</x:String>
+                        <x:String>Int8</x:String>
+                    </Picker.Items>
+                </Picker>
+                <Label Text="Tokens/prompt:" VerticalOptions="Center" />
+                <Entry x:Name="MaxTokensEntry"
+                       Text="24"
+                       Keyboard="Numeric"
+                       WidthRequest="80" />
+            </HorizontalStackLayout>
+
+            <Button x:Name="RunBtn"
+                    Text="Load + run intent bench"
+                    Clicked="OnRunClicked" />
+
+            <Label x:Name="StatusLabel"
+                   Text="Idle."
+                   FontAttributes="Italic" />
+
+            <ProgressBar x:Name="LoadProgress"
+                         Progress="0"
+                         IsVisible="False"
+                         HeightRequest="6" />
+
+            <Label x:Name="ProgressLabel"
+                   Text=""
+                   FontSize="11"
+                   FontAttributes="Italic" />
+
+            <Editor x:Name="OutputEditor"
+                    HeightRequest="600"
+                    IsReadOnly="True"
+                    FontFamily="Monospace"
+                    FontSize="11"
+                    AutoSize="Disabled"
+                    Text="" />
+
+            <Button x:Name="CopyBtn"
+                    Text="Copy results to clipboard"
+                    Clicked="OnCopyClicked" />
+        </VerticalStackLayout>
+    </ScrollView>
+
+</ContentPage>
